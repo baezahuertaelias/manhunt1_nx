@@ -10,6 +10,7 @@
 set -uo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 DEVKITA64_IMAGE="${DEVKITA64_IMAGE:-devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282}"
+CPUS="${CPUS:-$(nproc)}"; export CPUS
 declare -A result
 
 build_twice() {   # dir nro
@@ -17,7 +18,7 @@ build_twice() {   # dir nro
   for _ in 1 2; do
     docker run --rm --network none --user "$(id -u):$(id -g)" \
       --mount "type=bind,src=$root/$1,dst=/work" -w /work \
-      "$DEVKITA64_IMAGE" make clean all > /dev/null || return 1
+      --cpus "$CPUS" "$DEVKITA64_IMAGE" sh -c "make clean && make -j$CPUS all" > /dev/null || return 1
     hashes+=("$(sha256sum "$root/$1/$2" | cut -d' ' -f1)") || return 1
   done
   echo "  $2 ${hashes[0]}"

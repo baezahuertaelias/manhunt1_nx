@@ -20,6 +20,7 @@ setup_fail() { echo "emu-run: setup: $*" >&2; exit 3; }
 nro="$(realpath -e "$1")" || setup_fail "cannot resolve $1"
 marker="$2"; limit="${3:-120}"
 [[ "$limit" =~ ^[0-9]+$ ]] || setup_fail "timeout must be a number"
+CPUS="${CPUS:-$(nproc)}"   # all host cores by default (user decision 2026-10-26)
 IMAGE="${EDEN_IMAGE:-dd-eden:local}"
 IMAGE_ID="${EDEN_IMAGE_ID:-sha256:68d0f0847e3ff18f84eedb227b38b5e1a977c036dc202ee6b01debf72762fecb}"
 [ -n "$IMAGE_ID" ] || setup_fail "EDEN_IMAGE_ID must not be empty"
@@ -36,7 +37,7 @@ fi
 log="${EMU_LOG:-$(mktemp)}"
 keep_log="${EMU_LOG:+1}"
 
-docker run --rm --network none --cpus 3 --memory 6g --user "$(id -u):$(id -g)" "${gpu[@]}" \
+docker run --rm --network none --cpus "$CPUS" --memory 6g --user "$(id -u):$(id -g)" "${gpu[@]}" \
   -e HOME=/tmp/home -e SDL_VIDEO_DRIVER=x11 -e MARKER="$marker" -e LIMIT="$limit" \
   --mount "type=bind,src=$nro,dst=/nro/app.nro,readonly" --entrypoint sh "$IMAGE" -c '
 mkdir -p "$HOME/.config/eden" "$HOME/.local/share/eden" "$HOME/.cache"

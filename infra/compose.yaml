@@ -15,7 +15,7 @@ services:
       - ../${GAME_INPUT_DIR:-assets/manhunt1_xbe}:/input:ro
       - ../analysis/ghidra_scripts:/scripts:ro
       - ghidra-projects:/projects
-    cpus: 3
+    cpus: ${CPUS:-4}
     mem_limit: 6g
     security_opt: [no-new-privileges:true]
 
@@ -27,7 +27,7 @@ services:
       - ../tests/nro-proof:/work
     command: ["make", "clean", "all"]
     network_mode: none
-    cpus: 3
+    cpus: ${CPUS:-4}
     mem_limit: 4g
     security_opt: [no-new-privileges:true]
 
