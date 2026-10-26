@@ -1,0 +1,34 @@
+# Project-scoped services. Run from the repo root:
+#   docker compose -f infra/compose.yaml --env-file .env run --rm switch-build
+name: manhunt-nx
+
+services:
+  analysis:
+    image: manhunt-analysis:ghidra-xbe   # built by scripts/build-analysis-image.sh
+    user: "1000:1000"
+    environment:
+      JAVA_OPTS: "-Xmx4g -XX:+UseG1GC"
+    volumes:
+      - ../${GAME_INPUT_DIR:-assets/manhunt1_xbe}:/input:ro
+      - ../analysis:/scripts:ro
+      - ghidra-projects:/projects
+    ports:
+      - "127.0.0.1:8089:8089"            # GhidraMCP; localhost only
+    cpus: 3
+    mem_limit: 6g
+    security_opt: [no-new-privileges:true]
+
+  switch-build:
+    image: devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /work
+    volumes:
+      - ../tests/nro-proof:/work
+    command: ["make", "clean", "all"]
+    network_mode: none
+    cpus: 3
+    mem_limit: 4g
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  ghidra-projects:

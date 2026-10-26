@@ -1,0 +1,22 @@
+# Build log
+
+Provenance for every build and proof. Newest first.
+
+## 2026-10-26 — NRO proof source revised (not rebuilt)
+
+- Changes: newline escape fixed, `appletMainLoop` loop with + exit and 600-frame cap, NACP metadata, `-MMD -MP`, `-ffile-prefix-map`.
+- Command: `scripts/build-nro-proof.sh`
+- Image: `devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282`
+- Result: **UNVERIFIED** — not executed.
+
+## 2026-10-26 — NRO proof (original source)
+
+- Image: `devkitpro/devkita64:20260219` (same digest as above)
+- Output SHA-256: `6b477a31a5a038982cc954be2b54eb5f696a6a7aa68f3b842f0229353c01e917`
+- Result: build PASS; runtime UNVERIFIED. The source printed a literal `\n` and exited immediately.
+
+## 2026-10-26 — Analysis image
+
+- Base: `dd-ghidra-mcp:local` `sha256:fc4729a6…f6ad`; loader `build-202610161023`
+- Output: `manhunt-analysis:ghidra-xbe` `sha256:e513e945173e7a22469e0432add84699064d3c33f37aa03d104caca8ab988d68`
+- XBE: `af69e803…afde`; asset manifest: `reports/ASSET_MANIFEST.sha256`

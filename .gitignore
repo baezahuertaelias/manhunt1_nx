@@ -1,0 +1,32 @@
+# Proprietary user-supplied inputs (never commit)
+assets/
+*.xbe
+*.iso
+*.xiso
+*.keys
+*.dmp
+
+# Build outputs
+build/
+dist/
+artifacts/
+*.nro
+*.nsp
+*.nacp
+*.elf
+*.o
+*.d
+
+# Analysis state derived from proprietary inputs
+reports/raw/
+reports/ghidra*/
+*.gpr
+*.rep/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Local config and secrets
+.env
+.codex/*.local.*
+__pycache__/
