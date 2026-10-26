@@ -6,7 +6,8 @@
 | XBE header parse | `python3 -I analysis/xbe_header.py assets/manhunt1_xbe/DEFAULT.xbe` | PASS 2026-10-26 |
 | Compose config | `docker compose -f infra/compose.yaml config -q` | PASS 2026-10-26 |
 | NRO proof build | `scripts/build-nro-proof.sh` (run twice, compare hashes) | PASS 2026-10-26, `a340ad44…329d` both runs |
-| Analysis image build | `scripts/build-analysis-image.sh` | FAIL 2026-10-26 — base Ghidra 12.1.2, loader needs 12.1.4 |
+| Analysis image build | `scripts/build-analysis-image.sh` | PASS 2026-10-26, `sha256:fc761493…4178` |
+| Ghidra import + layout cross-check | `docker compose -f infra/compose.yaml run --rm analysis /tmp proof -import /input/DEFAULT.xbe -noanalysis -deleteProject -scriptPath /scripts -postScript DumpLayout.java`; compare with `reports/XBE_HEADER.md` | PASS 2026-10-26 (run with plain `docker run`, same mounts) |
 | NRO in emulator | none yet (EMU-RUNNER-001) | FAIL/UNVERIFIED |
 | Recompiled function | none yet (RECOMP-EVAL-001) | UNVERIFIED |
 | Hardware playability / 30 FPS | requires a physical Switch | UNVERIFIED |

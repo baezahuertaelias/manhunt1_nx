@@ -16,7 +16,7 @@ Expected `DEFAULT.xbe` SHA-256: `af69e803695e29c3f99b38d6a759fac4c9300c9a540a2c2
 ## Images
 
 ```sh
-scripts/build-analysis-image.sh   # checks base image ID, then builds manhunt-analysis:ghidra-xbe
+scripts/build-analysis-image.sh   # official Ghidra 12.1.4 + ghidra-xbe, hash-verified
 scripts/build-nro-proof.sh        # builds tests/nro-proof in the pinned devkitA64 image
 ```
 

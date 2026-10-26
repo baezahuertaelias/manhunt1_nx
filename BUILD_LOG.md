@@ -2,6 +2,15 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-26 — Analysis image on own Ghidra 12.1.4: PASS
+
+- Command: `scripts/build-analysis-image.sh`
+- Inputs: `eclipse-temurin:21-jdk-noble@sha256:10721595…e964`; `ghidra_12.1.4_PUBLIC_20260921.zip` (`ddac49f9…d4db`, OK); ghidra-xbe `build-202610161023` (`339b2f67…5152`, OK); version assertion 12.1.4/12.1.4 OK.
+- Output: `manhunt-analysis:ghidra-xbe` `sha256:fc761493cdf9751d24cf97a8d210b074eda4bfe8eef61838adf07ae1501b4178`
+- Import proof (`--network none`, 3 CPU / 6 GiB): loader `Xbox Executable Format (XBE)`, language `x86:LE:32:default:windows`, "Import succeeded".
+- Cross-check: `analysis/ghidra_scripts/DumpLayout.java` reports entry `001fe908`, image base `00010000` and 15 section blocks plus headers. The addresses, sizes and W/X flags match `reports/XBE_HEADER.md`.
+- Auto-analysis: not run (`-noanalysis`).
+
 ## 2026-10-26 — Analysis image rebuild: FAIL (version guard)
 
 - Command: `scripts/build-analysis-image.sh`

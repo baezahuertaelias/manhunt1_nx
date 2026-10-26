@@ -3,17 +3,18 @@
 name: manhunt-nx
 
 services:
+  # Entrypoint is analyzeHeadless; pass its arguments, e.g.
+  #   run --rm analysis /projects manhunt -import /input/DEFAULT.xbe -noanalysis \
+  #     -scriptPath /scripts -postScript DumpLayout.java
   analysis:
     image: manhunt-analysis:ghidra-xbe   # built by scripts/build-analysis-image.sh
     user: "1000:1000"
-    environment:
-      JAVA_OPTS: "-Xmx4g -XX:+UseG1GC"
+    hostname: localhost                  # avoids log4j host lookup errors
+    network_mode: none
     volumes:
       - ../${GAME_INPUT_DIR:-assets/manhunt1_xbe}:/input:ro
-      - ../analysis:/scripts:ro
+      - ../analysis/ghidra_scripts:/scripts:ro
       - ghidra-projects:/projects
-    ports:
-      - "127.0.0.1:8089:8089"            # GhidraMCP; localhost only
     cpus: 3
     mem_limit: 6g
     security_opt: [no-new-privileges:true]
