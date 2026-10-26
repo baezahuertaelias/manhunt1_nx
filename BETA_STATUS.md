@@ -11,7 +11,8 @@ No gameplay, emulator-runtime, or hardware acceptance criterion has passed. Avai
 | Gate | Status | Evidence |
 |---|---|---|
 | Switch toolchain build (devkitA64/libnx in Docker) | PASS (original proof source) | [PREFLIGHT](reports/PREFLIGHT.md) |
-| Revised NRO proof (newline fix, main loop, NACP) | UNVERIFIED — not rebuilt | [BUILD_LOG](BUILD_LOG.md) |
+| Revised NRO proof (newline fix, main loop, NACP) | PASS build, reproducible (`a340ad44…329d`) | [BUILD_LOG](BUILD_LOG.md) |
+| Analysis image (version-checked) | FAIL — Ghidra 12.1.2 base vs 12.1.4 loader | [BUILD_LOG](BUILD_LOG.md) |
 | NRO runtime in emulator | FAIL/UNVERIFIED — Eden runner failure | [PREFLIGHT](reports/PREFLIGHT.md) |
 | XBE header facts | PASS | [XBE_HEADER](reports/XBE_HEADER.md) |
 | Ghidra XBE import | PASS (import only) | [PREFLIGHT](reports/PREFLIGHT.md) |

@@ -13,4 +13,4 @@ Added `infra/analysis/Dockerfile` installing the hash-verified ghidra-xbe loader
 - `.env.example`: `GAME_INPUT_DIR` corrected to `assets/manhunt1_xbe`; `UID`/`GID` added.
 - `.gitignore`: removed stray `/Manhunt1_xbe/`; added `*.nacp`, `*.o`, `*.d`, `*.gpr`, `*.rep/`, `*.sqlite`.
 
-Validation pending: image rebuild and NRO rebuild are UNVERIFIED (container runs not executed in this session). Rollback: revert these files.
+Validation (rerun 2026-10-26): NRO rebuild PASS, reproducible. Analysis image rebuild FAIL on the new version assertion: the base is Ghidra 12.1.2, the loader is 12.1.4. The guard caught a real mismatch in the previously built image. Rollback: revert these files.

@@ -2,12 +2,22 @@
 
 Provenance for every build and proof. Newest first.
 
-## 2026-10-26 — NRO proof source revised (not rebuilt)
+## 2026-10-26 — Analysis image rebuild: FAIL (version guard)
+
+- Command: `scripts/build-analysis-image.sh`
+- Base ID check: PASS (`sha256:fc4729a6…f6ad`)
+- Ghidra version assertion: **FAIL**. The base has `application.version=12.1.2`; the loader zip and its `extension.properties` declare `12.1.4`.
+- The previously built image `sha256:e513e945…8d68` therefore runs a 12.1.4 extension on Ghidra 12.1.2. Its XBE import worked, but the pairing is unsupported.
+- No ghidra-xbe release targets 12.1.2 (releases: 12.1.4 ×3, 12.0.3).
+
+## 2026-10-26 — NRO proof (revised source)
 
 - Changes: newline escape fixed, `appletMainLoop` loop with + exit and 600-frame cap, NACP metadata, `-MMD -MP`, `-ffile-prefix-map`.
-- Command: `scripts/build-nro-proof.sh`
+- Command: `scripts/build-nro-proof.sh`, run twice
 - Image: `devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282`
-- Result: **UNVERIFIED** — not executed.
+- Output SHA-256 (both runs): `a340ad446d7a9376dd1bc68fac3db98ec7e47c92bcc44ae0fd66cd401def329d`
+- Result: build PASS, reproducible, no `-Wall` warnings. Runtime UNVERIFIED (no emulator runner).
+- Note: the earlier root-run build left a root-owned `build/`. It was removed with the same image running as root; builds now run as uid 1000.
 
 ## 2026-10-26 — NRO proof (original source)
 
