@@ -2,6 +2,8 @@
 
 Status: **NOT STARTED — UNVERIFIED**
 
+Current milestone: **1 — Toolchain proof** ([ROADMAP](docs/ROADMAP.md)). Next step: [NEXT_ACTION.md](NEXT_ACTION.md).
+
 Goal: first original Manhunt level playable from start to completion on native Switch hardware at stable 30 FPS.
 
 No gameplay, emulator-runtime, or hardware acceptance criterion has passed. Available: a user-supplied retail `DEFAULT.xbe` plus level/audio assets (gitignored; hashes in [reports/ASSET_MANIFEST.sha256](reports/ASSET_MANIFEST.sha256)), a Dockerized devkitA64 toolchain, and a Ghidra image with the XBE loader. Missing: a recompiler, a working Switch emulator runner, and a physical Switch.

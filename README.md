@@ -2,7 +2,17 @@
 
 Research toward a native Switch port of the original Xbox Manhunt via hybrid static recompilation. **No game code or assets are included or distributed**; users supply their own lawfully obtained copy.
 
-Status: preflight complete; milestone 1 (toolchain proof) in progress. See [BETA_STATUS.md](BETA_STATUS.md), [BLOCKERS.md](BLOCKERS.md) and [NEXT_ACTION.md](NEXT_ACTION.md).
+## Check status here
+
+| Question | File |
+|---|---|
+| What's the next step? | [NEXT_ACTION.md](NEXT_ACTION.md) |
+| Where are we? | [BETA_STATUS.md](BETA_STATUS.md) (current milestone + every gate with evidence) |
+| What's blocking? | [BLOCKERS.md](BLOCKERS.md) |
+| What else is queued? | [TASK_GRAPH.md](TASK_GRAPH.md) |
+| What was built? | [BUILD_LOG.md](BUILD_LOG.md) |
+
+[docs/ROADMAP.md](docs/ROADMAP.md) is the fixed plan, not a status page.
 
 ## Read first
 

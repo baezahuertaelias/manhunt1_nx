@@ -22,7 +22,7 @@ Track CPU and GPU frame times, memory pressure, shader stalls, texture upload co
 
 Schedule by the next **observable playable milestone**. Revise the order based on evidence.
 
-1. **Toolchain proof.** Deterministic Docker build; one representative x86 function recompiled and tested; minimal NRO built. *Current milestone.*
+1. **Toolchain proof.** Deterministic Docker build; one representative x86 function recompiled and tested; minimal NRO built.
 2. **Boot.** Initialize guest and runtime and reach the original menu (or verified equivalent menu behaviour).
 3. **First image.** Render the menu/UI and essential graphics correctly.
 4. **First-level load.** Parse required assets, display the environment, spawn the player.
