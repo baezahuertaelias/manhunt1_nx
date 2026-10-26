@@ -7,14 +7,18 @@ IMAGE="${RECOMPILER_IMAGE:-manhunt-recompiler:xboxrecomp-f0f8a46}"
 DEVKITA64_IMAGE="${DEVKITA64_IMAGE:-devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 xbe="${XBE:-$root/${GAME_INPUT_DIR:-assets/manhunt1_xbe}/DEFAULT.xbe}"
+# A missing bind source would make Docker create a root-owned directory there.
+[ -f "$xbe" ] || { echo "recomp-proof: XBE not found: $xbe" >&2; exit 3; }
 mkdir -p "$root/tests/recomp-proof/build"
 
 docker run --rm --network none --hostname localhost --cpus 3 --memory 8g \
   --user "$(id -u):$(id -g)" \
-  -v "$root:/repo" -v "$xbe:/xbe/default.xbe:ro" \
+  --mount "type=bind,src=$root,dst=/repo" \
+  --mount "type=bind,src=$(realpath -e "$xbe"),dst=/xbe/default.xbe,readonly" \
   "$IMAGE" bash /repo/tests/recomp-proof/run.sh
 
+# -B: always rebuild, so flag or header changes can never leave a stale NRO.
 docker run --rm --network none --cpus 3 --memory 4g --user "$(id -u):$(id -g)" \
-  -v "$root/tests/recomp-proof:/work" -w /work \
-  "$DEVKITA64_IMAGE" make -f Makefile.switch
+  --mount "type=bind,src=$root/tests/recomp-proof,dst=/work" -w /work \
+  "$DEVKITA64_IMAGE" make -B -f Makefile.switch
 sha256sum "$root/tests/recomp-proof/build/recomp-proof.nro"

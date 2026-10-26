@@ -15,7 +15,16 @@
 | Emulator with hardware GPU | `EMU_GPU=1 scripts/emu-run.sh …` | FAIL 2026-10-26: no Vulkan present queue under Xvfb (GPU-PROOF-001) |
 | Hardware playability / 30 FPS | requires a physical Switch | UNVERIFIED |
 
-`scripts/emu-run.sh` exit codes: 0 PASS, 1 FAIL (port failure), 2 no result (runner failure), 3 runner setup error. An NRO reports its result as `<MARKER> PASS|FAIL …` through `svcOutputDebugString`.
+`scripts/emu-run.sh` exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | PASS |
+| 1 | FAIL: the app reported failure (port failure) |
+| 2 | NO-RESULT: an emulator failure, or the app crashed or hung before reporting. Triage; it counts as neither pass nor port failure. |
+| 3 | runner setup error |
+
+An NRO reports its result as `<MARKER> PASS|FAIL …` through `svcOutputDebugString`; the marker is matched literally. Negative controls (mutated lifted code, truncated pointer offset, wrong shader colour) are manual one-off evidence in `reports/RECOMP_EVAL.md` (NEG-CONTROLS-001).
 
 Emulator FPS is diagnostic only and never counts as hardware FPS. Emulator runner failures are reported separately from port failures.
 

@@ -18,7 +18,7 @@ from unicorn import Uc, UC_ARCH_X86, UC_MODE_32, UC_PROT_ALL
 from unicorn.x86_const import (
     UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_ECX, UC_X86_REG_EDX,
     UC_X86_REG_ESI, UC_X86_REG_EDI, UC_X86_REG_EBP, UC_X86_REG_ESP,
-    UC_X86_REG_FPCW, UC_X86_REG_FPSW, UC_X86_REG_FP0,
+    UC_X86_REG_EIP, UC_X86_REG_FPCW, UC_X86_REG_FPSW, UC_X86_REG_FP0,
 )
 
 GUEST_MEM = 0x04000000          # 64 MiB, the retail Xbox RAM size
@@ -169,19 +169,33 @@ def run(uc, case):
     uc.emu_start(FNINIT_STUB, FNINIT_STUB + 2)
     uc.reg_write(UC_X86_REG_FPCW, case.cw)
     uc.emu_start(case.fn, RET_SENTINEL, count=100000)
+    eip = uc.reg_read(UC_X86_REG_EIP)
+    if eip != RET_SENTINEL:
+        raise RuntimeError(f"case fn={case.fn:08x}: stopped at {eip:08x}, not the return sentinel")
     regs = [uc.reg_read(r) for r in REGS]
     va, n = case.out
     mem = bytes(uc.mem_read(va, n)) if n else b""
     top = uc.reg_read(UC_X86_REG_FPSW) >> 11 & 7
     st0 = f80_to_f64_bits(*uc.reg_read(UC_X86_REG_FP0 + top)) if top else None
-    return regs, mem, top, st0
+    scratch = fnv1a64(b"".join(bytes(uc.mem_read(a, n)) for a, n in SCRATCH))
+    return regs, mem, top, st0, scratch
+
+
+def fnv1a64(data):
+    """FNV-1a 64 over the whole scratch state; harness.c computes the same."""
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
 
 
 def f80_to_f64_bits(mantissa, exp_sign):
     """80-bit x87 value -> IEEE double bits, round to nearest even."""
     sign = -1 if exp_sign & 0x8000 else 1
     e = exp_sign & 0x7FFF
-    if e == 0x7FFF:
+    if e == 0:
+        e = 1                              # 80-bit denormal: same scale as the smallest normal
+    elif e == 0x7FFF:
         if mantissa & 0x7FFFFFFFFFFFFFFF:
             # NaN: keep sign and top 51 payload bits, as the x87 -> double store does.
             return (0x8000000000000000 if sign < 0 else 0) | 0x7FF8000000000000 | ((mantissa >> 11) & 0x7FFFFFFFFFFFF)
@@ -196,11 +210,12 @@ def f80_to_f64_bits(mantissa, exp_sign):
     return struct.unpack("<Q", struct.pack("<d", f))[0]
 
 
-def fmt(i, case, regs, mem, top, st0):
+def fmt(i, case, regs, mem, top, st0, scratch):
     names = ("eax", "ecx", "edx", "ebx", "esi", "edi", "esp")
     r = " ".join(f"{k}={v:08x}" for k, v in zip(names, regs))
     s = f"{st0:016x}" if st0 is not None else "-"
-    return f"{i:04d} fn={case.fn:08x} cw={case.cw:04x} {case.label} {r} top={top} st0={s} mem={mem.hex()}"
+    return (f"{i:04d} fn={case.fn:08x} cw={case.cw:04x} {case.label} {r} top={top} st0={s} "
+            f"scr={scratch:016x} mem={mem.hex()}")
 
 
 def c_bytes(blob):

@@ -2,7 +2,14 @@
 
 Provenance for every build and proof. Newest first.
 
-## 2026-10-26 — Milestone 1 proof suite: PASS (hardware excluded)
+## 2026-10-26 — Milestone 1 suite after review fixes: PASS (hardware excluded)
+
+- Changes: `scr=` scratch hash, return-sentinel assertion, full per-case state reset, vacuous-pass guards, deko3d per-row geometry check, `make -B`, and missing-input refusal in the scripts.
+- `nro-proof.nro` `a340ad44…329d` (unchanged)
+- `recomp-proof.nro` `350e5c044e69d23b7db7b1536d4e4399f08aecb1fe8d9bb4d35dc7028e03890c`: Eden `PASS exact=407/423 gating_mismatches=0/360`
+- `deko3d-proof.nro` `8d8483073531bdca807576b5595f07b183c14bd402c234b0ad9c83d4991a7114`, built twice, identical: Eden `PASS … bad_rows=0`
+
+## 2026-10-26 — Milestone 1 proof suite: PASS (hardware excluded; superseded above)
 
 - Command: `scripts/toolchain-proof.sh` (40 s with the pipeline cache warm; a cold run adds ~4 min of disassembly plus ~76 s per lifted function).
 - XBE `af69e803…afde`; xboxrecomp `f0f8a461…`; recompiler image `sha256:a6de3090…7d63c`; devkitA64 `sha256:1fc388c3…0282`; Eden image `sha256:68d0f084…fecb`.

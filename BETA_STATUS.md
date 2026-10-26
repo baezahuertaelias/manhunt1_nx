@@ -13,7 +13,7 @@ Rerun all of them with `scripts/toolchain-proof.sh`. Details: [reports/RECOMP_EV
 | Gate | Status | Evidence |
 |---|---|---|
 | (a) original x86 functions recompiled with verified semantics | PASS: 5 functions, 360/360 gating cases exact on x86-64 Linux, AArch64 Linux and Horizon in Eden | RECOMP_EVAL §Gate (a)/(b) |
-| (b) 32-bit guest pointers on 64-bit AArch64 | PASS: arena above 4 GiB on all targets; a truncated offset faults | RECOMP_EVAL §Gate (a)/(b) |
+| (b) 32-bit guest pointers on 64-bit AArch64 | PASS within its scope: a 64 MiB arena above 4 GiB on all targets, and a truncated offset faults. High VAs, MMIO, bounds checks and stored pointers are not covered yet. | RECOMP_EVAL §Gate (a)/(b), §Limits |
 | (c) minimal NRO | PASS: reproducible, `a340ad44…329d` | [BUILD_LOG](BUILD_LOG.md) |
 | (d) deko3d rendering | PASS in Eden with **llvmpipe** (pixel readback, 50.000% coverage). Hardware GPU: UNVERIFIED | RECOMP_EVAL §Gate (d) |
 | (e) automated emulator test | PASS: `scripts/emu-run.sh`, Eden 1.0.0; negative controls detected | RECOMP_EVAL §Gate (e) |

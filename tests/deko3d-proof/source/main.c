@@ -141,10 +141,28 @@ static int renderAndVerify(char *msg, size_t size) {
         else other++;
     }
     double coverage = 100.0 * red / (W * H);
-    int pass = center == RED_RGBA && corner == CLEAR_RGBA && other == 0 && coverage > 49.5 && coverage < 50.5;
-    snprintf(msg, size, "DEKO3D-PROOF %s center=%08lx corner=%08lx red=%lu clear=%lu other=%lu coverage=%.3f%%",
+
+    // Geometry, not just totals: row y (0 = apex) must hold one contiguous,
+    // centred red span of about W*(y+0.5)/H pixels. Catches a readback in the
+    // wrong layout, which would keep the totals but scramble positions.
+    uint32_t badRows = 0;
+    for (uint32_t y = 0; y < H; y++) {
+        const uint32_t *row = px + y * W;
+        int first = -1, last = -1, count = 0;
+        for (int x = 0; x < W; x++)
+            if (row[x] == RED_RGBA) { if (first < 0) first = x; last = x; count++; }
+        double expect = (double)W * (y + 0.5) / H;
+        int contiguous = count == 0 || count == last - first + 1;
+        int sized = count >= expect - 2 && count <= expect + 2;
+        int centred = count == 0 || (first >= (W - expect) / 2 - 2 && first <= (W - expect) / 2 + 2);
+        if (!contiguous || !sized || !centred) badRows++;
+    }
+
+    int pass = center == RED_RGBA && corner == CLEAR_RGBA && other == 0 && badRows == 0 &&
+               coverage > 49.5 && coverage < 50.5;
+    snprintf(msg, size, "DEKO3D-PROOF %s center=%08lx corner=%08lx red=%lu clear=%lu other=%lu coverage=%.3f%% bad_rows=%lu",
              pass ? "PASS" : "FAIL", (unsigned long)center, (unsigned long)corner,
-             (unsigned long)red, (unsigned long)clear, (unsigned long)other, coverage);
+             (unsigned long)red, (unsigned long)clear, (unsigned long)other, coverage, (unsigned long)badRows);
 
     dkQueueDestroy(queue);
     dkCmdBufDestroy(cmdbuf);

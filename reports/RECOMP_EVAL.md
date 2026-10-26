@@ -45,8 +45,9 @@ Five functions, chosen to cover different risks:
 
 **Method.** 423 seeded cases:
 - **Reference:** the original bytes from DEFAULT.xbe, run in Unicorn 2.1.4 (x86-32) with the x87 unit reset (`fninit`) for every case. Unicorn honours precision control: 1/3 has 0, 11 and 40 trailing zero mantissa bits at the 64-, 53- and 24-bit settings.
-- **Harness:** the lifted C, with guest memory in a 64 MiB arena wherever the host maps it, the XBE sections loaded at their VAs, and every access going through `XBOX_PTR`.
-- **Comparison:** all general registers, ESP, x87 TOP, `st(0)` (as double) and output memory.
+- **Harness:** the lifted C, with guest memory in a 64 MiB arena wherever the host maps it, and every access going through `XBOX_PTR`. The Linux build loads the XBE sections at their VAs. The Switch build doesn't: these functions only touch the stack and the data scratch area, which the `scr=` hash confirms.
+- **Comparison:** all general registers, ESP, x87 TOP, `st(0)` (as double), the output window, and an FNV-1a hash (`scr=`) of the whole stack page plus data scratch area, which catches stray writes.
+- **Guards:** the reference asserts that each case returned to the sentinel. `compare.py` and the on-device check fail if any proof function has no gating cases.
 
 | Target | Arena (guest VA 0) | Gating cases | x87 at 64-bit PC (info) | NaN (info) |
 |---|---|---|---|---|
@@ -56,7 +57,7 @@ Five functions, chosen to cover different risks:
 
 The gating cases are all `num` cases, plus the `x87` cases at 53-bit and 24-bit precision control.
 
-**Negative controls**, all detected:
+**Negative controls**, all detected. These were run once by hand against the harness at commit `5df4297`; they are not part of `scripts/toolchain-proof.sh` (scripting them is NEG-CONTROLS-001):
 - Changing one `fsub` to an add in `sub_000E3640` fails on Linux (0/60 and 11/60 exact at the gating precisions) and in Eden (`FAIL … gating_mismatches=109/360`).
 - Truncating `g_xbox_mem_offset` to 32 bits makes the harness segfault (exit 139).
 - An NRO that never prints the marker returns runner exit 2, not a pass.
@@ -72,20 +73,34 @@ The gating cases are all `num` cases, plus the `x87` cases at 53-bit and 24-bit 
 `tests/deko3d-proof`:
 - **Render:** a solid red triangle over a blue clear into an offscreen 1280×720 RGBA8 target.
 - **Copy:** `DkBarrier_Full` + L2 invalidate, then `dkCmdBufCopyImageToBuffer` into an uncached buffer.
-- **Check:** exact pixels and coverage.
-- **Result in Eden:** `PASS center=ff0000ff corner=ffff0000 red=460800 clear=460800 other=0 coverage=50.000%`.
+- **Check:** exact pixels, coverage, and per-row geometry. Each row must hold one contiguous, centred red span of about W·(y+0.5)/H pixels, so a readback in the wrong layout fails.
+- **Result in Eden:** `PASS center=ff0000ff corner=ffff0000 red=460800 clear=460800 other=0 coverage=50.000% bad_rows=0`.
 - **Control:** a green shader fails with `red=0`.
 
 Eden rendered through **llvmpipe (software Vulkan)**. With `/dev/dri` passed in, Eden fails with "Device lacks a present queue" under Xvfb (GPU-PROOF-001). Real-hardware rendering is UNVERIFIED.
 
 ## Gate (e): emulator automation
 
-`scripts/emu-run.sh` runs an NRO in Eden headlessly and waits for `<marker> PASS|FAIL` on `svcOutputDebugString`. Exit codes: 0 PASS, 1 FAIL, 2 no result (runner failure), 3 setup error.
+`scripts/emu-run.sh` runs an NRO in Eden headlessly and waits for `<marker> PASS|FAIL` (matched literally) on `svcOutputDebugString`. Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | PASS |
+| 1 | FAIL: the app ran and reported failure (port failure) |
+| 2 | NO-RESULT: an emulator failure, or the app crashed or hung before reporting. Triage needed. |
+| 3 | setup error |
+
+Missing inputs are refused before Docker runs, because a missing bind source would otherwise make Docker create a root-owned directory.
 
 The Eden image `dd-eden:local` (`sha256:68d0f084…`) is a host-local build from another project, with patches, and is not reproducible from this repo. The script checks its image ID. Building our own Eden image is follow-up EMU-IMAGE-001.
 
 ## Limits
 
 - Five leaf functions with no calls, no indirect calls, no kernel imports, no SEH and no threads.
+- Gate (b) covers guest VAs inside one 64 MiB arena whose base is above 4 GiB. It does not cover:
+  - the high Xbox VAs (the `0x80000000` contiguous mirror, MMIO);
+  - bounds checking (`XBOX_PTR` has none);
+  - pointers stored and reloaded by guest code;
+  - 32-bit address wraparound.
 - No game-wide lift or link has been attempted.
 - Physical Switch: UNVERIFIED.

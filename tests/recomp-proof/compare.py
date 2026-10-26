@@ -60,7 +60,16 @@ def main(ref_path, out_path):
     for key, (r, o) in first_bad.items():
         diff = {k: (r[k], o.get(k)) for k in r if r[k] != o.get(k)}
         print(f"  first mismatch {key}: {diff}")
+    # Guard against a vacuous pass: every proof function needs gating cases.
+    gated = {fn for (fn, label, cw) in groups if label == "num" or (label == "x87" and cw != "037f")}
+    missing = EXPECTED_FUNCTIONS - gated
+    if missing:
+        print(f"  FAIL no gating cases for {sorted(missing)}")
+        status = 1
     return status
+
+
+EXPECTED_FUNCTIONS = {"0001a9c0", "00089cf0", "000e3640", "00205a00", "00205d90"}
 
 
 if __name__ == "__main__":

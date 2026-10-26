@@ -10,7 +10,8 @@
  * for compare.py. Switch build (__SWITCH__): compares on device against the
  * embedded reference.h and reports through the console and
  * svcOutputDebugString. The proof functions only touch the stack and the data
- * scratch area, so the Switch build does not load the XBE image.
+ * scratch area (checked by the scr= hash), so the Switch build does not load
+ * the XBE image.
  */
 #include "recomp_types.h"
 
@@ -83,12 +84,23 @@ static int run_case(int i, char *buf, size_t size) {
     g_esp = STACK_TOP;
     for (uint32_t j = 0; j < c->npush; j++) PUSH32(g_esp, c->push[j]);
     PUSH32(g_esp, RET_SENTINEL);
-    g_eax = 0xEAEAEAEAu; g_edx = 0xEDEDEDEDu;
+    g_eax = 0xEAEAEAEAu; g_edx = 0xEDEDEDEDu; g_ebp = 0xBEBEBEBEu;
     g_ecx = c->in_ecx; g_ebx = c->in_ebx; g_esi = c->in_esi; g_edi = c->in_edi;
+    g_eflags = 0; g_df = 0;
+    memset(g_fp_stack, 0, sizeof g_fp_stack);   /* as after fninit in reference.py */
     g_fp_control_word = c->cw;
     g_fp_top = 0;
 
     fn();
+
+    /* FNV-1a 64 over the stack page and the data scratch area, as in
+     * reference.py: catches stray writes outside the compared output. */
+    uint64_t scr = 0xCBF29CE484222325ull;
+    const uint8_t *regions[2] = {arena + STACK_TOP - 0x1000, arena + DATA};
+    const uint32_t sizes[2] = {0x1000, 0x2000};
+    for (int r = 0; r < 2; r++)
+        for (uint32_t j = 0; j < sizes[r]; j++)
+            scr = (scr ^ regions[r][j]) * 0x100000001B3ull;
 
     /* x87 TOP after the call; st(0) as double bits when the stack is not empty. */
     char st0[17] = "-";
@@ -98,8 +110,9 @@ static int run_case(int i, char *buf, size_t size) {
         snprintf(st0, sizeof st0, "%016llx", (unsigned long long)bits);
     }
     int n = snprintf(buf, size,
-        "%04d fn=%08x cw=%04x %s eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x esp=%08x top=%d st0=%s mem=",
-        i, c->fn, c->cw, c->label, g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi, g_esp, g_fp_top, st0);
+        "%04d fn=%08x cw=%04x %s eax=%08x ecx=%08x edx=%08x ebx=%08x esi=%08x edi=%08x esp=%08x top=%d st0=%s scr=%016llx mem=",
+        i, c->fn, c->cw, c->label, g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi, g_esp, g_fp_top, st0,
+        (unsigned long long)scr);
     for (uint32_t j = 0; j < c->out_len && (size_t)n + 3 < size; j++)
         n += snprintf(buf + n, size - (size_t)n, "%02x", MEM8(c->out_va + j));
     return 0;
@@ -144,8 +157,9 @@ int main(void) {
             if (gating(&cases[i])) { gate_total++; gate_bad += !ok; }
             if (!ok && gating(&cases[i])) report(line);
         }
+        /* No gating cases would make PASS vacuous. */
         snprintf(line, sizeof line, "RECOMP-PROOF %s exact=%d/%d gating_mismatches=%d/%d",
-                 gate_bad ? "FAIL" : "PASS", exact, CASE_COUNT, gate_bad, gate_total);
+                 (gate_bad || gate_total == 0) ? "FAIL" : "PASS", exact, CASE_COUNT, gate_bad, gate_total);
         report(line);
     }
     consoleUpdate(NULL);

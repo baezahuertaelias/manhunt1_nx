@@ -34,4 +34,7 @@ $(B)/sw_harness.o: harness.c $(B)/vectors.h $(B)/reference.h
 $(B)/sw_lifted.o: $(B)/lifted.c
 	$(CC) $(CFLAGS) -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable -c $< -o $@
 
-.PHONY: all
+clean:
+	@rm -f $(B)/sw_*.o $(TARGET).elf $(TARGET).nro $(TARGET).nacp
+
+.PHONY: all clean

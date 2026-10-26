@@ -33,6 +33,7 @@ The concrete design is undecided until the recompiler and platform proofs pass (
 ## Open questions
 
 - Which x87 control word Manhunt runs with (decides whether the 64-bit approximation matters).
+- Guest VAs outside the 64 MiB arena: the `0x80000000` contiguous mirror, MMIO (NV2A/APU), and whether `XBOX_PTR` needs bounds checks.
 - Indirect calls and vtables: a dispatch table keyed by guest address (xboxrecomp's `recomp_lookup`); not yet exercised.
 - Which statically linked XDK functions to intercept; this needs signature matching against XDK 5849 (XboxXBERecomp ships signatures).
 - Threads, SEH and kernel shims on Horizon; xboxrecomp's runtime targets Win32/POSIX.
