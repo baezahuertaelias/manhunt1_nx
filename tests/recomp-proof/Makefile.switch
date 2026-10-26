@@ -1,0 +1,40 @@
+# Switch (NRO) build of the gate (a)/(b) harness. Runs in the devkitA64 image
+# after run.sh has produced build/lifted.c, vectors.h, reference.h and copied
+# the xboxrecomp headers to build/include. Output stays in build/ (gitignored):
+# it contains code lifted from the game and must not be distributed.
+DEVKITPRO ?= /opt/devkitpro
+DEVKITA64 ?= $(DEVKITPRO)/devkitA64
+CC := $(DEVKITA64)/bin/aarch64-none-elf-gcc
+ELF2NRO := $(DEVKITPRO)/tools/bin/elf2nro
+NACPTOOL := $(DEVKITPRO)/tools/bin/nacptool
+B := build
+TARGET := $(B)/recomp-proof
+ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+# -ffp-contract=off: see run.sh.
+CFLAGS := -g -Wall -O2 -std=gnu11 -fno-strict-aliasing -ffp-contract=off -ffunction-sections $(ARCH) \
+	-D__SWITCH__ -I$(DEVKITPRO)/libnx/include -I$(B) -I$(B)/include/runtime -I$(B)/include/kernel \
+	-ffile-prefix-map=$(CURDIR)=.
+LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -L$(DEVKITPRO)/libnx/lib -Wl,--gc-sections
+
+all: $(TARGET).nro
+
+$(TARGET).nro: $(TARGET).elf $(TARGET).nacp
+	$(ELF2NRO) $< $@ --nacp=$(TARGET).nacp
+
+$(TARGET).nacp:
+	$(NACPTOOL) --create "Manhunt recomp proof" "Manhunt Recompilation Team" "0.0.1" $@
+
+$(TARGET).elf: $(B)/sw_harness.o $(B)/sw_lifted.o
+	$(CC) $(LDFLAGS) $^ -lnx -lm -o $@
+
+$(B)/sw_harness.o: harness.c $(B)/vectors.h $(B)/reference.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Generated code: unused labels/flag temporaries are expected.
+$(B)/sw_lifted.o: $(B)/lifted.c
+	$(CC) $(CFLAGS) -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable -c $< -o $@
+
+clean:
+	@rm -f $(B)/sw_*.o $(TARGET).elf $(TARGET).nro $(TARGET).nacp
+
+.PHONY: all clean

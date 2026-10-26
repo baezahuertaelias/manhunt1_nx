@@ -23,3 +23,11 @@ Validation (rerun 2026-10-26): NRO rebuild PASS, reproducible. Analysis image re
 - Validation: image `sha256:fc761493…4178` built; headless import of `DEFAULT.xbe` succeeded with the XBE loader. `DumpLayout.java` output matches `reports/XBE_HEADER.md` (entry, base, 15 blocks).
 - Lost: GhidraMCP. Re-add it as a separate layer only if an agent needs it.
 - Rollback: rebuild from the previous Dockerfile in Git history (commit `9a38897`).
+
+## 2026-10-26 — Recompiler image and emulator runner (milestone 1)
+
+- Added `infra/recompiler/Dockerfile`: pinned Python base, xboxrecomp at a fixed commit, capstone/unicorn/pytest pinned, host and AArch64 gcc, qemu-user.
+- Added `scripts/recomp-proof.sh`, `scripts/emu-run.sh` (Eden, checked by image ID) and `scripts/toolchain-proof.sh`.
+- Validation: `scripts/toolchain-proof.sh`: gates c, a/b (Linux and Eden) and d PASS. Negative controls are detected (reports/RECOMP_EVAL.md).
+- Known gaps: apt packages in the recompiler image are not version-pinned; the Eden image is not reproducible from this repo (EMU-IMAGE-001).
+- Rollback: delete `infra/recompiler/` and the three scripts.

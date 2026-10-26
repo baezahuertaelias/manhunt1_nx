@@ -8,9 +8,23 @@
 | NRO proof build | `scripts/build-nro-proof.sh` (run twice, compare hashes) | PASS 2026-10-26, `a340ad44…329d` both runs |
 | Analysis image build | `scripts/build-analysis-image.sh` | PASS 2026-10-26, `sha256:fc761493…4178` |
 | Ghidra import + layout cross-check | `docker compose -f infra/compose.yaml run --rm analysis /tmp proof -import /input/DEFAULT.xbe -noanalysis -deleteProject -scriptPath /scripts -postScript DumpLayout.java`; compare with `reports/XBE_HEADER.md` | PASS 2026-10-26 (run with plain `docker run`, same mounts) |
-| NRO in emulator | none yet (EMU-RUNNER-001) | FAIL/UNVERIFIED |
-| Recompiled function | none yet (RECOMP-EVAL-001) | UNVERIFIED |
+| **Milestone 1 suite** | `scripts/toolchain-proof.sh` (runs the four rows below) | PASS 2026-10-26 |
+| Recompiled functions vs x86 reference (Linux) | `scripts/recomp-proof.sh`; pass rule in `tests/recomp-proof/compare.py` | PASS 2026-10-26, 360/360 gating on x86-64 and AArch64 |
+| Recompiled functions on Horizon | `scripts/emu-run.sh tests/recomp-proof/build/recomp-proof.nro RECOMP-PROOF` | PASS 2026-10-26 (Eden, llvmpipe) |
+| deko3d rendering | build `tests/deko3d-proof`, then `scripts/emu-run.sh tests/deko3d-proof/deko3d-proof.nro DEKO3D-PROOF` | PASS 2026-10-26 (Eden, llvmpipe) |
+| Emulator with hardware GPU | `EMU_GPU=1 scripts/emu-run.sh …` | FAIL 2026-10-26: no Vulkan present queue under Xvfb (GPU-PROOF-001) |
 | Hardware playability / 30 FPS | requires a physical Switch | UNVERIFIED |
+
+`scripts/emu-run.sh` exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | PASS |
+| 1 | FAIL: the app reported failure (port failure) |
+| 2 | NO-RESULT: an emulator failure, or the app crashed or hung before reporting. Triage; it counts as neither pass nor port failure. |
+| 3 | runner setup error |
+
+An NRO reports its result as `<MARKER> PASS|FAIL …` through `svcOutputDebugString`; the marker is matched literally. Negative controls (mutated lifted code, truncated pointer offset, wrong shader colour) are manual one-off evidence in `reports/RECOMP_EVAL.md` (NEG-CONTROLS-001).
 
 Emulator FPS is diagnostic only and never counts as hardware FPS. Emulator runner failures are reported separately from port failures.
 

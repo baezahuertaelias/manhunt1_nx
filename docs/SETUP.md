@@ -18,7 +18,18 @@ Expected `DEFAULT.xbe` SHA-256: `af69e803695e29c3f99b38d6a759fac4c9300c9a540a2c2
 ```sh
 scripts/build-analysis-image.sh   # official Ghidra 12.1.4 + ghidra-xbe, hash-verified
 scripts/build-nro-proof.sh        # builds tests/nro-proof in the pinned devkitA64 image
+docker build -t manhunt-recompiler:xboxrecomp-f0f8a46 infra/recompiler   # lifter + reference tools
 ```
+
+The Eden runner uses the host-local image `dd-eden:local` (ID checked by `scripts/emu-run.sh`; see docs/CONFIGURATION.md).
+
+## Verify the toolchain (milestone 1)
+
+```sh
+scripts/toolchain-proof.sh        # gates a-e; prints PASS/FAIL per gate, hardware stays UNVERIFIED
+```
+
+The first run disassembles the XBE (about 4 minutes) and lifts the proof functions (about 76 s each). Both are cached under `tests/recomp-proof/build/`, which is gitignored and holds game-derived code and logs containing certificate keys.
 
 Services are also defined in `infra/compose.yaml` (`docker compose -f infra/compose.yaml config` validates it).
 
