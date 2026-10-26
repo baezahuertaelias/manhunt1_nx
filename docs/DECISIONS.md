@@ -14,6 +14,16 @@ Rejected: full Ghidra auto-analysis as a prerequisite. It stalled on decompiler 
 
 The local base had Ghidra 12.1.2, and no ghidra-xbe release targets it. Chosen: build from the official, hash-verified Ghidra 12.1.4 zip on a digest-pinned Temurin JDK 21, which makes the image reproducible from Git alone. Rejected: building the loader from source for 12.1.2 (an extra fork to maintain), and accepting the mismatch (unsupported, so errors could go unnoticed). Cost: GhidraMCP is no longer in the image.
 
+## 2026-10-26 — xboxrecomp lifter for the milestone-1 proofs
+
+Chosen: sp00nznet/xboxrecomp at `f0f8a46` (MIT). It emits portable C, its runtime already builds on arm64, and its guest-address macro works unchanged on Horizon. It is pinned in `infra/recompiler/`, and only the lifter and header templates are used: not the LGPL APU/NV2A files.
+
+Deferred, not rejected: TGP482/XboxXBERecomp. Its XDK 5849 signatures and LTCG handling match Manhunt and may serve XDK identification in milestone 2.
+
+Accepted, with measurements in RECOMP_EVAL: double-based x87 at 64-bit precision control, and unmodelled two-NaN selection. To revisit once the game's x87 control word is known.
+
+Accepted temporarily: the host-local `dd-eden:local` image as the emulator runner, checked by image ID, until EMU-IMAGE-001.
+
 ## 2026-10-26 — Retire the bootstrap prompt
 
 `MANHUNT_CODEX_MASTER_PROMPT.md` was a one-time bootstrap brief. Its lasting content now lives in the project docs:

@@ -23,12 +23,19 @@ The concrete design is undecided until the recompiler and platform proofs pass (
 - **Kernel:** 111 imports via the ordinal thunk table at `0x002a6360`.
 - **Host:** AArch64, Horizon via libnx; NRO homebrew.
 
+## Proven so far (milestone 1, [reports/RECOMP_EVAL.md](../reports/RECOMP_EVAL.md))
+
+- **Lifter:** xboxrecomp (`f0f8a46`) turns x86 into C with a global register file, a simulated guest stack and an 8-entry `double` x87 stack. The C compiles unchanged for AArch64 Linux and for Horizon with devkitA64.
+- **Guest address model:** one 64 MiB arena; host = `(uint32)guest_va + g_xbox_mem_offset`. It works with the arena above 4 GiB on x86-64, AArch64 Linux and Horizon (Eden).
+- **Floating point:** exact at x87 53-bit and 24-bit precision control. 64-bit precision control is approximated with doubles (last-ulp differences). x87 two-NaN selection is not modelled. Generated code must be built with `-ffp-contract=off`.
+- **Graphics:** deko3d 0.5.0 renders and reads back correctly in Eden (llvmpipe).
+
 ## Open questions
 
-- Guest address model: a reserved 32-bit arena at a fixed host base vs. per-access translation.
-- x87 vs. AArch64 float semantics (precision, rounding) for physics and AI.
-- Indirect calls and vtables: a dispatch table keyed by guest address.
-- Which statically linked XDK functions to intercept; this needs signature matching against XDK 5849.
+- Which x87 control word Manhunt runs with (decides whether the 64-bit approximation matters).
+- Indirect calls and vtables: a dispatch table keyed by guest address (xboxrecomp's `recomp_lookup`); not yet exercised.
+- Which statically linked XDK functions to intercept; this needs signature matching against XDK 5849 (XboxXBERecomp ships signatures).
+- Threads, SEH and kernel shims on Horizon; xboxrecomp's runtime targets Win32/POSIX.
 
 ## Function intelligence (planned)
 

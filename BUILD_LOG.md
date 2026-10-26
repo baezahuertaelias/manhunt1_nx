@@ -2,6 +2,16 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-26 — Milestone 1 proof suite: PASS (hardware excluded)
+
+- Command: `scripts/toolchain-proof.sh` (40 s with the pipeline cache warm; a cold run adds ~4 min of disassembly plus ~76 s per lifted function).
+- XBE `af69e803…afde`; xboxrecomp `f0f8a461…`; recompiler image `sha256:a6de3090…7d63c`; devkitA64 `sha256:1fc388c3…0282`; Eden image `sha256:68d0f084…fecb`.
+- `nro-proof.nro` `a340ad44…329d`, built twice, identical.
+- Recompiled functions: 360/360 gating cases exact on x86-64 Linux, AArch64 Linux (qemu) and Horizon in Eden (`RECOMP-PROOF PASS exact=407/423 gating_mismatches=0/360`).
+- `recomp-proof.nro` `5414274ac35b89cf809102107de24861b3359023abecebbb0a0a2984359d6ff1`. It contains lifted game code: local only, never distributed.
+- `deko3d-proof.nro` `045162be940562867546e572a27b8a447c97c60ab88defe50491014fa8d14ed3`, built twice, identical. Eden/llvmpipe: `DEKO3D-PROOF PASS … coverage=50.000%`.
+- Emulator renderer: llvmpipe (software). Hardware: UNVERIFIED.
+
 ## 2026-10-26 — Analysis image on own Ghidra 12.1.4: PASS
 
 - Command: `scripts/build-analysis-image.sh`
