@@ -10,7 +10,13 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | RECOMP-EVAL-001 | done | re | PREFLIGHT-001 | Candidate report; one function recompiled and executed with matching output |
 | EMU-RUNNER-001 | done | test | NRO-PROOF-002 | Eden loads an NRO headlessly; PASS/FAIL/runner-failure separated |
 | DEKO3D-PROOF-001 | done | runtime | EMU-RUNNER-001 | deko3d triangle verified by pixel readback |
-| FEASIBILITY-001 | ready | lead | RECOMP-EVAL-001 | `reports/FEASIBILITY.md`: boot path, kernel/XDK functions, lift-vs-replace, x87 control word, full-lift cost |
+| FEASIBILITY-001 | done | lead | RECOMP-EVAL-001 | `reports/FEASIBILITY.md`: boot path, lift, Horizon capabilities, bring-up evidence |
+| BOOT-HOST-001 | done | runtime | FEASIBILITY-001 | Recompiled game reaches the original main menu on the Linux host build |
+| BOOT-SWITCH-001 | done | runtime | BOOT-HOST-001 | Switch NRO reaches the main menu in Eden (`scripts/switch-boot-proof.sh`) |
+| RENDER-001 | ready | runtime | BOOT-SWITCH-001 | Frame-time breakdown + deko3d back-end plan (`reports/RENDER_PLAN.md`) |
+| AUDIO-HLE-001 | ready | runtime | BOOT-SWITCH-001 | Native DirectSound plays the front-end music on host and Switch |
+| INPUT-NAV-001 | ready | test | BOOT-SWITCH-001 | Scripted pad moves the main-menu selection on the Switch build |
+| HZ-PORT-002 | ready | runtime | BOOT-SWITCH-001 | Horizon memory backend and libc shims match POSIX semantics (review findings) |
 | CODEX-AGENTS-001 | ready | lead | — | Codex 0.164.0 config syntax and available models verified; `.codex/agents/*.toml` for the WORKFLOW roles, documented in CONFIGURATION.md |
 | NEG-CONTROLS-001 | ready | test | RECOMP-EVAL-001 | Negative controls scripted and expected to fail inside `scripts/toolchain-proof.sh` |
 | EMU-IMAGE-001 | ready | test | — | Eden/Ryujinx image built from pinned source in this repo passes `scripts/toolchain-proof.sh` |

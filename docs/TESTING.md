@@ -9,10 +9,13 @@
 | Analysis image build | `scripts/build-analysis-image.sh` | PASS 2026-10-26, `sha256:fc761493…4178` |
 | Ghidra import + layout cross-check | `docker compose -f infra/compose.yaml run --rm analysis /tmp proof -import /input/DEFAULT.xbe -noanalysis -deleteProject -scriptPath /scripts -postScript DumpLayout.java`; compare with `reports/XBE_HEADER.md` | PASS 2026-10-26 (run with plain `docker run`, same mounts) |
 | **Milestone 1 suite** | `scripts/toolchain-proof.sh` (runs the four rows below) | PASS 2026-10-26 |
-| Recompiled functions vs x86 reference (Linux) | `scripts/recomp-proof.sh`; pass rule in `tests/recomp-proof/compare.py` | PASS 2026-10-26, 360/360 gating on x86-64 and AArch64 |
+| Recompiled functions vs x86 reference (Linux) | `scripts/recomp-proof.sh`; pass rule in `tests/recomp-proof/compare.py` | PASS 2026-10-27, 6 functions, 405/405 gating on x86-64 and AArch64 |
 | Recompiled functions on Horizon | `scripts/emu-run.sh tests/recomp-proof/build/recomp-proof.nro RECOMP-PROOF` | PASS 2026-10-26 (Eden, llvmpipe) |
 | deko3d rendering | build `tests/deko3d-proof`, then `scripts/emu-run.sh tests/deko3d-proof/deko3d-proof.nro DEKO3D-PROOF` | PASS 2026-10-26 (Eden, llvmpipe) |
 | Emulator with hardware GPU | `EMU_GPU=1 scripts/emu-run.sh …` | FAIL 2026-10-26: no Vulkan present queue under Xvfb (GPU-PROOF-001) |
+| **Milestone 2: Switch boot to menu** | `scripts/switch-boot-proof.sh` (builds, copies data to the emulated SD, runs 240 s in Eden, checks markers/frames) | PASS 2026-10-27 (Eden, llvmpipe) |
+| Host boot to menu | `scripts/game-build.sh` then `scripts/game-run.sh 100` with the boot switches (CONFIGURATION.md) | PASS 2026-10-27 |
+| Horizon capability probe | build `tests/horizon-probe`, `scripts/emu-run.sh tests/horizon-probe/horizon-probe.nro HZ-PROBE` | 2026-10-27: exception=0 shmem_alias=0 codemem_alias=1 window=1 (measurement) |
 | Hardware playability / 30 FPS | requires a physical Switch | UNVERIFIED |
 
 `scripts/emu-run.sh` exit codes:
@@ -59,3 +62,12 @@ Emulator FPS is diagnostic only and never counts as hardware FPS. Emulator runne
   - enemy patrol, detection, chase and attack; stealth execution; combat
   - objectives, checkpoint and save if needed, level completion
 - On a regression: `git bisect` where the tests are deterministic enough, keep the reproducer artifacts, and open a blocker naming the responsible guest or native address.
+
+### Debugging the recompiled game (host)
+
+- `scripts/game-build.sh debug` builds the generated code at `-O0` (`game/build/host-O0`), so gdb reads exact guest registers.
+- `scripts/game-gdb.sh <cmd.gdb>` runs it under gdb in the container. `scripts/probe-calls.sh <sub_X>` prints guest `ebx`/`esp` at every call site of a function. `scripts/find-reg-leak.py <sub_X>` finds the callee that breaks a callee-saved register.
+- `scripts/guest-stack.py <log>` symbolizes a `[WATCHDOG]` guest stack (`RECOMP_WATCHDOG_SECS`).
+- `scripts/check-false-entries.py` flags detected function starts that fall inside an instruction.
+- `MANHUNT_MIRROR_TRAP=1` / `MANHUNT_TILED_TRAP=1` make the aliasing ranges inaccessible, to prove a code path does not use them.
+

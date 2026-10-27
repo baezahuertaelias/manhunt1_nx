@@ -1,0 +1,63 @@
+diff --git a/src/kernel/kernel_path.c b/src/kernel/kernel_path.c
+index 2f1edbb..f662eae 100644
+--- a/src/kernel/kernel_path.c
++++ b/src/kernel/kernel_path.c
+@@ -670,6 +670,49 @@ translate:
+ #include <sys/types.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <dirent.h>
++#include <strings.h>
++
++/* Xbox file names are case-insensitive, host file systems often are not:
++ * Manhunt opens D:\levels\global\Pak\... for a folder named pak. When the
++ * translated path does not exist, rebuild it component by component below
++ * `root`, taking the directory entry that matches case-insensitively. Names
++ * that match nothing (a file about to be created) are kept as written. */
++static void resolve_case_insensitive(char *path, size_t root_len)
++{
++    struct stat st;
++    char out[MAX_PATH];
++    size_t n;
++    char *seg, *save = NULL;
++    char rest[MAX_PATH];
++
++    if (stat(path, &st) == 0 || root_len >= strlen(path))
++        return;
++    snprintf(out, sizeof(out), "%.*s", (int)root_len, path);
++    snprintf(rest, sizeof(rest), "%s", path + root_len);
++    for (seg = strtok_r(rest, "/", &save); seg; seg = strtok_r(NULL, "/", &save)) {
++        char candidate[MAX_PATH];
++        n = strlen(out);
++        snprintf(candidate, sizeof(candidate), "%s/%s", out, seg);
++        if (stat(candidate, &st) != 0) {
++            DIR *d = opendir(out);
++            struct dirent *e;
++            if (d) {
++                while ((e = readdir(d)) != NULL) {
++                    if (strcasecmp(e->d_name, seg) == 0) {
++                        snprintf(candidate, sizeof(candidate), "%s/%s", out, e->d_name);
++                        break;
++                    }
++                }
++                closedir(d);
++            }
++        }
++        if (strlen(candidate) >= sizeof(out) || n >= sizeof(out))
++            return;
++        snprintf(out, sizeof(out), "%s", candidate);
++    }
++    snprintf(path, MAX_PATH, "%s", out);
++}
+ 
+ static char s_game_dir[MAX_PATH];
+ static char s_save_dir[MAX_PATH];
+@@ -884,6 +927,8 @@ translate:
+         } else {
+             snprintf(host_path_buf, buf_size, "%s/%s", base_dir, remainder_posix);
+         }
++        if (buf_size >= MAX_PATH)
++            resolve_case_insensitive(host_path_buf, strlen(base_dir) + (sub_dir ? strlen(sub_dir) : 0));
+ 
+         {
+             size_t n = strlen(host_path_buf);

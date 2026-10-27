@@ -19,7 +19,7 @@ Each agent works in its own Git branch or worktree, with explicit ownership of f
 1. **Discover:** inspect the actual code, Ghidra evidence, traces, interfaces, tests and milestone status. State the unknowns.
 2. **Plan:** critical path, dependency graph, integration boundaries, expected evidence, resource cost, risk. No exhaustive whole-game analysis before the first level boots.
 3. **Decompose:** small, independently testable tasks with ID, owner, files, prerequisites, acceptance, artifacts and rollback. Avoid broad shared-file edits. Split large tasks.
-4. **Schedule:** run independent tasks in parallel in isolated worktrees with defined API contracts. Never write shared generated artifacts, SQLite databases or config concurrently. Serialize CPU/GPU-heavy jobs on the 4-CPU host and reserve capacity for the orchestrator.
+4. **Schedule:** run independent tasks in parallel in isolated worktrees with defined API contracts. Never write shared generated artifacts, SQLite databases or config concurrently. Serialize CPU/GPU-heavy jobs on the 4-CPU host; each heavy job may use all cores (`CPUS`, default `nproc`; user decision 2026-10-26).
 5. **Integrate:** build, run focused tests, get independent review of critical changes, merge through PRs, run post-merge end-to-end tests.
 6. **Reassess:** update priorities and cancel obsolete tasks. Reanalysis is mandatory after repeated failed hypotheses.
 

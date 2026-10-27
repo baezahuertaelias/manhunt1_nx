@@ -32,6 +32,7 @@ CTOR = 0x00089CF0               # thiscall(this, const float *v, float s), ret 8
 PLANE = 0x000E3640              # returns dot(n, p) - d in st(0), cdecl
 STRLEN = 0x00205A00             # CRT strlen
 ALLMUL = 0x00205D90             # CRT _allmul (64-bit), ret 0x10
+AULLDIV = 0x00205040            # CRT _aulldiv (unsigned 64/64), ret 0x10; used by time()
 
 # x87 control words: FNINIT default (64-bit PC), 53-bit PC, 24-bit PC.
 CONTROL_WORDS = (0x037F, 0x027F, 0x007F)
@@ -125,6 +126,18 @@ def make_cases(rng):
     pairs += [(rng.getrandbits(32), rng.getrandbits(32)) for _ in range(10)]
     for a, b in pairs:
         c = Case(ALLMUL, "num")
+        c.pushes = [b >> 32, b & 0xFFFFFFFF, a >> 32, a & 0xFFFFFFFF]
+        cases.append(c)
+
+    # Unsigned 64/64 division: 32-bit divisors (time(): FILETIME / 10^7) and
+    # wide divisors (the shift path).
+    filetime = 0x01DD0000_00000000 + rng.getrandbits(48)
+    divs = [(filetime, 10_000_000), (filetime - 116444736000000000, 10_000_000),
+            (0xFFFFFFFFFFFFFFFF, 1), (0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF), (5, 7)]
+    divs += [(rng.getrandbits(64), rng.getrandbits(32) | 1) for _ in range(20)]
+    divs += [(rng.getrandbits(64), rng.getrandbits(64) | (1 << 32)) for _ in range(20)]
+    for a, b in divs:
+        c = Case(AULLDIV, "num")
         c.pushes = [b >> 32, b & 0xFFFFFFFF, a >> 32, a & 0xFFFFFFFF]
         cases.append(c)
     return cases

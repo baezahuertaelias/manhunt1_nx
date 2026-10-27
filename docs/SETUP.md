@@ -36,3 +36,22 @@ Services are also defined in `infra/compose.yaml` (`docker compose -f infra/comp
 ## Recovery
 
 All state that matters is in Git or under `reports/`. The Ghidra project lives in the `ghidra-projects` named volume (or `reports/ghidra*/`, gitignored) and can be regenerated from the XBE. Re-run the checks in [../reports/PREFLIGHT.md](../reports/PREFLIGHT.md) after any host change.
+
+## Build and run the game (milestone 2)
+
+```sh
+scripts/recomp-proof.sh            # once: also warms the analysis tooling
+scripts/game-build.sh              # host build: analysis, lift (about 5 min first time), compile
+scripts/game-build.sh switch       # Switch NRO: game/build/switch/manhunt.nro
+scripts/switch-boot-proof.sh       # copies data to the emulated SD, runs in Eden, PASS/FAIL
+```
+
+Host run: `RECOMP_PB_EXEC=1 RECOMP_PB_WALK=dma RECOMP_TITLE_KEVENTS=1 RECOMP_VBLANK=paced RECOMP_DISPATCH_GATE=1 RECOMP_FLIP_PACING=1 RECOMP_FB_WINDOW=1 RECOMP_FB_WINDOW_DUMP_EVERY=60 scripts/game-run.sh 100`. Frames land in `game/build/frames/`; convert them with `scripts/bmp2png.py`.
+
+**On a real Switch (UNVERIFIED):**
+1. Copy `manhunt.nro` to the SD card's `switch/` folder.
+2. Copy the game data folder to `sdmc:/manhunt/`.
+3. Launch it from the homebrew menu.
+
+`game/build/` holds game-derived code, binaries, frames and logs. It is gitignored: never commit or distribute it.
+

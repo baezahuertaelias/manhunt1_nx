@@ -1,0 +1,6 @@
+[
+  {"owner": "0x0028A480", "end": "0x0028A4BB", "remove": ["0x0028A49E"],
+   "why": "0x0028A49E is inside 'mov ecx,[esp+8]' at 0x0028A49C; its only 'caller' is padding decoded as a call at 0x0028A46D (XGRPH tail). Truncated owner left 12 bytes on the guest stack per call (D3D render-state setter, table index 0x178)."},
+  {"owner": "0x0028C200", "end": "0x0028C2C1", "remove": ["0x0028C2B2"],
+   "why": "0x0028C2B2 is inside 'add edi,0x1aa8' at 0x0028C2B0; owner decodes cleanly to 'ret' at 0x0028C2C0."}
+]

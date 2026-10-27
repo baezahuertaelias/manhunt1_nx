@@ -24,6 +24,21 @@ Accepted, with measurements in RECOMP_EVAL: double-based x87 at 64-bit precision
 
 Accepted temporarily: the host-local `dd-eden:local` image as the emulator runner, checked by image ID, until EMU-IMAGE-001.
 
+## 2026-10-27 — Milestone 2 design choices
+
+**Native input and "no audio driver" at the XDK API level.** On x86-64 POSIX the runtime's fault-trapped device models (USB, APU) don't run, and on Horizon nothing faults (`tests/horizon-probe`). So the title's statically linked XAPI XInput and DirectSound entry points are replaced by native functions (`game/manual_functions.json`; addresses from the XBE's `.XTLID` table and XDK 5849 export IDs).
+- **Rejected:** emulating the MCPX hardware. It's impossible on Horizon without fault trapping, and it's slower.
+- **Accepted temporarily:** DirectSound reports `DSERR_NODRIVER`, a path the game handles (silence until milestone 6).
+
+**Guest memory on Horizon = `base + VA`, no mirrors.** Measured on the host: the boot path never touches the 28 RAM mirrors or the tiled aperture. Horizon cannot alias RW memory, but it can place memory at chosen addresses in a reserved window (probe).
+- **Rejected for now:** software address masking in `XBOX_PTR` (a cost on every access, and not needed for boot). Re-check at level load.
+
+**Fix analysis errors in the database, not in the lifter's safety checks.** The two false function entries are removed by a reviewed fixes file (`scripts/fix-functions.py`), because the toolkit's `--coalesce-functions` rightly refuses entries with call evidence. The evidence here was padding decoded as a call.
+
+**Game data is copied onto the emulated SD card**, not bind-mounted: Eden opens SD files read/write, so a read-only mount fails, and a writable mount would let the emulator modify the user's original files. The copy is checked against the asset manifest on every proof run.
+
+**Upstreamable runtime fixes stay as patches** (`game/patches/xboxrecomp/`) on the pinned commit, so the toolkit can be re-pinned and the patches re-applied.
+
 ## 2026-10-26 — Retire the bootstrap prompt
 
 `MANHUNT_CODEX_MASTER_PROMPT.md` was a one-time bootstrap brief. Its lasting content now lives in the project docs:
