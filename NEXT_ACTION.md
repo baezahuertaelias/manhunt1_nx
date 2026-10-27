@@ -1,11 +1,3 @@
 # Next action
 
-**FEASIBILITY-001** (analysis for milestone 2, Boot): write `reports/FEASIBILITY.md` covering:
-
-- the path from the entry point `0x001fe908` to the first frame;
-- the kernel ordinals and XDK functions reached on that path;
-- whether to lift the statically linked D3D/DSOUND/XMV sections or replace them natively (try XboxXBERecomp's XDK 5849 signatures for identification);
-- the game's x87 control word;
-- the cost of a full lift and link for AArch64.
-
-Create milestone-2 implementation tasks only from that report.
+**RENDER-001** (analysis for milestone 3, First image): measure where frame time goes on the Switch build (pushbuffer walk vs CPU rasteriser vs guest code), and evaluate a deko3d back end for xboxrecomp's `nv2a_backend.h` interface, using the methods the menu actually issues (the executor's "unhandled methods" ranking). Write `reports/RENDER_PLAN.md`; create implementation tasks only from it. Exercise menu navigation with a scripted pad (`sdmc:/manhunt.env`, `MANHUNT_PAD_SCRIPT`) at the same time.

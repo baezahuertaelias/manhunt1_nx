@@ -23,7 +23,11 @@ typedef struct {
     int16_t lx, ly, rx, ry;
 } ManhuntPad;
 
-/* Fill *out with the current pad state. Host: MANHUNT_PAD_SCRIPT. */
+/* Fill *out with the current pad state. Host: MANHUNT_PAD_SCRIPT only;
+ * Switch: the script when configured, otherwise the real controller. */
 void manhunt_pad_sample(ManhuntPad *out);
+
+/* MANHUNT_PAD_SCRIPT player (pad_script.c): 1 if a script is configured. */
+int manhunt_pad_script(ManhuntPad *out);
 
 #endif

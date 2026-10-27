@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the recompiled Manhunt (POSIX host build) headlessly under Xvfb.
 # Usage: scripts/game-run.sh [seconds]   (default 90)
-# Any RECOMP_* / XBOX_* variables in the caller's environment are passed in.
+# Any RECOMP_* / XBOX_* / MANHUNT_* variables in the caller's environment are passed in.
 # Game data is mounted read-only; saves, logs and frame dumps go to game/build/.
 set -uo pipefail
 IMAGE="${RECOMPILER_IMAGE:-manhunt-recompiler:xboxrecomp-f0f8a46}"
@@ -17,7 +17,7 @@ log="$root/game/build/logs/run-$stamp.log"
 mkdir -p "$root/game/build/save" "$root/game/build/frames/$stamp"
 
 envs=()
-while IFS='=' read -r k _; do envs+=(-e "$k"); done < <(env | grep -E '^(RECOMP|XBOX)_')
+while IFS='=' read -r k _; do envs+=(-e "$k"); done < <(env | grep -E '^(RECOMP|XBOX|MANHUNT)_')
 
 docker run --rm --network none --hostname localhost --cpus "$CPUS" --memory 8g \
   --user "$(id -u):$(id -g)" -e HOME=/tmp -e SECS="$secs" \

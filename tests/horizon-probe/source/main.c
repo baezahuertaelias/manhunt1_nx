@@ -5,7 +5,9 @@
 //   1. resuming after a data abort with an edited context (POSIX: SIGSEGV
 //      handler emulating a trapped MMIO load), via __libnx_exception_handler;
 //   2. two read/write views of the same memory (POSIX: memfd mirrors of the
-//      64 MiB guest RAM), via shared memory mapped twice and via code memory.
+//      64 MiB guest RAM), via shared memory mapped twice and via code memory;
+//   3. RW memory at chosen addresses in a reserved 4 GiB window (the guest
+//      address space layout the Switch build needs).
 // Each test prints "HZ-PROBE <name> PASS|FAIL ..." through svcOutputDebugString;
 // the last line is "HZ-PROBE PASS|FAIL" for scripts/emu-run.sh.
 #include <stdio.h>
@@ -112,6 +114,49 @@ static int probe_codemem(char *msg, size_t n) {
     return ok;
 }
 
+// ---- 3. memory at chosen addresses inside a reserved 4 GiB guest window ----
+// The Switch build keeps XBOX_PTR = base + guest VA, so guest regions must be
+// backed at base + their Xbox address: RAM, the contiguous window and the
+// register apertures (the boot path needs no aliasing: FEASIBILITY.md).
+
+static int map_owner_at(void *dst, size_t size) {
+    void *src = aligned_alloc(0x1000, size);
+    Handle h;
+    if (!src) return -1;
+    if (R_FAILED(svcCreateCodeMemory(&h, src, size))) return -2;
+    if (R_FAILED(svcControlCodeMemory(h, CodeMapOperation_MapOwner, dst, size, Perm_Rw))) return -3;
+    return 0;
+}
+
+static int probe_window(char *msg, size_t n) {
+    static const struct { u32 va; u32 size; } regions[] = {
+        {0x00000000u, 64u << 20}, {0x80000000u, 64u << 20},
+        {0xFD000000u, 16u << 20}, {0xFE800000u, 8u << 20}, {0xFF000000u, 1u << 20},
+    };
+    u64 total = 0, used = 0;
+    svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+
+    virtmemLock();
+    u8 *base = virtmemFindAslr(0x100000000ull, 0x10000);
+    VirtmemReservation *rv = base ? virtmemAddReservation(base, 0x100000000ull) : NULL;
+    virtmemUnlock();
+    if (!rv) { snprintf(msg, n, "HZ-PROBE window FAIL no 4 GiB range"); return 0; }
+
+    int ok = 1;
+    for (size_t i = 0; i < sizeof regions / sizeof regions[0]; i++) {
+        int rc = map_owner_at(base + regions[i].va, regions[i].size);
+        if (rc) { ok = 0; snprintf(msg, n, "HZ-PROBE window FAIL map %08x rc=%d", regions[i].va, rc); return 0; }
+        volatile u32 *p = (volatile u32 *)(base + regions[i].va);
+        p[0] = 0xABCD0000u | (u32)i;
+        p[regions[i].size / 4 - 1] = ~p[0];
+        ok &= p[0] == (0xABCD0000u | (u32)i) && p[regions[i].size / 4 - 1] == ~p[0];
+    }
+    snprintf(msg, n, "HZ-PROBE window %s base=%p mem_total=%lluMiB used=%lluMiB",
+             ok ? "PASS" : "FAIL", (void *)base, (unsigned long long)(total >> 20), (unsigned long long)(used >> 20));
+    return ok;
+}
+
 int main(void) {
     consoleInit(NULL);
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -123,9 +168,10 @@ int main(void) {
     int ex = probe_exception(msg, sizeof msg);   report(msg);
     int sh = probe_shmem(msg, sizeof msg);       report(msg);
     int cm = probe_codemem(msg, sizeof msg);     report(msg);
+    int wn = probe_window(msg, sizeof msg);      report(msg);
     // The run "passes" when it completed and reported every probe; the
     // individual results are the measurement, and FAILs are findings.
-    snprintf(msg, sizeof msg, "HZ-PROBE PASS completed exception=%d shmem_alias=%d codemem_alias=%d", ex, sh, cm);
+    snprintf(msg, sizeof msg, "HZ-PROBE PASS completed exception=%d shmem_alias=%d codemem_alias=%d window=%d", ex, sh, cm, wn);
     report(msg);
     consoleUpdate(NULL);
 

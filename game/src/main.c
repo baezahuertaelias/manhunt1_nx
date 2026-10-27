@@ -19,6 +19,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 #include <execinfo.h>
+#include <sys/mman.h>
 
 #include <xbox/xboxrecomp.h>
 
@@ -137,6 +138,23 @@ int main(int argc, char **argv)
     }
     g_xbox_mem_offset = xbox_GetMemoryOffset();
     printf("[MH-BOOT] memory offset=0x%llx\n", (unsigned long long)g_xbox_mem_offset);
+
+    /* Debug: make the 64 MiB RAM mirrors (guest 0x04000000-0x74000000)
+     * inaccessible, so any read or write through a mirror faults with its
+     * guest address. Horizon has no RW aliasing (tests/horizon-probe), so this
+     * measures whether the Switch build needs software address wrapping. */
+    if (getenv("MANHUNT_MIRROR_TRAP")) {
+        uintptr_t lo = (uintptr_t)g_xbox_mem_offset + 0x04000000u;
+        size_t len = 0x70000000u;
+        int rc = mprotect((void *)lo, len, PROT_NONE);
+        printf("[MH-BOOT] mirror trap %s (guest 0x04000000-0x74000000)\n", rc == 0 ? "on" : "FAILED");
+    }
+    /* Same for the tiled aperture (guest 0xF0000000, 64 MiB), which the
+     * runtime maps as an alias of the contiguous window. */
+    if (getenv("MANHUNT_TILED_TRAP")) {
+        int rc = mprotect((void *)((uintptr_t)g_xbox_mem_offset + 0xF0000000u), 0x04000000u, PROT_NONE);
+        printf("[MH-BOOT] tiled-aperture trap %s (guest 0xF0000000-0xF4000000)\n", rc == 0 ? "on" : "FAILED");
+    }
 
     /* The OHCI model (pads through XAPI) is the title's to start; nothing in
      * the runtime calls it. It stays off unless RECOMP_USB is set. */

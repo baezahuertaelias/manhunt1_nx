@@ -98,12 +98,15 @@ static void load_script(void)
         printf("[MH-INPUT] pad script: %d step(s)\n", s_count);
 }
 
-void manhunt_pad_sample(ManhuntPad *out)
+/* Returns 1 and fills *out when a script is configured, else 0. */
+int manhunt_pad_script(ManhuntPad *out)
 {
     unsigned long t;
     memset(out, 0, sizeof *out);
     if (s_count < 0)
         load_script();
+    if (s_count == 0)
+        return 0;
     t = now_ms() - s_t0;
     for (int i = 0; i < s_count; i++) {
         Step *st = &s_steps[i];
@@ -118,4 +121,13 @@ void manhunt_pad_sample(ManhuntPad *out)
             printf("[MH-INPUT] press %s at %lu ms\n", st->text, t);
         }
     }
+    return 1;
 }
+
+#if !defined(MANHUNT_HORIZON)
+/* Host: the script is the only pad. */
+void manhunt_pad_sample(ManhuntPad *out)
+{
+    manhunt_pad_script(out);
+}
+#endif

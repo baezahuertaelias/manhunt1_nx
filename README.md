@@ -31,12 +31,11 @@ Directories that don't exist yet are created as needed.
 | `analysis/` | Ghidra scripts and XBE tooling |
 | `scripts/` | Build, manifest, smoke-test and trace-comparison scripts |
 | `infra/` | Dockerfiles and Compose |
-| `tests/` | Proofs, host tests, replays, expected checkpoints |
+| `game/` | The Manhunt project: native replacements, Switch entry point, toolkit patches, function fixes |
+| `tests/` | Proofs (NRO, recompiler, deko3d, Horizon probe), host tests |
 | `reports/` | Preflight, evidence and benchmark artifacts |
 | `tasks/`, `TASK_GRAPH.md` | Task ledger |
 | `.codex/agents/` | Verified Codex agent configs (planned) |
-| `src/`, `include/` | Native runtime, platform adapters, overrides, ABI and memory interfaces (planned) |
-| `recomp/` | Generated recompilation output (planned) |
 | `shaders/` | Shader sources (planned) |
 | `emulators/` | Emulator harnesses, patches, adapters (planned) |
 | `assets/` | Local gitignored game inputs; never committed |

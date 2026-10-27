@@ -2,6 +2,15 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-27 — Milestone 2: Switch boot to main menu (Eden): PASS
+
+- Command: `scripts/switch-boot-proof.sh` (240 s)
+- XBE `af69e803…afde`; xboxrecomp `f0f8a46` + patches 0001–0003; recompiler image `sha256:fc226cc9…63`; devkitA64 `sha256:1fc388c3…0282`; Eden `sha256:68d0f084…fecb` (llvmpipe)
+- Lift: 14,820 functions (14,815 generated + 5 hand-written), 60 files, about 1.58 M lines; 2 function-boundary fixes
+- `manhunt.nro` `0cf5e8ff7f810c20a84123c3e61648ddd11d87693ca80499ede13664fb937a3f` (21.6 MB). Contains lifted game code: local only, never distributed.
+- Result: `MH-BOOT-PROOF PASS`: entry reached, intro movie, `MAIN_EX.TXD` + `FE_M.RIB` loaded, 32 presents, 11 frame dumps (10 non-black, all distinct), no crash/exit. Last frame visually confirmed as the main menu.
+- Hardware: UNVERIFIED.
+
 ## 2026-10-26 — Milestone 1 suite after review fixes: PASS (hardware excluded)
 
 - Changes: `scr=` scratch hash, return-sentinel assertion, full per-case state reset, vacuous-pass guards, deko3d per-row geometry check, `make -B`, and missing-input refusal in the scripts.

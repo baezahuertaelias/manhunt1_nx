@@ -31,3 +31,18 @@ Validation (rerun 2026-10-26): NRO rebuild PASS, reproducible. Analysis image re
 - Validation: `scripts/toolchain-proof.sh`: gates c, a/b (Linux and Eden) and d PASS. Negative controls are detected (reports/RECOMP_EVAL.md).
 - Known gaps: apt packages in the recompiler image are not version-pinned; the Eden image is not reproducible from this repo (EMU-IMAGE-001).
 - Rollback: delete `infra/recompiler/` and the three scripts.
+
+## 2026-10-26 — All host cores
+
+`CPUS` (default `nproc`) for every container and parallel build (user decision). Heavy jobs stay serialized. Validation: milestone-1 suite, identical NRO hashes. Rollback: set `CPUS=3`.
+
+## 2026-10-27 — Milestone 2 build and runtime configuration
+
+- Recompiler image: game build/run dependencies (rebuilt, `sha256:fc226cc9…`).
+- Game analysis without `--text-only`; `game/function_fixes.json`; `game/manual_functions.json`.
+- xboxrecomp patches 0001 (case-insensitive paths), 0002 (pseudo-handle close), 0003 (Horizon port: memory, directory handles, libc gaps, thread placement, zeroed views).
+- Runtime switches for boot (see CONFIGURATION.md) on host and Switch.
+- Switch SD layout and `sdmc:/manhunt.env`; `scripts/emu-run.sh` gains `EMU_DATA`, `EMU_SDMC_GAME` and the `-` marker.
+- Validation: `scripts/switch-boot-proof.sh` PASS (Eden); host boot to menu; milestone-1 suite re-run (see BUILD_LOG).
+- Rollback: revert the milestone-2 merge; the milestone-1 tooling does not depend on any of it.
+

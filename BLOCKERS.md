@@ -1,11 +1,12 @@
 # Blockers
 
-Ranked. Evidence: [reports/PREFLIGHT.md](reports/PREFLIGHT.md), [reports/RECOMP_EVAL.md](reports/RECOMP_EVAL.md).
+Ranked. Evidence: [reports/FEASIBILITY.md](reports/FEASIBILITY.md), [reports/RECOMP_EVAL.md](reports/RECOMP_EVAL.md), [reports/PREFLIGHT.md](reports/PREFLIGHT.md).
 
-1. **P0 — No whole-program boot path.** Only five leaf functions are proven. A boot needs a full lift and link, the kernel import shims (111 ordinals), indirect-call dispatch, threads and SEH on Horizon. Plan it in FEASIBILITY-001.
-2. **P1 — Game's x87 control word unknown.** At 64-bit precision control the lifter's doubles differ from x87 in the last ulp (15/60 cases). Find the control word Manhunt actually runs with before relying on physics or AI numerics.
-3. **P1 — Eden runner not reproducible.** It uses the host-local `dd-eden:local` image from another project, checked by image ID (EMU-IMAGE-001).
-4. **P1 — Hardware GPU in containers.** Eden with `/dev/dri` under Xvfb fails with "Device lacks a present queue"; every emulator run so far used llvmpipe (GPU-PROOF-001).
-5. **P1 — No Git remote.** `gh` is authenticated (`repo` scope); creating a private remote needs user approval.
-6. **P2 — Ghidra auto-analysis incomplete.** Import passes on the 12.1.4 image; full analysis has not been rerun since the old mismatched image stalled.
-7. **P2 — No physical Switch.** All hardware gates stay `UNVERIFIED`.
+1. **P0 — No GPU back end.** Frames come from xboxrecomp's CPU rasteriser (pushbuffer executor) at about 0.1–0.5 fps in Eden. Milestone 3+ needs a deko3d back end behind `nv2a_backend.h`.
+2. **P1 — Audio not implemented.** DirectSound reports "no driver" (`game/src/dsound_hle.c`); a native DirectSound at API level is required (milestone 6).
+3. **P1 — Game's x87 control word unknown.** 64-bit precision control is approximated with doubles (last-ulp differences).
+4. **P1 — Eden runner not reproducible** from this repo (`dd-eden:local`, checked by image ID) (EMU-IMAGE-001).
+5. **P1 — Hardware GPU in containers.** Eden + `/dev/dri` under Xvfb fails ("Device lacks a present queue"); every emulator run used llvmpipe (GPU-PROOF-001).
+6. **P1 — No Git remote.** Creating a private remote needs user approval.
+7. **P2 — RAM mirrors unsupported on Horizon.** Not used on the boot path (measured); re-check at level load.
+8. **P2 — No physical Switch.** All hardware gates stay `UNVERIFIED`.

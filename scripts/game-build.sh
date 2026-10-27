@@ -14,7 +14,8 @@ xbe="${XBE:-$root/${GAME_INPUT_DIR:-assets/manhunt1_xbe}/DEFAULT.xbe}"
 [ -f "$xbe" ] || { echo "game-build: XBE not found: $xbe" >&2; exit 3; }
 mkdir -p "$root/game/build/logs"
 variant="${1:-release}"
-case "$variant" in release) bdir=host; gopt=-O1 ;; debug) bdir=host-O0; gopt=-O0 ;; *) echo "usage: $0 [release|debug]" >&2; exit 3 ;; esac
+case "$variant" in release) bdir=host; gopt=-O1 ;; debug) bdir=host-O0; gopt=-O0 ;; switch) bdir=prep; gopt=-O1 ;; *) echo "usage: $0 [release|debug|switch]" >&2; exit 3 ;; esac
+DEVKITA64_IMAGE="${DEVKITA64_IMAGE:-devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282}"
 
 docker run --rm --network none --hostname localhost --cpus "$CPUS" --memory 12g \
   --user "$(id -u):$(id -g)" -e CPUS="$CPUS" -e BDIR="$bdir" -e GOPT="$gopt" \
@@ -54,7 +55,19 @@ rm -rf "$G/xboxrecomp" && cp -r /opt/xboxrecomp "$G/xboxrecomp"
 for p in /repo/game/patches/xboxrecomp/*.patch; do
   git -C "$G/xboxrecomp" apply "$p" && echo "applied $(basename "$p")"
 done
+[ "$BDIR" = prep ] && exit 0
 cmake -S /repo/game -B "$G/$BDIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMANHUNT_GEN_OPT="$GOPT" > "$G/logs/cmake-$BDIR.log"
 if ! cmake --build "$G/$BDIR" -j "$CPUS" > "$G/logs/build-$BDIR.log" 2>&1; then tail -40 "$G/logs/build-$BDIR.log"; exit 1; fi
 ls -la "$G/$BDIR/manhunt"
 '
+
+# Switch: compile the same lifted code and the runtime subset with devkitA64.
+if [ "$variant" = switch ]; then
+  docker run --rm --network none --cpus "$CPUS" --memory 12g --user "$(id -u):$(id -g)" \
+    --mount "type=bind,src=$root,dst=/repo" -w /repo/game "$DEVKITA64_IMAGE" bash -c '
+set -euo pipefail
+cmake -S . -B build/switch -G "Unix Makefiles" -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake \
+  -DCMAKE_BUILD_TYPE=Release > build/logs/cmake-switch.log
+if ! make -C build/switch -k -j'"$CPUS"' > build/logs/build-switch.log 2>&1; then tail -60 build/logs/build-switch.log; exit 1; fi
+ls -la build/switch/manhunt.nro'
+fi
