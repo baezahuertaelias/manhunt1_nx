@@ -54,6 +54,7 @@ void sub_00089CF0(void);
 void sub_000E3640(void);
 void sub_00205A00(void);
 void sub_00205D90(void);
+void sub_00205040(void);
 
 static const struct { uint32_t va; void (*fn)(void); } lifted[] = {
     {0x0001A9C0u, sub_0001A9C0},
@@ -61,6 +62,7 @@ static const struct { uint32_t va; void (*fn)(void); } lifted[] = {
     {0x000E3640u, sub_000E3640},
     {0x00205A00u, sub_00205A00},
     {0x00205D90u, sub_00205D90},
+    {0x00205040u, sub_00205040},
 };
 
 static uint8_t *arena;

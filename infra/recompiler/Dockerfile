@@ -12,6 +12,16 @@ RUN apt-get update \
        gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user \
     && rm -rf /var/lib/apt/lists/*
 
+# Milestone 2: build and run the full game against the xboxrecomp POSIX
+# runtime (its tools/linux/install_deps.sh list), headless under Xvfb/llvmpipe.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       cmake ninja-build build-essential pkg-config gdb \
+       libsdl2-dev libgl1-mesa-dev libepoxy-dev libssl-dev \
+       libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+       xvfb xauth libgl1-mesa-dri mesa-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir capstone==5.0.9 unicorn==2.1.4 pytest==9.1.1
 
 # The commit SHA pins the content; a mismatch fails the checkout.

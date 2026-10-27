@@ -1,0 +1,31 @@
+diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
+index 62d0a18..1268a19 100644
+--- a/src/platform/win32_compat.c
++++ b/src/platform/win32_compat.c
+@@ -368,15 +368,26 @@ HANDLE w32_open_handle(int fd, const char *host_path)
+     return (HANDLE)o;
+ }
+ 
++/* Pseudo-handles are not objects. CloseHandle already skips them, but
++ * xbox_NtClose asks for the fd first: a guest closing the current-thread
++ * pseudo-handle ((HANDLE)-2) dereferenced it here (Manhunt, XMV intro). */
++static int w32_is_pseudo(HANDLE h)
++{
++    return h == PSEUDO_CURRENT_THREAD || h == PSEUDO_CURRENT_PROCESS ||
++           h == INVALID_HANDLE_VALUE;
++}
++
+ int w32_handle_fd(HANDLE h)
+ {
+     w32_object *o = (w32_object *)h;
++    if (w32_is_pseudo(h)) return -1;
+     return (o && o->kind == K_FILE) ? o->fd : -1;
+ }
+ 
+ const char *w32_handle_path(HANDLE h)
+ {
+     w32_object *o = (w32_object *)h;
++    if (w32_is_pseudo(h)) return NULL;
+     return (o && o->kind == K_FILE) ? o->file_path : NULL;
+ }
+ 

@@ -69,7 +69,7 @@ def main(ref_path, out_path):
     return status
 
 
-EXPECTED_FUNCTIONS = {"0001a9c0", "00089cf0", "000e3640", "00205a00", "00205d90"}
+EXPECTED_FUNCTIONS = {"0001a9c0", "00089cf0", "000e3640", "00205a00", "00205d90", "00205040"}
 
 
 if __name__ == "__main__":

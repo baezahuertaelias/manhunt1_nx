@@ -6,7 +6,7 @@ set -euo pipefail
 cd /opt/xboxrecomp
 B=/repo/tests/recomp-proof/build
 P=$B/pipeline
-FUNCS="0x0001A9C0 0x00089CF0 0x000E3640 0x00205A00 0x00205D90"
+FUNCS="0x0001A9C0 0x00089CF0 0x000E3640 0x00205A00 0x00205D90 0x00205040"
 mkdir -p "$P/logs"
 
 # Pipeline outputs are cached per XBE hash. Logs may print certificate keys:
