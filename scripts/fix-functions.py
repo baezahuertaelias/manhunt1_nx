@@ -21,6 +21,13 @@ for fix in json.load(open(fixes_path)):
         if va not in by or not owner < va < end:
             sys.exit(f"fix-functions: {r} is not a detected start inside {fix['owner']}..{fix['end']}")
         del by[va]
+    removed_starts = [int(r, 16) for r in fix["remove"]]
+    old_end = int(by[owner]["end"], 16)
+    # The owner must be truncated at (or just past) a removed false entry and
+    # within the new end; otherwise the analysis changed: re-review the fix.
+    if not (min(removed_starts) <= old_end <= end):
+        sys.exit(f"fix-functions: owner {fix['owner']} ends at {old_end:#x}, expected a truncation in "
+                 f"[{min(removed_starts):#x}, {end:#x}]: analysis drifted, re-review")
     inside = [s for s in by if owner < s < end]
     if inside:
         sys.exit(f"fix-functions: other starts inside {fix['owner']}: {[hex(s) for s in inside]}")

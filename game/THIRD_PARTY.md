@@ -6,7 +6,7 @@
 | `src/main.c` (boot order, fault report) | adapted from the same template's `main.c` | MIT, Copyright (c) 2026 sp00nz |
 | `patches/xboxrecomp/*.patch` | changes to xboxrecomp at the same commit | MIT (as the patched files) |
 
-xboxrecomp itself is not vendored: `infra/recompiler/Dockerfile` pins and fetches it. Only its MIT parts (lifter, runtime templates, platform and kernel layers) are built into the game. The LGPL-2.1 xemu-derived files (`src/apu`, `src/nv2a/nv2a_regs.h`, `nv2a_core.c`, `nv2a_state.h`) are compiled in by the toolkit's CMake as `xbox_apu`/`xbox_nv2a`. **UNVERIFIED:** whether the final link pulls in any of their objects. Check this before distributing any binary. No binary is distributed today.
+xboxrecomp itself is not vendored: `infra/recompiler/Dockerfile` pins and fetches it. The **Switch** build compiles only its kernel, platform and template sources; `xbox_memory_layout.c` includes the LGPL header `apu/apu.h` for declarations. The **host** build links the whole toolkit, including the LGPL-2.1 xemu-derived files (`src/apu`, `src/nv2a/nv2a_regs.h`, `nv2a_core.c`, `nv2a_state.h`) (`xbox_apu`/`xbox_nv2a`). **UNVERIFIED:** whether either final link pulls in LGPL objects. Check this before distributing any binary. No binary is distributed today.
 
 The MIT license text:
 

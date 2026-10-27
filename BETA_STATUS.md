@@ -15,7 +15,7 @@ Rerun with `scripts/switch-boot-proof.sh`. Details: [reports/FEASIBILITY.md](rep
 | Switch NRO boots the title in Eden | PASS: entry reached, intro movie, menu | FEASIBILITY §Switch bring-up |
 | Original main menu reached (Switch, Eden) | PASS: `MAIN_EX.TXD` + `FE_M.RIB` loaded, 32 presents in 240 s, menu frame dumped (visual check manual) | `MH-BOOT-PROOF PASS` |
 | Same on the Linux host build | PASS (intermediate evidence) | FEASIBILITY §Linux host |
-| No crash/exit during the run | PASS (240 s) | `scripts/switch-boot-proof.sh` |
+| No crash/exit during the run | PASS (240 s): no crash/exit line in the guest log, no fault reported by Eden, presents still increasing at the end | `scripts/switch-boot-proof.sh` |
 | Audio | NOT IMPLEMENTED: DirectSound reports "no driver" by design | `game/src/dsound_hle.c` |
 | Input-driven menu navigation | UNVERIFIED: native input wired, not yet exercised | — |
 | Real Switch hardware | UNVERIFIED — no hardware | — |
@@ -26,7 +26,7 @@ Rerun with `scripts/toolchain-proof.sh`. Details: [reports/RECOMP_EVAL.md](repor
 
 | Gate | Status |
 |---|---|
-| (a) x86 functions recompiled with verified semantics | PASS: 6 functions (incl. `_aulldiv`), all gating cases exact on x86-64, AArch64 Linux and Horizon/Eden |
+| (a) x86 functions recompiled with verified semantics | PASS: 6 functions (incl. `_aulldiv`), 405/405 gating cases exact on x86-64, AArch64 Linux and Horizon/Eden |
 | (b) 32-bit guest pointers on 64-bit AArch64 | PASS within scope (RECOMP_EVAL §Limits) |
 | (c) minimal NRO | PASS, reproducible |
 | (d) deko3d rendering | PASS in Eden (llvmpipe); hardware UNVERIFIED |

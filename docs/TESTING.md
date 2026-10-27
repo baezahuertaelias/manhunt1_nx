@@ -9,7 +9,7 @@
 | Analysis image build | `scripts/build-analysis-image.sh` | PASS 2026-10-26, `sha256:fc761493…4178` |
 | Ghidra import + layout cross-check | `docker compose -f infra/compose.yaml run --rm analysis /tmp proof -import /input/DEFAULT.xbe -noanalysis -deleteProject -scriptPath /scripts -postScript DumpLayout.java`; compare with `reports/XBE_HEADER.md` | PASS 2026-10-26 (run with plain `docker run`, same mounts) |
 | **Milestone 1 suite** | `scripts/toolchain-proof.sh` (runs the four rows below) | PASS 2026-10-26 |
-| Recompiled functions vs x86 reference (Linux) | `scripts/recomp-proof.sh`; pass rule in `tests/recomp-proof/compare.py` | PASS 2026-10-26, 360/360 gating on x86-64 and AArch64 |
+| Recompiled functions vs x86 reference (Linux) | `scripts/recomp-proof.sh`; pass rule in `tests/recomp-proof/compare.py` | PASS 2026-10-27, 6 functions, 405/405 gating on x86-64 and AArch64 |
 | Recompiled functions on Horizon | `scripts/emu-run.sh tests/recomp-proof/build/recomp-proof.nro RECOMP-PROOF` | PASS 2026-10-26 (Eden, llvmpipe) |
 | deko3d rendering | build `tests/deko3d-proof`, then `scripts/emu-run.sh tests/deko3d-proof/deko3d-proof.nro DEKO3D-PROOF` | PASS 2026-10-26 (Eden, llvmpipe) |
 | Emulator with hardware GPU | `EMU_GPU=1 scripts/emu-run.sh …` | FAIL 2026-10-26: no Vulkan present queue under Xvfb (GPU-PROOF-001) |

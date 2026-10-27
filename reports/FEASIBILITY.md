@@ -39,7 +39,7 @@ Path case differs between the code and the files (`Pak` vs `pak`). Patch `0001-p
 |---|---|
 | `.text`-only analysis (the getting-started default) | 13,449 functions; 289 unresolved call targets. Boot dies on indirect calls into DSOUND/XGRPH/D3D/XPP addresses with no function. |
 | All-section analysis | 14,822 functions (DSOUND 65→439, XGRPH 19→555, XPP 14→224, D3D 128→255); 17 unresolved targets; ~1.58 M lines of C in 60 files. DOLBY/DSSTDFX: 0 functions, consistent with APU DSP images (not x86; not verified further). |
-| False function entries | `scripts/check-false-entries.py` found 4 detected starts inside an instruction. 2 are in data. 2 truncated real D3D functions (`0x0028A49E`, `0x0028C2B2`) and are fixed in `game/function_fixes.json`. |
+| False function entries | Among the 15 functions whose lifted body falls off its end, `scripts/check-false-entries.py` found 4 detected starts inside an instruction. 2 are in data. 2 truncated real D3D functions (`0x0028A49E`, `0x0028C2B2`) and are fixed in `game/function_fixes.json`. |
 | Build | Host: generated code at `-O1` in about 2–5 min on 4 cores; `-O0` debug variant in about 1 min. Switch (devkitA64, gcc 15): about 3 min. NRO 21.6 MB. |
 
 ## Boot bring-up on the Linux host (chronological)
@@ -96,6 +96,27 @@ So the Switch build needs no RW aliasing for milestone 2. Re-check at level load
 | S3 | Stall in XPP; even the watchdog never ran | Horizon doesn't time-slice equal-priority threads on one core | Spread runtime threads over cores 0–2 (patch 0003); the watchdog was also not started (added to `main_switch.c`) |
 | S4 | XAPI spins on USB `HcControl` bit `0x100` | **Eden presents code-memory owner views 0xFF-filled**, not with the zeroed source; device apertures and guest BSS weren't zero | Zero each mapped view after mapping (patch 0003) |
 | S5 | **Main menu** reached, 32 presents in 240 s, menu frame dumped and confirmed visually | — | — |
+
+## Known deviations and limits (from the milestone-2 review)
+
+- **`D3D_BlockOnTime` replacement** (`game/src/d3d_fence.c`) differs from the original at `0x00292200`:
+  - it drops the `device+0x19FC` callback and the make-space branch (`flags & 8`);
+  - it gives up after 250 ms with a logged timeout instead of stalling;
+  - `eax` holds the semaphore value.
+  - A further false entry `0x00292207` sits inside it; no references, harmless.
+- **One null function-pointer call is skipped** on the boot path, right after `DirectSoundCreateStream -> DSERR_NODRIVER` (`[ICALL] target 0x00000000 is not code -- skipped`). Investigate in AUDIO-HLE-001.
+- **XInput replacement:** the packet number increments on every call (the original does so only on change), and `XInputSetState` doesn't signal the feedback header's event.
+- **Patch 0003 memory backend** (HZ-PORT-002):
+  - decommit keeps page contents;
+  - `UnmapViewOfFile` doesn't allow re-mapping the same mapping;
+  - releasing a reservation leaves runs committed inside it mapped;
+  - fixed-address reserves aren't recorded;
+  - a failed partial commit leaks.
+  - **libc shims:** `pwrite` isn't atomic, `posix_memalign` doesn't check the alignment, and `timegm` doesn't normalise.
+  - **Zeroing views** after mapping works around Eden presenting code-memory views 0xFF-filled; hardware behaviour UNVERIFIED.
+  - **Time zone** bias is 0; hardware UNVERIFIED.
+  - **Directory handles** use a placeholder file `sdmc:/.manhunt-dirfd`.
+- **False-entry scan coverage:** `check-false-entries.py` ran on the 15 functions that fall off their end (the candidates came from a one-off scan of the generated C, not a tracked script). It does not cover every function.
 
 ## Open (next milestones)
 

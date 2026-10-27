@@ -1,11 +1,12 @@
 diff --git a/src/kernel/kernel_file.c b/src/kernel/kernel_file.c
-index 2651871..3b2a905 100644
+index 2651871..3d07882 100644
 --- a/src/kernel/kernel_file.c
 +++ b/src/kernel/kernel_file.c
-@@ -28,6 +28,45 @@
+@@ -28,6 +28,64 @@
  #include <sys/statvfs.h>
  #include <dirent.h>
  #include <fnmatch.h>
++#include <pthread.h>
 +
 +#if defined(__SWITCH__)
 +/* Horizon's open() cannot open a directory. A directory handle gets a real,
@@ -13,6 +14,7 @@ index 2651871..3b2a905 100644
 + * directory it stands for. Enumeration already goes by the handle's path. */
 +#define NX_DIRFD_MAX 1024
 +static char *s_nx_dirfd[NX_DIRFD_MAX];
++static pthread_mutex_t s_nx_dirfd_lock = PTHREAD_MUTEX_INITIALIZER;
 +
 +static int nx_open_dir(const char *path)
 +{
@@ -22,25 +24,42 @@ index 2651871..3b2a905 100644
 +        return -1;                             /* errno from stat */
 +    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
 +    fd = open("sdmc:/.manhunt-dirfd", O_RDONLY | O_CREAT, 0644);
-+    if (fd >= 0 && fd < NX_DIRFD_MAX) {
-+        free(s_nx_dirfd[fd]);
-+        s_nx_dirfd[fd] = strdup(path);
++    if (fd < 0)
++        return -1;
++    if (fd >= NX_DIRFD_MAX) {                  /* cannot record it: fail, never misreport */
++        close(fd);
++        errno = EMFILE;
++        return -1;
 +    }
++    pthread_mutex_lock(&s_nx_dirfd_lock);
++    free(s_nx_dirfd[fd]);
++    s_nx_dirfd[fd] = strdup(path);
++    pthread_mutex_unlock(&s_nx_dirfd_lock);
 +    return fd;
 +}
 +
++/* Called when a handle's fd is closed and when a regular open reuses a number. */
 +static void nx_forget_fd(int fd)
 +{
-+    if (fd >= 0 && fd < NX_DIRFD_MAX && s_nx_dirfd[fd]) {
-+        free(s_nx_dirfd[fd]);
-+        s_nx_dirfd[fd] = NULL;
-+    }
++    if (fd < 0 || fd >= NX_DIRFD_MAX)
++        return;
++    pthread_mutex_lock(&s_nx_dirfd_lock);
++    free(s_nx_dirfd[fd]);
++    s_nx_dirfd[fd] = NULL;
++    pthread_mutex_unlock(&s_nx_dirfd_lock);
 +}
 +
 +static int nx_fstat(int fd, struct stat *st)
 +{
-+    if (fd >= 0 && fd < NX_DIRFD_MAX && s_nx_dirfd[fd])
-+        return stat(s_nx_dirfd[fd], st);
++    char path[MAX_PATH] = "";
++    if (fd >= 0 && fd < NX_DIRFD_MAX) {
++        pthread_mutex_lock(&s_nx_dirfd_lock);
++        if (s_nx_dirfd[fd])
++            snprintf(path, sizeof path, "%s", s_nx_dirfd[fd]);
++        pthread_mutex_unlock(&s_nx_dirfd_lock);
++    }
++    if (path[0])
++        return stat(path, st);
 +    return fstat(fd, st);
 +}
 +#define fstat(fd, st) nx_fstat((fd), (st))
@@ -48,7 +67,7 @@ index 2651871..3b2a905 100644
  #endif
  
  /* Get the ANSI path from OBJECT_ATTRIBUTES (platform-independent). */
-@@ -1149,7 +1188,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -1149,7 +1207,11 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
          if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
              mkdir(host_path, 0755);   /* EEXIST is fine */
@@ -60,7 +79,7 @@ index 2651871..3b2a905 100644
      } else {
          int flags = posix_open_flags(DesiredAccess, CreateDisposition);
          struct stat st;
-@@ -1159,6 +1202,9 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -1159,6 +1221,9 @@ NTSTATUS __stdcall xbox_NtCreateFile(
          if (defer)
              flags &= ~O_TRUNC;
          fd = open(host_path, flags, 0644);
@@ -70,7 +89,17 @@ index 2651871..3b2a905 100644
          if (fd >= 0 && fd < FATX_PENDING_MAX)
              s_overwrite_pending[fd] = (unsigned char)defer;
          else if (fd >= 0 && defer && ftruncate(fd, 0) != 0) {
-@@ -1531,7 +1577,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
+@@ -1273,6 +1338,9 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+     XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
+     if (Handle && Handle != INVALID_HANDLE_VALUE) {
+         overwrite_settle(w32_handle_fd(Handle));
++#if defined(__SWITCH__)
++        nx_forget_fd(w32_handle_fd(Handle));   /* the fd closes with the handle */
++#endif
+         /* Before CloseHandle: once the object is freed its address can come
+          * back as the next handle, which must not inherit this search. */
+         xbox_dir_context_drop(Handle);
+@@ -1531,7 +1599,11 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
               * XBOX_SECTORS_PER_CLUSTER above. */
              info->BytesPerSector = XBOX_BYTES_PER_SECTOR;
              info->SectorsPerAllocationUnit = XBOX_SECTORS_PER_CLUSTER;

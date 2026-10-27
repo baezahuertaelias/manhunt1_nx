@@ -12,6 +12,9 @@
  *   3. wait until the semaphore reaches the fence, bounded at 250 ms.
  * Requires RECOMP_PB_EXEC=1 (the executor); without it the bound always runs
  * out, which is logged.
+ * Differences from the original: the device+0x19FC callback and the
+ * make-space branch (flags & 8) are not reproduced, a missed fence ends in a
+ * logged 250 ms timeout instead of a stall, and eax returns the semaphore.
  *
  * Addresses: 0x0029DFB8 D3D_pDevice (.XTLID 0x80003); 0x00292200 BlockOnTime
  * (time, flags), stdcall ret 8, 8 callers; 0x00291F20 KickOff(flags), loads
