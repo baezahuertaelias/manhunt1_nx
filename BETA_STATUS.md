@@ -17,7 +17,7 @@ Rerun with `scripts/switch-boot-proof.sh`. Details: [reports/FEASIBILITY.md](rep
 | Same on the Linux host build | PASS (intermediate evidence) | FEASIBILITY §Linux host |
 | No crash/exit during the run | PASS (240 s): no crash/exit line in the guest log, no fault reported by Eden, presents still increasing at the end | `scripts/switch-boot-proof.sh` |
 | Audio | NOT IMPLEMENTED: DirectSound reports "no driver" by design | `game/src/dsound_hle.c` |
-| Input-driven menu navigation | UNVERIFIED: native input wired, not yet exercised | — |
+| Input-driven menu navigation | PASS in Eden: PLAY → BONUS FEATURES after scripted UP; independently viewed | [INPUT_NAVIGATION.md](reports/INPUT_NAVIGATION.md) |
 | Real Switch hardware | UNVERIFIED — no hardware | — |
 
 ## Milestone 1 gates (toolchain proof)
@@ -42,3 +42,11 @@ Rerun with `scripts/toolchain-proof.sh`. Details: [reports/RECOMP_EVAL.md](repor
 ## 2026-10-28 blocker investigation
 
 Standalone container Intel GBM/EGL rendering and pixel readback pass ([GPU proof](reports/GPU_PROOF.md)); Eden Vulkan presentation remains unresolved. [Render planning](reports/RENDER_PLAN.md) identifies missing timing evidence and backend-state gaps; RENDER-001 stays open. No new gameplay, audio, frame-rate or hardware gate passed.
+
+## 2026-10-28 continued verification
+
+The optional project Wayland runner passes Intel Vulkan synthetic deko3d readback, including an independently reviewed shutdown bound and rerun ([report](reports/EMU_GPU_PRESENT.md)). The default runner is unchanged and still uses llvmpipe; game compatibility on Wayland remains UNVERIFIED.
+
+A fresh Switch game build and disabled/enabled 240-second diagnostic captures pass their scoped entry/menu-asset/no-logged-fault checks. Thirteen timing snapshots satisfy nested accounting; late-window raster elapsed is 99.766% of scanner time. This supports the GPU attribute/coordinate proof as the next P0 step, not a hardware performance claim. Details and limits: [RENDER_PLAN.md](reports/RENDER_PLAN.md).
+
+The standalone Nv2aVertex coordinate/colour/UV/perspective proof passes both surface sizes with zero pixel mismatches on independent rerun. Texture/state/synchronization and menu integration remain pending; this does not close the GPU backend blocker.

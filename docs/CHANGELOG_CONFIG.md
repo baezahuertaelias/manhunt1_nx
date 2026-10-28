@@ -50,3 +50,15 @@ Validation (rerun 2026-10-26): NRO rebuild PASS, reproducible. Analysis image re
 ## 2026-10-28 — Standalone GPU proof
 
 Added `scripts/gpu-proof.sh` using the existing pinned Eden image, GBM/EGL readback and a restricted render-node container (one CPU, 512 MiB, no network/capabilities). This does not change the emulator runner. Validation and independent review: see `reports/GPU_PROOF.md`. Rollback: remove the standalone proof and its documentation. Eden Vulkan presentation remains UNVERIFIED.
+
+## 2026-10-28 — Opt-in render timing
+
+Added `RECOMP_RENDER_PROFILE=1` in maintained patch 0004, disabled by default. Existing report cadence and Switch env-file mechanism are reused; timing captures disable periodic frame dumps explicitly. Thread-local cumulative nested wall times do not estimate guest CPU time. Focused helper self-check passes; Switch build/runtime and independent review results are recorded in BUILD_LOG.md and reports/RENDER_PLAN.md as they execute. Rollback: unset option or remove patch and rebuild.
+
+## 2026-10-28 — Optional Wayland hardware presentation proof
+
+Added a separate project container layer and synthetic proof scripts using version-pinned Weston, the Intel Vulkan ICD and private headless Wayland display. Default Xvfb automation is unchanged. The source-provenance blocker EMU-IMAGE-001 remains open. Build, Vulkan WSI and Eden deko3d pixel assertions passed in the authored proof; independent rerun/review is recorded in reports/EMU_GPU_PRESENT.md. Rollback: remove the optional layer/proof files.
+
+## 2026-10-28 — Synthetic NV2A attribute proof
+
+Added a standalone pinned-toolchain build/run script using the existing Eden runner and generic upstream vertex header, with no game inputs or runtime settings changed. Two fixed surface sizes verify coordinate/channel/UV/perspective conventions. Author run and primary-agent full-wrapper rerun passed with zero pixel mismatches. Scope and rollback: remove this synthetic proof; see reports/RENDER_PLAN.md.

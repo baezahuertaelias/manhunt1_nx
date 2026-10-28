@@ -54,7 +54,7 @@ not justify accepting the double approximation for all game arithmetic.
 ## Static inventory and unresolved coverage
 
 Scanning the cached section disassembly for decoded `fldcw` mnemonics found
-11 sites, all in its `text` section:
+11 sites: ten in its `text` section and `0x00221F96` in `D3DX`:
 
 `0x00207992`, `0x002079F9`, `0x00207B8A`, `0x00207BB7`,
 `0x00207C36`, `0x00207C60`, `0x00207CC5`, `0x00208640`,
@@ -63,7 +63,7 @@ Scanning the cached section disassembly for decoded `fldcw` mnemonics found
 The generated C contains 13 corresponding assignments across two generated
 files. Overlapping function translations duplicate some sites. The decoded
 site `0x00221F96` has no corresponding generated `fldcw` assignment in that
-search; whether it is unreachable, omitted, or otherwise represented remains
+search, and the current `game/build/functions.fixed.json` contains no function range covering it. Treat this as an explicitly unresolved code region in D3DX; whether it is unreachable, omitted, or otherwise represented remains
 **UNVERIFIED**. Cached disassembly coverage is not proven complete. This is
 not an exhaustive inventory of all executable regions, control-word changes,
 or `_controlfp` callers; no claim about complete function discovery is made.

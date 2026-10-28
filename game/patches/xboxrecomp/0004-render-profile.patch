@@ -198,7 +198,7 @@
      peek_addresses();
      peek_chain();
      if (getenv("RECOMP_FIND_NAN")) {
-@@ -4572,3 +4603,20 @@
+@@ -4572,3 +4603,19 @@
          s_unhandled_slot[(s_unhandled[i].method & 0x1FFC) / 4] = (uint16_t)(i + 1);
      fflush(stderr);
  }
@@ -218,7 +218,6 @@
 +    raster_triangle_impl(a, b, c, argb, uv);
 +    nv2a_profile_end(NV_PROFILE_TRIANGLE, profile);
 +}
-+
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
 @@ -25,6 +25,7 @@

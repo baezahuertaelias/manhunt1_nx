@@ -68,13 +68,13 @@ infra/emulator/wayland/run-proof.sh tests/deko3d-proof/deko3d-proof.nro
   `540add97534251b5a54c92cf426fa082a6c4c2aab5eeaeaeb6158b7db714ae3c`.
   This log is local only; the report contains synthetic result excerpts.
 - Shell syntax checks passed for all three scripts. Package install/build,
-  WSI probe and synthetic emulator run all exited 0. Independent review pending.
+  WSI probe and synthetic emulator run all exited 0. Initial independent review found an unbounded shutdown wait. The emulator now runs under GNU timeout with a five-second TERM-to-KILL grace period; correction review and rerun PASS (2026-10-28). Independent reviewer runtime_analysis inspected the final source/config and actual corrected log, with no blocking findings. The primary agent reran the corrected script, exit 0: `game/build/logs/wayland-corrected-synthetic.log`, SHA-256 `13278525a6ee2b60c4200e1789f900c96a62d43957d8f0e4f0f9778682d3b6a5`. A same-container TERM-ignoring-child negative control was killed after 1.018 seconds (shortened one-second grace); this checks shutdown enforcement, not emulator correctness.
 
 The probes run nonroot, without network, with dropped capabilities and
 no-new-privileges. Only renderD128 is exposed. WSI gets one CPU/1 GiB;
 Eden gets one CPU/6 GiB and a read-only NRO mount. Compositor socket,
 configuration and caches are temporary container files. Emulator wait is
-bounded to 120 seconds, compositor readiness to 10 seconds. No public ports,
+polled for at most 120 seconds; a timeout supervisor bounds emulator lifetime to 125 seconds plus a five-second SIGKILL grace period, including shutdown. Compositor readiness is bounded to 10 seconds. No public ports,
 firmware, keys or game files are used.
 
 ## Limits and rollback

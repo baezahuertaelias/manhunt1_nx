@@ -15,7 +15,7 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | BOOT-SWITCH-001 | done | runtime | BOOT-HOST-001 | Switch NRO reaches the main menu in Eden (`scripts/switch-boot-proof.sh`) |
 | RENDER-001 | in_progress | render_analysis | BOOT-SWITCH-001 | Frame-time breakdown + deko3d back-end plan (`reports/RENDER_PLAN.md`) |
 | AUDIO-HLE-001 | ready | runtime | BOOT-SWITCH-001 | Native DirectSound plays the front-end music on host and Switch |
-| INPUT-NAV-001 | ready | test | BOOT-SWITCH-001 | Scripted pad moves the main-menu selection on the Switch build |
+| INPUT-NAV-001 | done | test | BOOT-SWITCH-001 | Scripted pad moves the main-menu selection on the Switch build |
 | HZ-PORT-002 | ready | runtime | BOOT-SWITCH-001 | Horizon memory backend and libc shims match POSIX semantics (review findings) |
 | CODEX-AGENTS-001 | ready | lead | — | Codex 0.164.0 config syntax and available models verified; `.codex/agents/*.toml` for the WORKFLOW roles, documented in CONFIGURATION.md |
 | NEG-CONTROLS-001 | ready | test | RECOMP-EVAL-001 | Negative controls scripted and expected to fail inside `scripts/toolchain-proof.sh` |
@@ -49,4 +49,6 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | ID | State | Owner | Depends on | Acceptance |
 |---|---|---|---|---|
 | BLOCKER-AUDIT-001 | in_progress | lead | — | Reconcile blockers against executed evidence and preserve outstanding gates |
-| EMU-GPU-PRESENT-001 | ready | test | GPU-PROOF-001 | Hardware Vulkan Eden synthetic proof; runner/port failures separated |
+| EMU-GPU-PRESENT-001 | done | runner_analysis | GPU-PROOF-001 | Hardware Vulkan Eden synthetic proof; runner/port failures separated |
+| RENDER-GPU-POC-001 | done | runtime_analysis | DEKO3D-PROOF-001 | Synthetic Nv2aVertex GPU coordinate/colour/perspective readback, independent review |
+| RENDER-GPU-STATE-001 | ready | runtime | RENDER-GPU-POC-001 | Synthetic texture/address/alpha/blend/write-mask readback with independent reference |

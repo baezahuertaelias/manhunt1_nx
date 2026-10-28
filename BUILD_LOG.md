@@ -2,6 +2,23 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-28 — Synthetic NV2A coordinate/attribute proof: PASS
+
+- Author pinned build/run and primary-agent complete `scripts/nv2a-backend-proof.sh` rerun both exit 0; identical NRO SHA-256 `2ea3c6111f4c1cd266cf3fd820ffaf9739537e11f4e17a21623f457d9d018c2c`.
+- Both sizes (128×96, 192×128): bad=0, max_error=0 against independent analytical perspective/colour/UV reference, plus exterior clear and population guards. Primary-agent independent source/shader/artifact review accepted. [Exact counts/provenance/limits](reports/RENDER_PLAN.md).
+- Synthetic offscreen scope only, llvmpipe. No registered game GPU backend, texture/state/depth/sync acceptance or hardware/performance claim.
+
+## 2026-10-28 — Scripted Switch menu navigation: PASS (Eden only)
+
+- Same Switch NRO `bf122c4f…fca8`; 240-second default-runner capture, 23 private BMPs, scripted DOWN/UP and 10-second dumps. Actual frames before/after show PLAY → BONUS FEATURES after sampled UP. Root and independent runtime_analysis both inspected actual images/logs; [authored report](reports/INPUT_NAVIGATION.md).
+- Runner exit 0; entry/menu assets, continued presents and no logged guest/Eden fault. No runtime/input source changes. Periodic surfaces can be torn while rasterizing; selected complete frames support only menu selection movement. Gameplay, level loading and hardware remain UNVERIFIED.
+
+## 2026-10-28 — Switch timing build/captures and Wayland proof
+
+- `scripts/game-build.sh switch`: exit 0; NRO SHA-256 `bf122c4f763163727efb15ad223d884743ce3a904e49b398891ae1cf9082fca8`. Two runtime objects also compiled on host. `scripts/render-profile-test.sh`: PASS (accounting/TLS/disabled/backwards-clock controls). Post-build patch cleanup removes one trailing blank line only.
+- Two serialized 240-second llvmpipe captures, dumps disabled, profile off/on: entry and menu asset checks PASS; no logged guest/emulator fault; runner alive at end. Enabled thirteen snapshots invalid=0, monotonic and nested-accounting checks PASS. Private manifest/summary under `game/build/render-profile/`; [authored results and limits](reports/RENDER_PLAN.md). Independent diagnostic source/config/build/runtime review by runtime_analysis: accepted. Guest CPU, robust overhead, visual/input and hardware gates are not established here.
+- Corrected `infra/emulator/wayland/run-proof.sh`: exit 0; Intel Vulkan exact synthetic deko3d pixel/coverage/row assertions PASS. Independent source/config/log review by runtime_analysis: accepted after fixing unbounded shutdown wait. Same-container timeout hung-child control PASS, kill after 1.018 seconds with shortened grace. [Provenance](reports/EMU_GPU_PRESENT.md). No game run on Wayland or emulator-source reproducibility claim.
+
 ## 2026-10-28 — Standalone GPU proof: PASS; x87 investigation partial
 
 - `scripts/gpu-proof.sh`: freshly compiled with clang 19.1.7, `-Wall -Wextra -Werror`; classifier/channel self-tests and Intel ADL-N GBM/EGL readback PASS, RGBA 64,128,191,255. Repeated by the primary agent, exit 0. Image/source/script hashes: [GPU_PROOF.md](reports/GPU_PROOF.md). Independent source/config/evidence review by render_analysis: PASS, no blockers.

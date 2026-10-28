@@ -29,7 +29,7 @@ while [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; do
   sleep 1; i=$((i + 1))
 done
 printf "[Renderer]\nbackend=1\nvulkan_device=0\n" >/tmp/eden.ini
-/src/eden/build/linux-headless-debug/bin/eden-cli --config /tmp/eden.ini /proof.nro >/tmp/eden.log 2>&1 &
+timeout --signal=TERM --kill-after=5 125 /src/eden/build/linux-headless-debug/bin/eden-cli --config /tmp/eden.ini /proof.nro >/tmp/eden.log 2>&1 &
 emulator=$!
 i=0
 while [ "$i" -lt 120 ] && kill -0 "$emulator" 2>/dev/null; do

@@ -1,8 +1,6 @@
 # Rendering blocker: investigation and proof plan
 
-Date: 2026-10-28. Task: **RENDER-001 — OPEN**. This is source inspection,
-not a measured performance result. Required Switch-build frame-time breakdown
-has not been collected; deko3d backend behaviour is **UNVERIFIED**.
+Date: 2026-10-28. Task: **RENDER-001 — OPEN**. Source inspection and a bounded Switch-build/Eden timing capture are recorded below. Raster elapsed time dominates the measured scanner scope. Guest CPU/waits, repeatable profiling overhead and deko3d backend behaviour remain **UNVERIFIED**.
 
 ## Evidence and limits
 
@@ -142,3 +140,48 @@ tasks should be created from the present unmeasured hypotheses.
 Rollback for the next proof is removal of its optional instrumentation patch
 and run configuration, restoring the recorded baseline build and boot proof.
 This report changes no runtime behaviour and needs no runtime rollback.
+
+## Executed Switch-build timing proof — 2026-10-28
+
+Built with `scripts/game-build.sh switch`, exit 0, in the pinned devkitA64 image. NRO SHA-256 `bf122c4f763163727efb15ad223d884743ce3a904e49b398891ae1cf9082fca8`. Maintained patch 0004 adds opt-in thread-local monotonic wall timers. The post-build patch cleanup removes one trailing blank line only; the private manifest separately hashes the compiled runtime sources. No guest algorithm or numeric state was changed by the instrumentation.
+
+The synthetic accounting/TLS self-check passes. Both instrumented runtime translation units compiled on host; the full Switch target linked and produced an NRO. Two serialized 240-second runs of that NRO used the existing Eden/Xvfb llvmpipe runner, identical menu boot defaults and no periodic BMP dumps; only the enabled capture set `RECOMP_RENDER_PROFILE=1`. Both reached guest entry `0x001FE908`, opened MAIN_EX.TXD and FE_M.RIB successfully, remained running to the end and had no logged guest faults. This is not a visual-menu or gameplay assertion.
+
+Thirteen enabled snapshots have zero invalid-clock samples. Counts/times are monotonic; every snapshot satisfies scan ≥ method ≥ draw ≥ raster, and method ≥ draw + clear + present. Independent reviewer runtime_analysis inspected the source, config, build, private logs, manifest hashes and accounting; accepted for this diagnostic scope.
+
+The final two report intervals contain six flip intervals totalling 48.792 seconds. Scope deltas:
+
+| Nested scope | Elapsed seconds | Calls |
+|---|---:|---:|
+| Scanner inclusive | 48.434367076 | 3 |
+| Methods inclusive | 48.428081108 | 42,011 |
+| Draw inclusive | 48.328429712 | 169 |
+| Raster inclusive | 48.320953204 | 169 |
+| Clear | 0.044822960 | 6 |
+| Present (CPU scaling/copy/waits) | 0.048036872 | 6 |
+| Scanner excluding methods | 0.006285968 | — |
+
+These scopes overlap. Raster is **99.766% of scanner elapsed time in this sample**, supporting the GPU raster-backend proof as the next P0 step. It does not measure guest execution, host CPU consumption or hardware FPS. Raster worker dispatch/waits and host/emulator descheduling are included. Present is small in this specific capture; no broader performance claim follows.
+
+The disabled/enabled runs reported 31/27 completed flip holds and final draw counts 738/654 respectively. Those hold sums omit the last unreported interval. This single pair shows different throughput but cannot isolate profiling overhead from scheduler/emulator variation or startup timing. Repeatable overhead and output parity remain UNVERIFIED. No optimization or gameplay tradeoff is accepted from this data.
+
+Private evidence: `game/build/render-profile/manifest.json`, `summary.json`, `game/build/logs/render-profile-{build,disabled,enabled}*` and `build-switch.log`. The manifest records commands/configs, exit codes, git/diff identity, binary/runtime/input/log hashes and image IDs. Raw game-derived logs/binaries stay gitignored. A separate frame/input capture is required; the timing runs deliberately omitted dumps and input.
+
+The latest capture's top unhandled-method ranking was 0x1710 (722), 0x0394/0x0398 (75 each), 0x02B4/0x02C0/0x02E0 (54 each), 0x0110 (47), and 0x03C0/0x03C4/0x03C8 (31 each). Upstream NV097 definitions identify depth clip min/max, window clip type/horizontal/vertical, WAIT_FOR_IDLE and texture generation S/T/R respectively; 0x1710 remains unresolved. Do not confuse unrelated DAC register 0x03C8 with NV097 texture generation. The executor shadows method registers before dispatch and reads some later (including clip min/max), so its unhandled counter alone does not prove state is ignored. Required-state semantics and combiner/stage coverage still need verification.
+
+The implementation proof below validates synthetic offscreen deko3d triangles carrying Nv2aVertex attributes at two surface sizes, asymmetric colours and varying rhw, with pixel-to-clip/Y/channel/perspective readback assertions before any menu integration. Depth format/range, textures, blending, stencil, surface coherence and omitted combiner/stages remain separate acceptance work. The existing hardcoded triangle proof does not cover them.
+
+## RENDER-GPU-POC-001 result — 2026-10-28
+
+**PASS for synthetic coordinate/attribute scope; not a menu backend.** Implemented in `tests/nv2a-backend-proof/` with `scripts/nv2a-backend-proof.sh`. Author runtime_analysis built and ran it; the primary agent independently inspected actual C/shaders/Makefile/wrapper, then executed the complete wrapper against the real generic upstream Nv2aVertex declaration. Both builds produced identical NRO SHA-256 `2ea3c6111f4c1cd266cf3fd820ffaf9739537e11f4e17a21623f457d9d018c2c`.
+
+| Surface | Interior pixels | Exterior pixels | Pixels distinguishable from affine reference | Bad channel/pixel checks | Max channel error |
+|---|---:|---:|---:|---:|---:|
+| 128×96 | 2,783 | 8,297 | 2,697 | 0 | 0 |
+| 192×128 | 5,558 | 16,586 | 5,382 | 0 | 0 |
+
+The analytical reference uses pixel-centre barycentric weights multiplied by each vertex's rhw and normalized. Asymmetric packed diffuse colour and UV-influenced output exercise channel/attribute layout; varying rhw separates perspective from affine interpolation. Interior/exterior population assertions reject empty/clear-only draws. A band at triangle edges is deliberately excluded; no raster edge-rule parity is claimed. Guest z is unused with depth/stencil disabled, so no depth convention is accepted here.
+
+Independent full-wrapper run exit 0; warning-as-error C compilation and shader build passed. Header SHA-256 `588025bae07f2edcd713391c4d0f865daf31080f8b830d12f0d3f1e78e5e6bd8`; pinned toolchain matches CONFIGURATION.md. Independent local emulator log `tests/nv2a-backend-proof/build/independent-emu.log` SHA-256 `e46734217837de673c82d2f839bc8d33467a2ed6ef7942497194ffb22aa63490`; full build/runner log `independent-run.log` SHA-256 `4b7809c2697842d614ac2d07fe14eb42f9634a48ab439656e6db3b23a4f049d2`. Eden used llvmpipe. These are synthetic results; hardware remains UNVERIFIED.
+
+Next proof before registration: decoded texture upload, normalized texel addressing, alpha/blend and channel masks against independent synthetic references. Depth/stencil, surface identity/readback and completion/semaphore ordering need later separate proofs. Combiner/texture-stage/interface omissions remain unresolved. No menu renderer or GPU speedup has been implemented.
