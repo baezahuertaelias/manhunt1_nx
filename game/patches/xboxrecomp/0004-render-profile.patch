@@ -52,7 +52,7 @@
 +}
 +static inline void nv2a_profile_report(void)
 +{
-+    static const char *names[] = {"scan", "method", "draw", "clear", "present", "triangle"};
++    static const char *names[] = {"scan", "method", "draw", "clear", "present", "raster"};
 +    if (!nv2a_profile_enabled()) return;
 +    fprintf(stderr, "[RENDER-PROFILE] thread_local cumulative inclusive wall_ns invalid=%llu\n",
 +            (unsigned long long)nv2a_profile.invalid);
@@ -94,15 +94,6 @@
  #if defined(_WIN32)
  #include <windows.h>
  #define NV_TLS __declspec(thread)
-@@ -872,7 +885,7 @@
- 
- static void surface_swizzle_update(void)
- {
--    static int enabled = -1;
-+    static _Thread_local int enabled = -1;
-     if (enabled < 0) {
-         const char *e = getenv("RECOMP_SWIZZLED_RT");
-         enabled = !(e && e[0] == '0');
 @@ -1553,7 +1566,7 @@
  /* Half-space fill. Barycentric edge functions rather than scanline slopes:
   * the same test decides both windings, so a title that emits clockwise
@@ -112,19 +103,40 @@
                              const float c[2], uint32_t argb,
                              const float uv[3][2])
  {
-@@ -2645,7 +2658,10 @@
-     s_xfq_px += (long)(T->maxx - T->minx) * (T->maxy - T->miny);
+@@ -2551,7 +2564,7 @@
+     return s_pool.n;
  }
- 
--static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
-+static void raster_xf_triangle(const Nv2aVshOutput *, const Nv2aVshOutput *,
-+                               const Nv2aVshOutput *);
-+
-+static void raster_xf_triangle_impl(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
-                                const Nv2aVshOutput *vc)
+
+-static void xf_rows_parallel(const XfTri *T, int ntris, long px,
++static void xf_rows_parallel_impl(const XfTri *T, int ntris, long px,
+                              XfCount *total)
  {
-     XfTri T;
-@@ -3235,7 +3251,9 @@
+     int n = raster_pool_size(), k;
+@@ -2581,7 +2594,7 @@
+     }
+ }
+ #else
+-static void xf_rows_parallel(const XfTri *T, int ntris, long px,
++static void xf_rows_parallel_impl(const XfTri *T, int ntris, long px,
+                              XfCount *total)
+ {
+     int k;
+@@ -2608,6 +2621,14 @@
+ static XfTri s_xfq_tris[XF_QUEUE_MAX];
+ static int s_xfq_n;
+ static long s_xfq_px;
++
++static void xf_rows_parallel(const XfTri *T, int ntris, long px,
++                             XfCount *total)
++{
++    Nv2aProfileStart profile = nv2a_profile_begin();
++    xf_rows_parallel_impl(T, ntris, px, total);
++    nv2a_profile_end(NV_PROFILE_TRIANGLE, profile);
++}
+
+ static void xf_queue_flush(void)
+ {
+@@ -3235,7 +3256,9 @@
      {
          uint32_t t0 = s_gpu.tris_drawn;
          uint64_t p0 = s_gpu.pixels;
@@ -134,29 +146,33 @@
          if (s_ftrace == 2) {
              fprintf(stderr, "[FTRACE] %s prim %u n %u surf %08X %ux%u+%u+%u"
                      " pitch %u | tex %s %08X %ux%u fmt %02X | blend %u %X/%X"
-@@ -3744,7 +3762,7 @@
+@@ -3744,7 +3767,7 @@
      h->held_ns = 0;
  }
- 
+
 -void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 +static void nv2a_pb_exec_method_impl(uint32_t subch, uint32_t method, uint32_t param)
  {
      static int inited;
- 
-@@ -3959,7 +3977,11 @@
+
+@@ -3959,9 +3982,13 @@
              fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                      param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                      s_gpu.clear_color, 10);
 -        clear_surface(param);
+-        if (param & 0x01)                         /* Z */
+-            zbuf_clear();
 +        {
 +            Nv2aProfileStart profile = nv2a_profile_begin();
 +            clear_surface(param);
++            if (param & 0x01)                     /* Z */
++                zbuf_clear();
 +            nv2a_profile_end(NV_PROFILE_CLEAR, profile);
 +        }
-         if (param & 0x01)                         /* Z */
-             zbuf_clear();
          break;
-@@ -4068,6 +4090,7 @@
+
+     case NV097_SET_BEGIN_END:
+@@ -4068,6 +4095,7 @@
           * the present below: a vsynced present can hold this thread for a
           * host frame, and that time counts against the hold. */
          uint64_t stall_ns = xbox_HostNowNs();
@@ -164,7 +180,7 @@
          int clock_ok;
          uint32_t stall_vbl;
          (void)flip_clock(stall_ns, &clock_ok);
-@@ -4105,7 +4128,9 @@
+@@ -4105,7 +4133,9 @@
              if (done) {
                  xbox_FramebufferWindowSet(dma_resolve(done), pitch);
                  xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
@@ -174,15 +190,15 @@
              }
          }
          {
-@@ -4430,6 +4455,7 @@
- 
+@@ -4430,6 +4460,7 @@
+
  void nv2a_pb_exec_report(void)
  {
 +    nv2a_profile_report();
      peek_addresses();
      peek_chain();
      if (getenv("RECOMP_FIND_NAN")) {
-@@ -4572,3 +4598,27 @@
+@@ -4572,3 +4603,20 @@
          s_unhandled_slot[(s_unhandled[i].method & 0x1FFC) / 4] = (uint16_t)(i + 1);
      fflush(stderr);
  }
@@ -203,13 +219,6 @@
 +    nv2a_profile_end(NV_PROFILE_TRIANGLE, profile);
 +}
 +
-+static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
-+                               const Nv2aVshOutput *vc)
-+{
-+    Nv2aProfileStart profile = nv2a_profile_begin();
-+    raster_xf_triangle_impl(va, vb, vc);
-+    nv2a_profile_end(NV_PROFILE_TRIANGLE, profile);
-+}
 --- a/src/kernel/nv2a_pb_scan.c
 +++ b/src/kernel/nv2a_pb_scan.c
 @@ -25,6 +25,7 @@
@@ -217,13 +226,13 @@
  #include <stdlib.h>
  #include <string.h>
 +#include "nv2a_profile.h"
- 
+
  extern ptrdiff_t xbox_GetMemoryOffset(void);
- 
+
 @@ -295,7 +296,7 @@
      }
  }
- 
+
 -void nv2a_pb_scan(uint32_t put_phys)
 +static void nv2a_pb_scan_impl(uint32_t put_phys)
  {
@@ -232,12 +241,12 @@
 @@ -524,7 +525,7 @@
      return words;
  }
- 
+
 -void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
 +static void nv2a_pb_scan_segment_impl(uint32_t start_va, uint32_t end_va)
  {
      uint32_t words, jumps = 0, unknown = 0;
- 
+
 @@ -544,3 +545,17 @@
      s_tot_jumps += jumps;
      s_tot_segments++;

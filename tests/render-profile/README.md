@@ -17,9 +17,11 @@ nanoseconds and include time descheduled by the host/emulator:
 - `scan`: both scanner entrypoints, including decoded method work.
 - `method`: executor entrypoint, including early-return methods and nested work.
 - `draw`: raster batch including vertex transforms, clipping and rasterization.
-- `triangle`: CPU triangle routines, including validation and backend dispatch
-  where selected; no per-pixel timestamps. It is nested in draw, except for
-  the existing optional raster-test triangle issued during clear.
+- `raster`: CPU screen-space triangle routine plus transformed queued pixel
+  rasterization (`xf_rows_parallel`), including any worker waits. No per-pixel
+  timestamps. It is nested in draw, except for the existing optional raster-test
+  triangle issued during clear. Transformed triangle setup/queueing stays in
+  draw; screen-space validation and dispatch remain included in raster.
 - `clear`: clear dispatch including its validation and optional raster test.
 - `present`: existing libnx/window presentation call, including copying,
   scaling and waits. It excludes the separate backend flip callback.
