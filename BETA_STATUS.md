@@ -52,3 +52,5 @@ A fresh Switch game build and disabled/enabled 240-second diagnostic captures pa
 The standalone Nv2aVertex coordinate/colour/UV/perspective proof passes both surface sizes with zero pixel mismatches on independent rerun. Texture/state/synchronization and menu integration remain pending; this does not close the GPU backend blocker.
 
 The bounded P8 palette metadata/helper gap is fixed and tested on host, with the full Switch target rebuilt. Ten synthetic nearest-texture/alpha/blend/mask cases and five rejection checks pass independent emulator rerun. GPU palette upload, other states and actual backend integration remain UNVERIFIED; see RENDER_PLAN.md.
+
+One complete original-menu CPU frame now has independently reviewed state/texture/palette/combiner diagnostics. It identifies actual bilinear, alpha0, additive blending,32-entry palette, decoder, projection and coherence gaps before GPU registration. No new hardware/gameplay milestone passes from this capture.

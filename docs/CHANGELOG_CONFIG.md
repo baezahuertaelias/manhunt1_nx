@@ -66,3 +66,7 @@ Added a standalone pinned-toolchain build/run script using the existing Eden run
 ## 2026-10-28 — Backend P8 palette boundary
 
 Prepared patch0005 to carry palette metadata into the decode helper, with a bounded256-entry P8 path and explicit rejection of unresolved cases. Added a standalone pinned-container host regression and original-defect negative control. CPU sampling is unchanged; no backend is registered. Host regression, original-defect negative control, independent review and full Switch build passed; exact scope/hashes are in reports/RENDER_PLAN.md. Game/GPU palette runtime remains UNVERIFIED.
+
+## 2026-10-28 — Complete existing frame-trace diagnostics
+
+Patch0006 adds exact per-draw render/surface/four-texture state to the existing flag-gated whole-frame trace. No runtime default or rendering algorithm changes. Host backend/trace CTest2/2 and original-defect palette negative control pass; full Switch build exits0. A complete28-draw CPU menu-frame capture and independent final review passed within diagnostic scope; support gaps and exact evidence are in reports/RENDER_PLAN.md. Rollback: remove flag/option or patch and rebuild.

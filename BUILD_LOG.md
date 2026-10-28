@@ -2,6 +2,12 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-28 — Complete CPU menu-state capture: PASS
+
+- Patch0006 host backend+trace CTest2/2 and original-defect palette negative control PASS. Full Switch build exits0; NRO `a1fdb54d2c1b6d44131c62d6a77330773cc6178d6fc0d6c12d8c66e992a01213`.
+- One complete original menu frame,28draws×7state records, before/after menu images and fault-free bounded180-second runner capture; CPU combiner reference128channel checks PASS. Independent source/config/build/capture/hash review by render_analysis accepted for diagnostic scope.
+- Frozen private evidence under `game/build/evidence/menu-state-a1fdb54d-20261028/`. [Actual supported/gap table](reports/RENDER_PLAN.md) identifies bilinear/ref0/addONEONE/32-entry palette/format/Q/coherence work. No registered GPU renderer, speedup or hardware/gameplay acceptance.
+
 ## 2026-10-28 — P8 helper boundary and texture/state subset: PASS
 
 - Patch0005 fixes palette data loss in the backend descriptor/helper for bounded256-entry P8; CPU renderer unchanged. `scripts/backend-palette-test.sh` fixed regression and original-defect negative control PASS, including explicit failed pixel assertions after deliberately restoring the defect. Independent execution and final review by render_analysis PASS.

@@ -211,3 +211,29 @@ The synthetic upstream backend fixture checks4×2 Morton indexing, index255, exa
 The full Switch build with patches0001–0005 exits0 and produces game NRO `e3b6f632efa5e26e6aa14674252fe30ba3e5f5374634312e55376906c85119a1`. Frozen local source/build/test/binary evidence: `game/build/evidence/palette-e3b6f632-20261028/manifest.json`. Patch SHA-256 `d6048005abaacfaf01f1b87837d39674bc0d09b64a68c0531ed8d6258b39cc0d`; regression runner `f560b0493cfc60e88acd33b2e5c65e552fa4cf41bc9f473b112ee66df9b01e64`; final test log `98470d526c11c301a8c39b53fc4dea6785d190ab3be795375bdd8365e99e5c30`. No game/menu run or GPU palette upload is established by this host regression/build; active menu palette lengths, shorter-palette semantics, mirrors and hardware remain UNVERIFIED. Remove patch0005 and rebuild to roll back.
 
 Provenance retention note: the earlier profiling manifest points at four build intermediates replaced by this later build (NRO/ELF/full compiler log/prepared executor). Its original timing/navigation logs remain retained, and those executed results are historical. Do not claim all old manifest paths still match the old hashes. The local integrity audit is `game/build/render-profile/integrity-audit-after-palette-build.json`; new proofs retain separate frozen evidence directories to avoid that overwrite. No proprietary artifacts are committed.
+
+## RENDER-MENU-STATE-001 result — complete CPU menu-frame capture
+
+**PASS for diagnostic capture only.** Patch0006 adds gated records to the existing frame trace; it changes no rendering algorithm and registers no backend. Host backend/trace CTest2/2 and the palette original-defect negative control pass. Full Switch build exits0, NRO `a1fdb54d2c1b6d44131c62d6a77330773cc6178d6fc0d6c12d8c66e992a01213`. Independent reviewer render_analysis inspected source/config/build/tests and the actual capture.
+
+A bounded180-second Eden/llvmpipe run reached the original menu and remained alive without logged guest/Eden faults. The flag was armed after startup; exactly one complete traced frame spans Eden timestamps128.682469–136.988611. Those timestamps include diagnostic overhead and are not an FPS result. There are28draws, each with state/depth/surface plus four texture records. Actual complete images before and after tracing show MAIN MENU with PLAY highlighted. Raw program words, logs, frames and binaries remain private.
+
+The current CPU combiner model interprets23batches as texture0 multiplied by diffuse and five as diffuse alone. A private compiled reference check exercised both captured programs on128synthetic channel cases and passed; source review confirms their inputs do not read the final constants omitted by the older trace. This establishes the sampled CPU-model interpretation, not original Xbox/GPU correctness. A valid stale texture descriptor is not evidence that a batch samples it: joining the program state to each draw is required.
+
+| Actual requirement in this frame | Existing evidence | Gap before backend registration |
+|---|---|---|
+| 23 texture0×diffuse batches;5 diffuse-only | Captured program/source interpretation and CPU reference checks | Carry/derive the correct fragment mode; texture pointer alone is insufficient |
+| Alpha GREATER, reference0 | GPU test covers reference128 | Zero-alpha boundary after combining/filtering |
+| ADD SRC_ALPHA/INV_SRC_ALPHA,27draws | Representative GPU proof passed | Apply to the actual modulated/bilinear fragment output |
+| ADD ONE/ONE,1draw | ONE/ONE tested with reverse subtraction only | Additive ONE/ONE readback |
+| Clamp U/V; bilinear min/mag; one mip | Nearest clamp/repeat proof passed | Bilinear half-texel/edge/interpolated-alpha proof |
+| Active P8:5draws with256entries,1with32 | Bounded256-entry helper passed | Bounded32-entry decode/index validation and upload |
+| Active swizzled ARGB8:15draws; DXT2/3-class:2 | Formats identified from upstream definitions | Independent decoder/channel/alpha fixtures and upload |
+| Full colour mask; cull/depth/stencil disabled | Matching disabled-state/full-mask proof | This frame alone requires no active depth/stencil/cull; later states remain unsupported |
+| Linear640×480, AA1, X8R8G8B8 variant; Z24S8 bound but disabled | Smaller synthetic RGBA8 targets | Surface identity/X8 semantics, readback and completion ordering |
+
+Texture-stage0 sampling operation is projected2D; the descriptor lacks a separate textureQ. This trace records render/sampler/program state, not all consumed vertex outputs, so Q=1 must be verified or Q must be carried before using a nonprojective shader. Other stages' descriptor validity does not imply sampling. One frame does not establish all menu states, level graphics or gameplay coverage.
+
+Frozen local evidence: `game/build/evidence/menu-state-a1fdb54d-20261028/build-manifest.json` and `capture-manifest.json`, with source/patch/NRO/ELF/config/build/test/raw capture/parsed records/reference-check/frame hashes. The independent reviewer verified all14build and12capture artifacts. Trace flag was removed and prior env restored after capture. No proprietary artifacts are committed. The public report contains authored conclusions rather than copied game programs or logs.
+
+Before registration, choose the measured subset with explicit unsupported-state rejection, rather than an unverified universal NV2A implementation. Timebox the next proof to one implementation/build/readback/review iteration: verify projectedQ, close bilinear/alpha0/additive blending/32-entry palette and actual format decode gaps, then specify coherent guest-surface and fence handling. If reference comparisons fail repeatedly, gather new evidence before expanding. No menu GPU renderer, speedup, hardware compatibility or gameplay gate is claimed here.

@@ -53,4 +53,5 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | RENDER-GPU-POC-001 | done | runtime_analysis | DEKO3D-PROOF-001 | Synthetic Nv2aVertex GPU coordinate/colour/perspective readback, independent review |
 | RENDER-GPU-STATE-001 | done | runtime_analysis | RENDER-GPU-POC-001 | Synthetic texture/address/alpha/blend/write-mask readback with independent reference |
 | RENDER-PALETTE-001 | done | lead | RENDER-GPU-POC-001 | Carry/test bounded P8 palette metadata and helper restore; independent review |
-| RENDER-MENU-STATE-001 | in_progress | runtime_analysis | INPUT-NAV-001 | Complete opt-in menu-frame state capture and support/gap table, independent review |
+| RENDER-MENU-STATE-001 | done | runtime_analysis | INPUT-NAV-001 | Complete opt-in menu-frame state capture and support/gap table, independent review |
+| RENDER-MENU-PROOF-001 | ready | runtime | RENDER-MENU-STATE-001, RENDER-GPU-STATE-001, RENDER-PALETTE-001 | Verify observed menu Q/filter/alpha/blend/palette/format requirements against references |
