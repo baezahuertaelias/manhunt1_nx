@@ -7,6 +7,5 @@ Ranked. Evidence: [reports/FEASIBILITY.md](reports/FEASIBILITY.md), [reports/REC
 3. **P1 — Game's x87 control word unknown.** 64-bit precision control is approximated with doubles (last-ulp differences).
 4. **P1 — Eden runner not reproducible** from this repo (`dd-eden:local`, checked by image ID) (EMU-IMAGE-001).
 5. **P1 — Hardware GPU in containers.** Eden + `/dev/dri` under Xvfb fails ("Device lacks a present queue"); every emulator run used llvmpipe (GPU-PROOF-001).
-6. **P1 — No Git remote.** Creating a private remote needs user approval.
-7. **P2 — RAM mirrors unsupported on Horizon.** Not used on the boot path (measured); re-check at level load.
-8. **P2 — No physical Switch.** All hardware gates stay `UNVERIFIED`.
+6. **P2 — RAM mirrors unsupported on Horizon.** Not used on the boot path (measured); re-check at level load.
+7. **P2 — No physical Switch.** All hardware gates stay `UNVERIFIED`.

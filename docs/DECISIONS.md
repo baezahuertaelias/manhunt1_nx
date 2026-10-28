@@ -24,6 +24,15 @@ Accepted, with measurements in RECOMP_EVAL: double-based x87 at 64-bit precision
 
 Accepted temporarily: the host-local `dd-eden:local` image as the emulator runner, checked by image ID, until EMU-IMAGE-001.
 
+## 2026-10-28 — Public repository
+
+On the user's explicit instruction the GitHub repo was made public (AGENTS.md: nothing public without explicit authorization). Before the change the whole history was checked:
+- no game files and no game-derived output (lifted C, frames, logs, binaries) in any commit;
+- no keys or tokens;
+- commits carry a placeholder author identity.
+
+The asset manifest (file names, sizes, SHA-256) and the XBE header facts are public by design: they identify the user's input without containing it. Built binaries stay unpublished: they contain lifted game code.
+
 ## 2026-10-27 — Milestone 2 design choices
 
 **Native input and "no audio driver" at the XDK API level.** On x86-64 POSIX the runtime's fault-trapped device models (USB, APU) don't run, and on Horizon nothing faults (`tests/horizon-probe`). So the title's statically linked XAPI XInput and DirectSound entry points are replaced by native functions (`game/manual_functions.json`; addresses from the XBE's `.XTLID` table and XDK 5849 export IDs).
