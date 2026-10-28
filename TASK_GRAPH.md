@@ -22,3 +22,24 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | EMU-IMAGE-001 | ready | test | — | Eden/Ryujinx image built from pinned source in this repo passes `scripts/toolchain-proof.sh` |
 | GPU-PROOF-001 | ready | test | — | Container renders via `/dev/dri`; renderer is not a software fallback |
 | REPO-REMOTE-001 | done | lead | user approval (given 2026-10-28) | Remote created (public on user instruction); `main` protected (no force-push/deletion, PRs) |
+| LEVEL-LOAD-001 | pending | runtime | INPUT-NAV-001, RENDER-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
+| X87-CW-001 | ready | re | BOOT-HOST-001 | Game's x87 control word(s) known: sites + runtime value; double-based x87 decision revisited |
+| MEM-MIRROR-002 | pending | runtime | LEVEL-LOAD-001 | Mirror/tiled-aperture traps silent through level load, or an address-wrapping design |
+| LGPL-LINK-001 | ready | lead | — | Link maps show whether LGPL objects are linked; THIRD_PARTY.md updated (before any distribution) |
+
+### Requested features (user, 2026-10-28; P3, after Beta 1 per ROADMAP priorities)
+
+Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.md). All opt-in, default off, original behaviour unchanged when off.
+
+| ID | State | Owner | Depends on | Acceptance |
+|---|---|---|---|---|
+| WIDE-001 | ready | re | BOOT-SWITCH-001 | `reports/WIDESCREEN_PLAN.md`: back buffer, video flags, RW camera/projection, culling, 2D and FMV paths with guest addresses |
+| WIDE-002 | pending | runtime | WIDE-001, RENDER-001, LEVEL-LOAD-001 | `MANHUNT_WIDESCREEN=1`: real 16:9 Hor+ (square pixels, same vertical FOV, no stretch); simulation unchanged |
+| WIDE-003 | pending | runtime | WIDE-002 | HUD/menus/text not stretched, FMV at own aspect, no edge popping |
+| DEVMENU-001 | ready | re | BOOT-HOST-001 | `reports/DEVMENU.md`: Rockstar dev menu located (addresses, enable path) and shown on host build, or proven stripped |
+| DEVMENU-002 | pending | runtime | DEVMENU-001, INPUT-NAV-001 | `MANHUNT_DEVMENU=1` + pad combo opens it on Switch (Eden); off = identical behaviour |
+| MODMENU-001 | pending | runtime | DEVMENU-001, LEVEL-LOAD-001 | Native overlay menu, pad combo, coordinates display; only features the dev menu lacks |
+| MODMENU-002 | pending | runtime | MODMENU-001 | Infinite health, god mode, fall damage toggle, waypoint save/load |
+| MODMENU-003 | pending | runtime | MODMENU-001 | Weapon spawner (weapons loaded in the level, max ammo) |
+| MODMENU-004 | pending | runtime | MODMENU-001 | Cheats + cheats flag, weather presets, stars/moon, console |
+| MHP-EVAL-001 | pending | re | LEVEL-LOAD-001 | Each MHP feature confirmed or ruled out on Xbox; tasks only for confirmed ones; no MHP code copied |

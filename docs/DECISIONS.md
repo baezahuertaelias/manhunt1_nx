@@ -60,3 +60,15 @@ The asset manifest (file names, sizes, SHA-256) and the XBE header facts are pub
 - layout → `README.md`
 
 Its one-time startup steps were executed. What remains is tracked as CODEX-AGENTS-001, FEASIBILITY-001, RECOMP-EVAL-001, EMU-RUNNER-001, GPU-PROOF-001 and REPO-REMOTE-001. The original prompt is recoverable from Git history (`git show 1482bc7:MANHUNT_CODEX_MASTER_PROMPT.md`).
+
+## 2026-10-28 — Widescreen, developer/mod menu and MHP as tasks
+
+The user asked for a real 16:9 view (no stretching), the Rockstar developer menu or a custom mod menu, and an assessment of the MHP patches. Analysis: [reports/MODDING_REFERENCES.md](../reports/MODDING_REFERENCES.md).
+
+- **Recorded now, scheduled as P3.** ROADMAP keeps Beta 1 (first level at 30 FPS) ahead of polish. The analysis tasks with no unmet dependencies (WIDE-001, DEVMENU-001) are `ready`; the implementations wait for the render back end and the first level load. The user can raise their priority.
+- **Real 16:9 means Hor+** with square pixels, the same vertical FOV and unstretched 2D. Rejected: stretching the 4:3 image, and cropping it vertically.
+- **Original developer menu first, custom menu second.** The Xbox XBE still holds the dev-menu strings, so DEVMENU-001 decides what the custom menu (MODMENU-*) has to add.
+- **PluginMH and MHP: ideas only.** Both are PC-only ASI plugins with no license, and they patch PC addresses. Their code is not copied; the features are reimplemented from the Xbox XBE.
+- **Every feature is opt-in** (`MANHUNT_WIDESCREEN`, `MANHUNT_DEVMENU`, `MANHUNT_MODMENU`, default off). Cheat features set the game's own cheats flag. With the switches off, behaviour is the original.
+
+Also added from the docs review: LEVEL-LOAD-001 (milestone 4 gate), X87-CW-001 (BLOCKERS #3), MEM-MIRROR-002 (BLOCKERS #6), LGPL-LINK-001 (THIRD_PARTY.md).
