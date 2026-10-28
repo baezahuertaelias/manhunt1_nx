@@ -1,6 +1,6 @@
 # Setup
 
-Headless, SSH-only host with Docker. No host packages are installed by this project.
+Headless, SSH-only host with Docker. No host packages are installed by this project. Preparing a new host: [HOST_SETUP.md](HOST_SETUP.md).
 
 ## Inputs
 

@@ -19,6 +19,7 @@ Research toward a native Switch port of the original Xbox Manhunt via hybrid sta
 - [AGENTS.md](AGENTS.md): project rules for humans and agents
 - [docs/ROADMAP.md](docs/ROADMAP.md): Beta 1 definition, milestones, performance targets
 - [docs/WORKFLOW.md](docs/WORKFLOW.md): planning, review, GitHub pipeline, provenance
+- [docs/HOST_SETUP.md](docs/HOST_SETUP.md): preparing a host (Docker, permissions, images, disk)
 - [docs/SETUP.md](docs/SETUP.md): getting started
 
 ## Layout
