@@ -15,7 +15,7 @@ Native Nintendo Switch port of **Manhunt (original Xbox XBE)** via hybrid static
 
 - Use lawfully obtained game and system files only. Never download, commit or redistribute proprietary game assets, BIOS, firmware, keys, SDK components or copyrighted binaries. User inputs stay under gitignored `assets/`.
 - Never commit secrets, generated distributables, huge traces or caches.
-- Keep the GitHub repository **private**. Nothing public (repo, releases, artifacts) without explicit user authorization. Test artifacts must exclude proprietary data unless the user explicitly authorizes lawful storage.
+- The GitHub repository is **public** (user decision 2026-10-28), so every commit is published: never commit game files or anything derived from them (lifted C, frames, logs, binaries). No releases or binary artifacts without explicit user authorization. Test artifacts must exclude proprietary data unless the user explicitly authorizes lawful storage.
 
 ## Host and Docker
 

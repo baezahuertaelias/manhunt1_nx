@@ -28,4 +28,4 @@
 | Host config keys | `MANHUNT_PAD_SCRIPT`, `MANHUNT_SAVE_DIR`, `MANHUNT_MIRROR_TRAP`, `MANHUNT_TILED_TRAP` (debug traps) | environment, forwarded by `scripts/game-run.sh` | |
 | Eden data dir | `game/build/eden-data` (`EMU_DATA`) | `scripts/emu-run.sh` | Writable Eden user dir; SD card is its `sdmc/` |
 | Guest thread placement (Switch) | runtime threads round-robin over cores 0–2, mask 0x7; guest thread prefers core 0 | patch 0003, `main_switch.c` | Horizon does not time-slice equal-priority threads |
-| Git remote | `origin` = `https://github.com/baezahuertaelias/manhunt1_nx` (**private**) | `gh repo create` 2026-10-28 | Branch protection unavailable on the current plan (HTTP 403) |
+| Git remote | `origin` = `https://github.com/baezahuertaelias/manhunt1_nx` (**public**, by user decision 2026-10-28) | `gh repo create`, `gh api` | `main` protected: no force-push, no deletion, changes via pull request (0 approvals required) |
