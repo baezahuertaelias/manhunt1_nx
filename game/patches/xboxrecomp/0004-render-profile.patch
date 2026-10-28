@@ -1,0 +1,258 @@
+--- /dev/null
++++ b/src/kernel/nv2a_profile.h
+@@ -0,0 +1,71 @@
++#ifndef NV2A_PROFILE_H
++#define NV2A_PROFILE_H
++#include <stdint.h>
++#include <stdio.h>
++#include "platform/host_time.h"
++
++enum { NV_PROFILE_SCAN, NV_PROFILE_METHOD, NV_PROFILE_DRAW,
++       NV_PROFILE_CLEAR, NV_PROFILE_PRESENT, NV_PROFILE_TRIANGLE, NV_PROFILE_COUNT };
++typedef struct {
++    uint64_t ns[NV_PROFILE_COUNT], calls[NV_PROFILE_COUNT];
++    uint64_t invalid, first_ns, last_flip_ns, flip_ns, flips;
++    int have_flip;
++} Nv2aProfile;
++extern _Thread_local Nv2aProfile nv2a_profile;
++int nv2a_profile_enabled(void);
++
++typedef struct { uint64_t ns; int active; } Nv2aProfileStart;
++static inline Nv2aProfileStart nv2a_profile_begin(void)
++{
++    Nv2aProfileStart start = {0, nv2a_profile_enabled()};
++    if (start.active) start.ns = xbox_HostNowNs();
++    return start;
++}
++static inline void nv2a_profile_end(unsigned scope, Nv2aProfileStart start)
++{
++    if (!start.active) return;
++    uint64_t end = xbox_HostNowNs();
++    if (end < start.ns) { nv2a_profile.invalid++; return; }
++    nv2a_profile.ns[scope] += end - start.ns;
++    nv2a_profile.calls[scope]++;
++}
++static inline void nv2a_profile_flip(uint64_t now)
++{
++    if (!nv2a_profile_enabled()) return;
++    if (nv2a_profile.have_flip) {
++        if (now < nv2a_profile.last_flip_ns) { nv2a_profile.invalid++; return; }
++        else { nv2a_profile.flip_ns += now - nv2a_profile.last_flip_ns;
++               nv2a_profile.flips++; }
++    } else { nv2a_profile.first_ns = now; nv2a_profile.have_flip = 1; }
++    nv2a_profile.last_flip_ns = now;
++}
++/* Inclusive scopes overlap. This difference is scanner overhead, never guest time. */
++static inline int nv2a_profile_scan_only(uint64_t *ns)
++{
++    if (nv2a_profile.ns[NV_PROFILE_METHOD] > nv2a_profile.ns[NV_PROFILE_SCAN])
++        return 0;
++    *ns = nv2a_profile.ns[NV_PROFILE_SCAN] - nv2a_profile.ns[NV_PROFILE_METHOD];
++    return 1;
++}
++static inline void nv2a_profile_report(void)
++{
++    static const char *names[] = {"scan", "method", "draw", "clear", "present", "triangle"};
++    if (!nv2a_profile_enabled()) return;
++    fprintf(stderr, "[RENDER-PROFILE] thread_local cumulative inclusive wall_ns invalid=%llu\n",
++            (unsigned long long)nv2a_profile.invalid);
++    for (unsigned i = 0; i < NV_PROFILE_COUNT; i++)
++        fprintf(stderr, "[RENDER-PROFILE] %s calls=%llu ns=%llu\n", names[i],
++                (unsigned long long)nv2a_profile.calls[i],
++                (unsigned long long)nv2a_profile.ns[i]);
++    uint64_t scan_only;
++    if (nv2a_profile_scan_only(&scan_only))
++        fprintf(stderr, "[RENDER-PROFILE] scan_excluding_methods_ns=%llu\n",
++                (unsigned long long)scan_only);
++    else fprintf(stderr, "[RENDER-PROFILE] scan_excluding_methods_ns=UNVERIFIED\n");
++    fprintf(stderr, "[RENDER-PROFILE] flip_intervals=%llu ns=%llu first_ns=%llu last_ns=%llu\n",
++            (unsigned long long)nv2a_profile.flips,
++            (unsigned long long)nv2a_profile.flip_ns,
++            (unsigned long long)nv2a_profile.first_ns,
++            (unsigned long long)nv2a_profile.last_flip_ns);
++}
++#endif
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -40,6 +40,19 @@
+ #include "nv2a_vsh_interp.h"
+ #include "nv2a_combiner.h"
+ #include "nv2a_backend.h"
++#include "nv2a_profile.h"
++
++_Thread_local Nv2aProfile nv2a_profile;
++int nv2a_profile_enabled(void)
++{
++    static _Thread_local int enabled = -1;
++    if (enabled < 0) {
++        const char *value = getenv("RECOMP_RENDER_PROFILE");
++        enabled = value && strcmp(value, "1") == 0;
++    }
++    return enabled;
++}
++
+ #if defined(_WIN32)
+ #include <windows.h>
+ #define NV_TLS __declspec(thread)
+@@ -872,7 +885,7 @@
+ 
+ static void surface_swizzle_update(void)
+ {
+-    static int enabled = -1;
++    static _Thread_local int enabled = -1;
+     if (enabled < 0) {
+         const char *e = getenv("RECOMP_SWIZZLED_RT");
+         enabled = !(e && e[0] == '0');
+@@ -1553,7 +1566,7 @@
+ /* Half-space fill. Barycentric edge functions rather than scanline slopes:
+  * the same test decides both windings, so a title that emits clockwise
+  * triangles does not silently render nothing. */
+-static void raster_triangle(const float a[2], const float b[2],
++static void raster_triangle_impl(const float a[2], const float b[2],
+                             const float c[2], uint32_t argb,
+                             const float uv[3][2])
+ {
+@@ -2645,7 +2658,10 @@
+     s_xfq_px += (long)(T->maxx - T->minx) * (T->maxy - T->miny);
+ }
+ 
+-static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
++static void raster_xf_triangle(const Nv2aVshOutput *, const Nv2aVshOutput *,
++                               const Nv2aVshOutput *);
++
++static void raster_xf_triangle_impl(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
+                                const Nv2aVshOutput *vc)
+ {
+     XfTri T;
+@@ -3235,7 +3251,9 @@
+     {
+         uint32_t t0 = s_gpu.tris_drawn;
+         uint64_t p0 = s_gpu.pixels;
++        Nv2aProfileStart profile = nv2a_profile_begin();
+         raster_batch();
++        nv2a_profile_end(NV_PROFILE_DRAW, profile);
+         if (s_ftrace == 2) {
+             fprintf(stderr, "[FTRACE] %s prim %u n %u surf %08X %ux%u+%u+%u"
+                     " pitch %u | tex %s %08X %ux%u fmt %02X | blend %u %X/%X"
+@@ -3744,7 +3762,7 @@
+     h->held_ns = 0;
+ }
+ 
+-void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
++static void nv2a_pb_exec_method_impl(uint32_t subch, uint32_t method, uint32_t param)
+ {
+     static int inited;
+ 
+@@ -3959,7 +3977,11 @@
+             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
+                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
+                     s_gpu.clear_color, 10);
+-        clear_surface(param);
++        {
++            Nv2aProfileStart profile = nv2a_profile_begin();
++            clear_surface(param);
++            nv2a_profile_end(NV_PROFILE_CLEAR, profile);
++        }
+         if (param & 0x01)                         /* Z */
+             zbuf_clear();
+         break;
+@@ -4068,6 +4090,7 @@
+          * the present below: a vsynced present can hold this thread for a
+          * host frame, and that time counts against the hold. */
+         uint64_t stall_ns = xbox_HostNowNs();
++        nv2a_profile_flip(stall_ns);
+         int clock_ok;
+         uint32_t stall_vbl;
+         (void)flip_clock(stall_ns, &clock_ok);
+@@ -4105,7 +4128,9 @@
+             if (done) {
+                 xbox_FramebufferWindowSet(dma_resolve(done), pitch);
+                 xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
++                Nv2aProfileStart profile = nv2a_profile_begin();
+                 xbox_FramebufferWindowPresent(dma_resolve(done), pitch);
++                nv2a_profile_end(NV_PROFILE_PRESENT, profile);
+             }
+         }
+         {
+@@ -4430,6 +4455,7 @@
+ 
+ void nv2a_pb_exec_report(void)
+ {
++    nv2a_profile_report();
+     peek_addresses();
+     peek_chain();
+     if (getenv("RECOMP_FIND_NAN")) {
+@@ -4572,3 +4598,27 @@
+         s_unhandled_slot[(s_unhandled[i].method & 0x1FFC) / 4] = (uint16_t)(i + 1);
+     fflush(stderr);
+ }
++
++void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
++{
++    Nv2aProfileStart profile = nv2a_profile_begin();
++    nv2a_pb_exec_method_impl(subch, method, param);
++    nv2a_profile_end(NV_PROFILE_METHOD, profile);
++}
++
++static void raster_triangle(const float a[2], const float b[2],
++                            const float c[2], uint32_t argb,
++                            const float uv[3][2])
++{
++    Nv2aProfileStart profile = nv2a_profile_begin();
++    raster_triangle_impl(a, b, c, argb, uv);
++    nv2a_profile_end(NV_PROFILE_TRIANGLE, profile);
++}
++
++static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
++                               const Nv2aVshOutput *vc)
++{
++    Nv2aProfileStart profile = nv2a_profile_begin();
++    raster_xf_triangle_impl(va, vb, vc);
++    nv2a_profile_end(NV_PROFILE_TRIANGLE, profile);
++}
+--- a/src/kernel/nv2a_pb_scan.c
++++ b/src/kernel/nv2a_pb_scan.c
+@@ -25,6 +25,7 @@
+ #include <stddef.h>   /* ptrdiff_t */
+ #include <stdlib.h>
+ #include <string.h>
++#include "nv2a_profile.h"
+ 
+ extern ptrdiff_t xbox_GetMemoryOffset(void);
+ 
+@@ -295,7 +296,7 @@
+     }
+ }
+ 
+-void nv2a_pb_scan(uint32_t put_phys)
++static void nv2a_pb_scan_impl(uint32_t put_phys)
+ {
+     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+     uint32_t put = put_phys & PB_PHYS_MASK;
+@@ -524,7 +525,7 @@
+     return words;
+ }
+ 
+-void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
++static void nv2a_pb_scan_segment_impl(uint32_t start_va, uint32_t end_va)
+ {
+     uint32_t words, jumps = 0, unknown = 0;
+ 
+@@ -544,3 +545,17 @@
+     s_tot_jumps += jumps;
+     s_tot_segments++;
+ }
++
++void nv2a_pb_scan(uint32_t put_phys)
++{
++    Nv2aProfileStart profile = nv2a_profile_begin();
++    nv2a_pb_scan_impl(put_phys);
++    nv2a_profile_end(NV_PROFILE_SCAN, profile);
++}
++
++void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
++{
++    Nv2aProfileStart profile = nv2a_profile_begin();
++    nv2a_pb_scan_segment_impl(start_va, end_va);
++    nv2a_profile_end(NV_PROFILE_SCAN, profile);
++}
