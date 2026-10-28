@@ -11,7 +11,7 @@ APP_AUTHOR := Manhunt Recompilation Team
 APP_VERSION := 0.0.1
 BUILD := build
 ROMFS := $(BUILD)/romfs
-SHADERS := $(ROMFS)/shaders/attribute_vsh.dksh $(ROMFS)/shaders/attribute_fsh.dksh
+SHADERS := $(ROMFS)/shaders/attribute_vsh.dksh $(ROMFS)/shaders/attribute_fsh.dksh $(ROMFS)/shaders/texture_fsh.dksh
 ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS := -g -Wall -Wextra -Werror -O2 -ffunction-sections $(ARCH) -D__SWITCH__ -I$(DEVKITPRO)/libnx/include -I$(XBOXRECOMP_DIR)/src/kernel -MMD -MP -ffile-prefix-map=$(CURDIR)=.
 LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -L$(DEVKITPRO)/libnx/lib -Wl,--gc-sections
