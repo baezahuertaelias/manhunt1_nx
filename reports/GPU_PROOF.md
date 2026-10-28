@@ -47,5 +47,4 @@ software-context run. Arbitrary future software renderer names are not known.
 
 Eden Vulkan presentation, emulator GPU rendering, physical Switch graphics and
 FPS are **UNVERIFIED by this test**. No runtime configuration changes. Remove
-these three added files to roll back. Independent review is required before
-integration; no merge is claimed here.
+these three added files to roll back. Independent review by render_analysis: PASS, no blocking findings (2026-10-28); inspected source, configuration changes, hashes and the primary agent’s independent run. That run at commit `f819c1c7f713665c3d4959928276d87342f0be21` produced the same Intel renderer and RGBA value, exit 0. Local log: `/tmp/manhunt-gpu-independent.log`. No merge to main is claimed.

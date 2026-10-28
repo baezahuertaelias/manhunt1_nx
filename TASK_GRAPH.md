@@ -13,17 +13,17 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | FEASIBILITY-001 | done | lead | RECOMP-EVAL-001 | `reports/FEASIBILITY.md`: boot path, lift, Horizon capabilities, bring-up evidence |
 | BOOT-HOST-001 | done | runtime | FEASIBILITY-001 | Recompiled game reaches the original main menu on the Linux host build |
 | BOOT-SWITCH-001 | done | runtime | BOOT-HOST-001 | Switch NRO reaches the main menu in Eden (`scripts/switch-boot-proof.sh`) |
-| RENDER-001 | ready | runtime | BOOT-SWITCH-001 | Frame-time breakdown + deko3d back-end plan (`reports/RENDER_PLAN.md`) |
+| RENDER-001 | in_progress | render_analysis | BOOT-SWITCH-001 | Frame-time breakdown + deko3d back-end plan (`reports/RENDER_PLAN.md`) |
 | AUDIO-HLE-001 | ready | runtime | BOOT-SWITCH-001 | Native DirectSound plays the front-end music on host and Switch |
 | INPUT-NAV-001 | ready | test | BOOT-SWITCH-001 | Scripted pad moves the main-menu selection on the Switch build |
 | HZ-PORT-002 | ready | runtime | BOOT-SWITCH-001 | Horizon memory backend and libc shims match POSIX semantics (review findings) |
 | CODEX-AGENTS-001 | ready | lead | — | Codex 0.164.0 config syntax and available models verified; `.codex/agents/*.toml` for the WORKFLOW roles, documented in CONFIGURATION.md |
 | NEG-CONTROLS-001 | ready | test | RECOMP-EVAL-001 | Negative controls scripted and expected to fail inside `scripts/toolchain-proof.sh` |
 | EMU-IMAGE-001 | ready | test | — | Eden/Ryujinx image built from pinned source in this repo passes `scripts/toolchain-proof.sh` |
-| GPU-PROOF-001 | ready | test | — | Container renders via `/dev/dri`; renderer is not a software fallback |
+| GPU-PROOF-001 | done | runner_analysis | — | Container renders via `/dev/dri`; renderer is not a software fallback |
 | REPO-REMOTE-001 | done | lead | user approval (given 2026-10-28) | Remote created (public on user instruction); `main` protected (no force-push/deletion, PRs) |
 | LEVEL-LOAD-001 | pending | runtime | INPUT-NAV-001, RENDER-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
-| X87-CW-001 | ready | re | BOOT-HOST-001 | Game's x87 control word(s) known: sites + runtime value; double-based x87 decision revisited |
+| X87-CW-001 | in_progress | re | BOOT-HOST-001 | Game's x87 control word(s) known: sites + runtime value; double-based x87 decision revisited |
 | MEM-MIRROR-002 | pending | runtime | LEVEL-LOAD-001 | Mirror/tiled-aperture traps silent through level load, or an address-wrapping design |
 | LGPL-LINK-001 | ready | lead | — | Link maps show whether LGPL objects are linked; THIRD_PARTY.md updated (before any distribution) |
 
@@ -43,3 +43,10 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | MODMENU-003 | pending | runtime | MODMENU-001 | Weapon spawner (weapons loaded in the level, max ammo) |
 | MODMENU-004 | pending | runtime | MODMENU-001 | Cheats + cheats flag, weather presets, stars/moon, console |
 | MHP-EVAL-001 | pending | re | LEVEL-LOAD-001 | Each MHP feature confirmed or ruled out on Xbox; tasks only for confirmed ones; no MHP code copied |
+
+### Blocker audit (2026-10-28)
+
+| ID | State | Owner | Depends on | Acceptance |
+|---|---|---|---|---|
+| BLOCKER-AUDIT-001 | in_progress | lead | — | Reconcile blockers against executed evidence and preserve outstanding gates |
+| EMU-GPU-PRESENT-001 | ready | test | GPU-PROOF-001 | Hardware Vulkan Eden synthetic proof; runner/port failures separated |

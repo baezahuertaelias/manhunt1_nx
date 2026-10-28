@@ -2,6 +2,13 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-28 — Standalone GPU proof: PASS; x87 investigation partial
+
+- `scripts/gpu-proof.sh`: freshly compiled with clang 19.1.7, `-Wall -Wextra -Werror`; classifier/channel self-tests and Intel ADL-N GBM/EGL readback PASS, RGBA 64,128,191,255. Repeated by the primary agent, exit 0. Image/source/script hashes: [GPU_PROOF.md](reports/GPU_PROOF.md). Independent source/config/evidence review by render_analysis: PASS, no blockers.
+- `bash -n scripts/gpu-proof.sh` and `git diff --check`: PASS. No game/NRO rebuild was needed for the standalone synthetic proof.
+- Bounded existing-host-debug GDB watch: 53/64-bit precision and directed rounding observed; five private evidence hashes independently checked. [X87_CONTROL_WORD.md](reports/X87_CONTROL_WORD.md) records exact provenance and limits. Binary-source match, complete inventory and fidelity remain UNVERIFIED.
+- Rendering plan added; required Switch-build timing breakdown is pending. No new gameplay, emulator hardware presentation or Switch hardware result. No binaries or proprietary logs committed.
+
 ## 2026-10-27 — Milestone 2 after review fixes: PASS
 
 - `scripts/switch-boot-proof.sh` (stricter checks: successful menu opens, Eden-side fault scan, increasing presents, provenance): `MH-BOOT-PROOF PASS nro=95f77035d0f869c7`, 32 presents, 11 frames (9 with ≥5 % non-black pixels, all distinct).

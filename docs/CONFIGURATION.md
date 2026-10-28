@@ -29,3 +29,7 @@
 | Eden data dir | `game/build/eden-data` (`EMU_DATA`) | `scripts/emu-run.sh` | Writable Eden user dir; SD card is its `sdmc/` |
 | Guest thread placement (Switch) | runtime threads round-robin over cores 0–2, mask 0x7; guest thread prefers core 0 | patch 0003, `main_switch.c` | Horizon does not time-slice equal-priority threads |
 | Git remote | `origin` = `https://github.com/baezahuertaelias/manhunt1_nx` (**public**, by user decision 2026-10-28) | `gh repo create`, `gh api` | `main` protected: no force-push, no deletion, changes via pull request (0 approvals required) |
+
+## Standalone container GPU proof
+
+`scripts/gpu-proof.sh` compiles `tests/gpu-proof/main.c` with clang-19 inside the existing Eden image ID `sha256:68d0f0847e3ff18f84eedb227b38b5e1a977c036dc202ee6b01debf72762fecb`. It uses GBM/EGL directly, independently of Eden and Xvfb. The container runs as the caller, without network or capabilities, with one CPU, 512 MiB, a read-only source mount and only `/dev/dri/renderD128` plus its owning group. HOME is temporary; execution is bounded to 15 seconds. No emulator settings change. A pass proves only container GPU rendering/readback; Eden Vulkan presentation and Switch hardware remain UNVERIFIED. The image still lacks a reproducible source build (EMU-IMAGE-001).

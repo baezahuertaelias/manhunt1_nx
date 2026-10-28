@@ -36,5 +36,9 @@ Rerun with `scripts/toolchain-proof.sh`. Details: [reports/RECOMP_EVAL.md](repor
 
 | Item | Status |
 |---|---|
-| x87 fidelity at 64-bit precision control | INFO: last-ulp differences; the game's control word is unknown |
+| x87 fidelity at 64-bit precision control | INFO: last-ulp differences; a bounded host-debug watch observed 53/64-bit precision and directed rounding; fidelity unresolved ([report](reports/X87_CONTROL_WORD.md)) |
 | Performance (30 FPS gate) | UNVERIFIED — no hardware; emulator rate is far below target (CPU rasteriser) |
+
+## 2026-10-28 blocker investigation
+
+Standalone container Intel GBM/EGL rendering and pixel readback pass ([GPU proof](reports/GPU_PROOF.md)); Eden Vulkan presentation remains unresolved. [Render planning](reports/RENDER_PLAN.md) identifies missing timing evidence and backend-state gaps; RENDER-001 stays open. No new gameplay, audio, frame-rate or hardware gate passed.

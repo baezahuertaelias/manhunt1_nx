@@ -46,3 +46,7 @@ Validation (rerun 2026-10-26): NRO rebuild PASS, reproducible. Analysis image re
 - Validation: `scripts/switch-boot-proof.sh` PASS (Eden); host boot to menu; milestone-1 suite re-run (see BUILD_LOG).
 - Rollback: revert the milestone-2 merge; the milestone-1 tooling does not depend on any of it.
 
+
+## 2026-10-28 — Standalone GPU proof
+
+Added `scripts/gpu-proof.sh` using the existing pinned Eden image, GBM/EGL readback and a restricted render-node container (one CPU, 512 MiB, no network/capabilities). This does not change the emulator runner. Validation and independent review: see `reports/GPU_PROOF.md`. Rollback: remove the standalone proof and its documentation. Eden Vulkan presentation remains UNVERIFIED.

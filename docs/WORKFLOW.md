@@ -35,9 +35,9 @@ The ledger is `tasks/tasks.jsonl`, mirrored in `TASK_GRAPH.md` with links to iss
 6. Rebuild, retest, compare checkpoints, and record the outcome.
 7. After 2–3 failed hypotheses, gather new evidence, switch technique, or escalate.
 
-## GitHub pipeline (private repo)
+## GitHub pipeline (public repo)
 
-- Use the host's already-authenticated `gh`. Verify auth and repository identity before mutating anything. Keep the repo **private**. Inspect any existing suitable repo before creating a new one.
+- Use the host's already-authenticated `gh`. Verify auth and repository identity before mutating anything. The repo is **public** by user decision (2026-10-28). Never publish proprietary inputs or derived game artifacts. Inspect any existing suitable repo before creating a new one.
 - Agents may manage branches, issues, PRs, labels and milestones. Commits are descriptive and reference task IDs and evidence.
 - Merge approved PRs into `main` automatically once required checks pass. Critical changes also need the independent AI review, with blocking findings addressed. Branch protection enforces the checks and blocks direct pushes. AI review does not replace a GitHub-native approval where one is required.
 - **Pre-merge** tests must be sufficient evidence to merge. **Post-merge**, every merge to `main` triggers a fresh NRO build, Eden/Ryujinx regression tests (when a verified runner exists), host smoke tests and provenance checks. Major milestones also trigger xemu reference tests. Unavailable tests are marked `UNVERIFIED`, never green.
