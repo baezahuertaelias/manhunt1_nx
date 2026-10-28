@@ -128,23 +128,34 @@ static int verify(const uint32_t *pixels, uint32_t w, uint32_t h,
 typedef struct {
     const char *name;
     uint32_t wrap, alpha, blend, src, dst, equation, mask;
+    uint32_t filter, ref, program, zero_alpha;
 } StateCase;
+#define MENU_FILTER 0x02022000u
 static const StateCase state_cases[] = {
-    {"clamp", 3, 0, 0, 0, 0, 0, 0x01010101},
-    {"wrap", 1, 0, 0, 0, 0, 0, 0x01010101},
-    {"alpha-gt128", 1, 1, 0, 0, 0, 0, 0x01010101},
-    {"blend-add", 1, 0, 1, 0x302, 0x303, 0x8006, 0x01010101},
-    {"blend-reverse", 3, 0, 1, 1, 1, 0x800B, 0x01010101},
-    {"mask-r", 3, 0, 0, 0, 0, 0, 0x00010000},
-    {"mask-g", 3, 0, 0, 0, 0, 0, 0x00000100},
-    {"mask-b", 3, 0, 0, 0, 0, 0, 0x00000001},
-    {"mask-a", 3, 0, 0, 0, 0, 0, 0x01000000},
-    {"alpha-blend-rg", 1, 1, 1, 0x302, 0x303, 0x8006, 0x00010100},
+    {"clamp", 3, 0, 0, 0, 0, 0, 0x01010101, 0, 128, 0, 0},
+    {"wrap", 1, 0, 0, 0, 0, 0, 0x01010101, 0, 128, 0, 0},
+    {"alpha-gt128", 1, 1, 0, 0, 0, 0, 0x01010101, 0, 128, 0, 0},
+    {"blend-add", 1, 0, 1, 0x302, 0x303, 0x8006, 0x01010101, 0, 128, 0, 0},
+    {"blend-reverse", 3, 0, 1, 1, 1, 0x800B, 0x01010101, 0, 128, 0, 0},
+    {"mask-r", 3, 0, 0, 0, 0, 0, 0x00010000, 0, 128, 0, 0},
+    {"mask-g", 3, 0, 0, 0, 0, 0, 0x00000100, 0, 128, 0, 0},
+    {"mask-b", 3, 0, 0, 0, 0, 0, 0x00000001, 0, 128, 0, 0},
+    {"mask-a", 3, 0, 0, 0, 0, 0, 0x01000000, 0, 128, 0, 0},
+    {"alpha-blend-rg", 1, 1, 1, 0x302, 0x303, 0x8006, 0x00010100, 0, 128, 0, 0},
+    {"bilinear-clamp", 3, 0, 0, 0, 0, 0, 0x01010101, MENU_FILTER, 0, 0, 0},
+    {"menu-modulate", 3, 1, 1, 0x302, 0x303, 0x8006, 0x01010101, MENU_FILTER, 0, 1, 0},
+    {"menu-additive", 3, 1, 1, 1, 1, 0x8006, 0x01010101, MENU_FILTER, 0, 1, 0},
+    {"menu-diffuse", 3, 1, 1, 0x302, 0x303, 0x8006, 0x01010101, MENU_FILTER, 0, 2, 0},
+    {"diffuse-zero-alpha", 3, 1, 1, 0x302, 0x303, 0x8006, 0x01010101, MENU_FILTER, 0, 2, 1},
 };
 // Already-decoded synthetic RGBA8 texels, row-major. Alpha straddles ref 128.
 static const uint8_t texels[4][4] = {
     {40, 80, 180, 127}, {180, 20, 90, 128},
     {70, 210, 25, 129}, {220, 130, 60, 255},
+};
+static const uint8_t menu_texels[4][4] = {
+    {40, 80, 180, 0}, {180, 20, 90, 64},
+    {70, 210, 25, 128}, {220, 130, 60, 255},
 };
 static const unsigned nv_masks[4] = {0x00010000, 0x00000100, 0x00000001, 0x01000000};
 #define STATE_CLEAR 0xE6D2965Au
@@ -162,16 +173,19 @@ static int factor(uint32_t nv, DkBlendFactor *dk)
 
 static int map_state(const Nv2aTexture *texture, const Nv2aRenderState *rs,
                      DkSampler *sampler, DkColorState *colour,
-                     DkColorWriteState *mask, DkBlendState *blend)
+                     DkColorWriteState *mask, DkBlendState *blend, unsigned program)
 {
-    if (!texture->width || !texture->height || texture->levels != 1 || texture->filter != 0
+    if (program > 2 || !texture->width || !texture->height || texture->levels != 1
+        || (texture->filter != 0 && texture->filter != MENU_FILTER)
+        || (texture->filter == MENU_FILTER && (texture->addr_u != 3 || texture->addr_v != 3))
         || (texture->addr_u != 1 && texture->addr_u != 3)
         || (texture->addr_v != 1 && texture->addr_v != 3)
         || (rs->color_mask & ~0x01010101u) || rs->depth_test_enable || rs->depth_write
         || rs->stencil_enable || rs->cull_enable
-        || (rs->alpha_test_enable && (rs->alpha_func != 0x204 || rs->alpha_ref > 255)))
+        || (rs->alpha_test_enable && (rs->alpha_func != 0x204 || (rs->alpha_ref != 0 && rs->alpha_ref != 128))))
         return 0;
     dkSamplerDefaults(sampler);
+    if (texture->filter == MENU_FILTER) sampler->minFilter = sampler->magFilter = DkFilter_Linear;
     sampler->wrapMode[0] = texture->addr_u == 1 ? DkWrapMode_Repeat : DkWrapMode_ClampToEdge;
     sampler->wrapMode[1] = texture->addr_v == 1 ? DkWrapMode_Repeat : DkWrapMode_ClampToEdge;
     dkColorStateDefaults(colour);
@@ -199,26 +213,60 @@ static int rejection_checks(void)
     Nv2aTexture texture = {.width=2, .height=2, .addr_u=3, .addr_v=3, .levels=1};
     Nv2aRenderState rs = {.color_mask=0x01010101};
     DkSampler sampler; DkColorState colour; DkColorWriteState mask; DkBlendState blend;
-    if (!map_state(&texture, &rs, &sampler, &colour, &mask, &blend)) return 0;
+    if (!map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
     texture.addr_u = 2;
-    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend)) return 0;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
     texture.addr_u = 3; rs.alpha_test_enable = 1; rs.alpha_func = 0x201;
-    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend)) return 0;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
     rs.alpha_test_enable = 0; rs.blend_enable = 1; rs.blend_src = 0x304;
     rs.blend_dst = 1; rs.blend_eq = 0x8006;
-    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend)) return 0;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
     rs.blend_src = 1; rs.blend_eq = 0x8008;
-    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend)) return 0;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
     rs.blend_enable = 0; rs.color_mask = 2;
-    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend)) return 0;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
+    rs.color_mask = 0x01010101; texture.filter = 0x01010000;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
+    texture.filter = 0;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 3)) return 0;
+    texture.filter = MENU_FILTER; texture.addr_u = 1;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
+    texture.addr_u = 3; rs.alpha_test_enable = 1; rs.alpha_func = 0x204; rs.alpha_ref = 1;
+    if (map_state(&texture, &rs, &sampler, &colour, &mask, &blend, 0)) return 0;
     return 1;
+}
+
+static int address_texel(int index, unsigned wrap)
+{
+    if (wrap == 1) return ((index % 2) + 2) % 2;
+    return index < 0 ? 0 : index > 1 ? 1 : index;
+}
+
+// Four-neighbour pixel-centre reference, independent of GPU sampler state.
+static void sample_reference(const uint8_t source[4][4], double u, double v,
+                             unsigned wrap, int linear, double rgba[4])
+{
+    double x = linear ? u - .5 : u, y = linear ? v - .5 : v;
+    int ix = (int)floor(x), iy = (int)floor(y);
+    double fx = x - ix, fy = y - iy;
+    for (int k = 0; k < 4; k++) {
+        rgba[k] = 0;
+        for (int dy = 0; dy <= (linear ? 1 : 0); dy++)
+            for (int dx = 0; dx <= (linear ? 1 : 0); dx++) {
+                int tx = address_texel(ix + dx, wrap), ty = address_texel(iy + dy, wrap);
+                double weight = linear ? (dx ? fx : 1-fx) * (dy ? fy : 1-fy) : 1;
+                rgba[k] += weight * source[ty * 2 + tx][k];
+            }
+    }
 }
 
 static int verify_state(const uint32_t *pixels, uint32_t w, uint32_t h,
                         const Nv2aVertex v[3], const StateCase *test, char *msg, size_t n)
 {
     unsigned checked = 0, bad = 0, discarded = 0, kept = 0, seen[4] = {0};
-    int max_error = 0;
+    unsigned mixed = 0, edges = 0, centres = 0, nearest_distinct = 0;
+    int max_error = 0, linear = test->filter == MENU_FILTER;
+    const uint8_t (*source)[4] = linear ? menu_texels : texels;
     for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) {
         double b[3];
         barycentric(v, x + .5, y + .5, b);
@@ -226,21 +274,39 @@ static int verify_state(const uint32_t *pixels, uint32_t w, uint32_t h,
         uint32_t pixel = pixels[y * w + x];
         if (min_b < -.03) { checked++; bad += pixel != STATE_CLEAR; continue; }
         if (min_b <= .03) continue;
-        double u = 0, vv = 0, sum = 0;
+        double u = 0, vv = 0, sum = 0, diffuse[4] = {0};
+        const unsigned shifts[4] = {16, 8, 0, 24};
         for (int i = 0; i < 3; i++) {
             double weight = b[i] * v[i].rhw;
             u += weight * v[i].u; vv += weight * v[i].v; sum += weight;
+            for (int k = 0; k < 4; k++) diffuse[k] += weight * ((v[i].diffuse >> shifts[k]) & 255);
         }
         u /= sum; vv /= sum;
-        // Nearest sample boundaries are excluded, independently of triangle edges.
-        double fu = u - floor(u), fv = vv - floor(vv);
-        if (fu < .02 || fu > .98 || fv < .02 || fv > .98) continue;
-        int tx = (int)floor(u), ty = (int)floor(vv);
-        if (test->wrap == 1) { tx = ((tx % 2) + 2) % 2; ty = ((ty % 2) + 2) % 2; }
-        else { tx = tx < 0 ? 0 : tx > 1 ? 1 : tx; ty = ty < 0 ? 0 : ty > 1 ? 1 : ty; }
-        const uint8_t *src = texels[ty * 2 + tx];
+        for (int k = 0; k < 4; k++) diffuse[k] /= sum;
+        if (!linear) {
+            // Nearest discontinuities are excluded; linear samples include centres and edges.
+            double fu = u - floor(u), fv = vv - floor(vv);
+            if (fu < .02 || fu > .98 || fv < .02 || fv > .98) continue;
+        } else {
+            mixed += u > .5 && u < 1.5 && vv > .5 && vv < 1.5;
+            edges += u < .5 || u > 1.5 || vv < .5 || vv > 1.5;
+            centres += fabs(u-.5) < 1e-6 || fabs(u-1.5) < 1e-6
+                    || fabs(vv-.5) < 1e-6 || fabs(vv-1.5) < 1e-6;
+        }
+        int tx = address_texel((int)floor(u), test->wrap);
+        int ty = address_texel((int)floor(vv), test->wrap);
         seen[ty * 2 + tx]++;
-        int reject = test->alpha && src[3] <= 128;
+        double src[4], nearest[4];
+        sample_reference(source, u, vv, test->wrap, linear, src);
+        sample_reference(source, u, vv, test->wrap, 0, nearest);
+        int distinct = 0;
+        for (int k = 0; k < 4; k++) {
+            if (fabs(src[k] - nearest[k]) > 12) distinct = 1;
+            if (test->program == 1) src[k] *= diffuse[k] / 255;
+            else if (test->program == 2) src[k] = diffuse[k];
+        }
+        nearest_distinct += distinct;
+        int reject = test->alpha && (int)floor(src[3] + .5) <= (int)test->ref;
         if (reject) discarded++; else kept++;
         checked++;
         for (int k = 0; k < 4; k++) {
@@ -249,22 +315,31 @@ static int verify_state(const uint32_t *pixels, uint32_t w, uint32_t h,
                 double out = src[k];
                 if (test->blend) {
                     if (test->equation == 0x800B) out = want - out;
-                    else out = out * (src[3] / 255.0) + want * (1.0 - src[3] / 255.0);
+                    else {
+                        double sf = test->src == 1 ? 1 : test->src == 0x302 ? src[3]/255 : 1-src[3]/255;
+                        double df = test->dst == 1 ? 1 : test->dst == 0x303 ? 1-src[3]/255 : src[3]/255;
+                        out = src[k] * sf + want * df;
+                    }
                 }
-                out = fmax(0, fmin(255, out));
-                want = (int)floor(out + .5);
+                want = (int)floor(fmax(0, fmin(255, out)) + .5);
             }
             int err = abs((int)((pixel >> (8 * k)) & 255) - want);
             if (err > max_error) max_error = err;
             bad += err > TOLERANCE;
         }
     }
-    int pass = checked > w * h / 2 && bad == 0 && kept > 100;
+    int pass = checked > w * h / 2 && bad == 0;
     for (int i = 0; i < 4; i++) pass &= seen[i] > 50;
-    if (test->alpha) pass &= discarded > 100;
-    snprintf(msg, n, "NV2A-STATE-CASE %s name=%s checked=%u kept=%u discarded=%u texels=%u/%u/%u/%u bad=%u max_error=%d",
-             pass ? "PASS" : "FAIL", test->name, checked, kept, discarded,
-             seen[0], seen[1], seen[2], seen[3], bad, max_error);
+    if (test->zero_alpha) pass &= kept == 0 && discarded > 100;
+    else pass &= kept > 100;
+    if (test->alpha && test->program != 2) pass &= discarded > 100;
+    if (linear) {
+        pass &= mixed > 100 && edges > 100 && centres > 20;
+        if (test->program != 2) pass &= nearest_distinct > 50;
+    }
+    snprintf(msg, n, "NV2A-STATE-CASE %s name=%s checked=%u kept=%u discarded=%u bad=%u max_error=%d mixed=%u edges=%u centres=%u nearest_distinct=%u",
+             pass ? "PASS" : "FAIL", test->name, checked, kept, discarded, bad, max_error,
+             mixed, edges, centres, nearest_distinct);
     return pass;
 }
 
@@ -306,10 +381,22 @@ static int run_case(DkDevice device, uint32_t w, uint32_t h, const StateCase *te
         vertices[0].u = -.5f; vertices[0].v = -.5f;
         vertices[1].u = 6; vertices[1].v = -.5f;
         vertices[2].u = -.5f; vertices[2].v = 8;
+        if (test->filter == MENU_FILTER) {
+            for (int i = 0; i < 3; i++) {
+                // Binary-grid centres make hardware filtering/alpha thresholds unambiguous.
+                vertices[i].rhw = 1;
+                vertices[i].u = vertices[i].x / 32 - 31.0f / 64;
+                vertices[i].v = vertices[i].y / 32 - 39.0f / 64;
+                vertices[i].diffuse = (vertices[i].diffuse & 0x00FFFFFFu)
+                                    | (test->zero_alpha ? 0 : 0x80000000u);
+            }
+        }
     }
     memcpy(dkMemBlockGetCpuAddr(data_mem), vertices, sizeof vertices);
     // A separate aligned uniform buffer carries per-target dimensions.
-    float dimensions[8] = {(float)w, (float)h, 0, 0, 2, 2, test ? (float)test->alpha : 0, 128};
+    float dimensions[12] = {(float)w, (float)h, 0, 0, 2, 2,
+                            test ? (float)test->alpha : 0, test ? (float)test->ref : 128,
+                            test ? (float)test->program : 0};
     memcpy((uint8_t *)dkMemBlockGetCpuAddr(data_mem) + 256, dimensions, sizeof dimensions);
     memset(dkMemBlockGetCpuAddr(read_mem), 0xA5, w * h * 4);
     DkCmdBufMaker cm;
@@ -334,17 +421,17 @@ static int run_case(DkDevice device, uint32_t w, uint32_t h, const StateCase *te
     DkBlendState blend;
     dkBlendStateDefaults(&blend);
     Nv2aTexture texture = {.width=2, .height=2, .addr_u=test ? test->wrap : 3,
-                          .addr_v=test ? test->wrap : 3, .levels=1};
+                          .addr_v=test ? test->wrap : 3, .levels=1, .filter=test ? test->filter : 0};
     Nv2aRenderState rs = {0};
     DkImage tex_image;
     DkImageView tex_view;
     DkSampler sampler;
     if (test) {
         rs.color_mask = test->mask; rs.alpha_test_enable = test->alpha;
-        rs.alpha_func = 0x204; rs.alpha_ref = 128;
+        rs.alpha_func = 0x204; rs.alpha_ref = test->ref;
         rs.blend_enable = test->blend; rs.blend_src = test->src;
         rs.blend_dst = test->dst; rs.blend_eq = test->equation;
-        if (!map_state(&texture, &rs, &sampler, &colour, &mask, &blend)) goto done;
+        if (!map_state(&texture, &rs, &sampler, &colour, &mask, &blend, test->program)) goto done;
         DkImageLayoutMaker tlm;
         dkImageLayoutMakerDefaults(&tlm, device);
         tlm.flags = DkImageFlags_Usage2DEngine;
@@ -360,7 +447,8 @@ static int run_case(DkDevice device, uint32_t w, uint32_t h, const StateCase *te
         dkImageViewDefaults(&tex_view, &tex_image);
         dkImageDescriptorInitialize(dkMemBlockGetCpuAddr(descriptors), &tex_view, false, false);
         dkSamplerDescriptorInitialize((DkSamplerDescriptor *)((uint8_t *)dkMemBlockGetCpuAddr(descriptors) + 256), &sampler);
-        memcpy((uint8_t *)dkMemBlockGetCpuAddr(data_mem) + 512, texels, sizeof texels);
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(data_mem) + 512,
+               test->filter == MENU_FILTER ? menu_texels : texels, sizeof texels);
         DkCopyBuf upload = {dkMemBlockGetGpuAddr(data_mem) + 512, 0, 0};
         DkImageRect tex_rect = {0, 0, 0, 2, 2, 1};
         dkCmdBufCopyBufferToImage(cmd, &upload, &tex_view, &tex_rect, 0);
@@ -443,7 +531,7 @@ int main(void)
     int a = run_case(device, 128, 96, NULL, msg, sizeof msg); report(msg);
     int b = run_case(device, 192, 128, NULL, msg, sizeof msg); report(msg);
     int states = rejection_checks();
-    report(states ? "NV2A-STATE-REJECT PASS cases=5" : "NV2A-STATE-REJECT FAIL cases=5");
+    report(states ? "NV2A-STATE-REJECT PASS cases=9" : "NV2A-STATE-REJECT FAIL cases=9");
     for (unsigned i = 0; i < sizeof state_cases / sizeof state_cases[0]; i++) {
         int ok = run_case(device, 128, 96, &state_cases[i], msg, sizeof msg);
         report(msg);
@@ -451,6 +539,6 @@ int main(void)
     }
     dkDeviceDestroy(device);
     romfsExit();
-    report(a && b && states ? "NV2A-BACKEND-PROOF PASS coordinate_cases=2 state_cases=10" : "NV2A-BACKEND-PROOF FAIL coordinate_cases=2 state_cases=10");
+    report(a && b && states ? "NV2A-BACKEND-PROOF PASS coordinate_cases=2 state_cases=15" : "NV2A-BACKEND-PROOF FAIL coordinate_cases=2 state_cases=15");
     return !(a && b && states);
 }
