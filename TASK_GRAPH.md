@@ -54,4 +54,6 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | RENDER-GPU-STATE-001 | done | runtime_analysis | RENDER-GPU-POC-001 | Synthetic texture/address/alpha/blend/write-mask readback with independent reference |
 | RENDER-PALETTE-001 | done | lead | RENDER-GPU-POC-001 | Carry/test bounded P8 palette metadata and helper restore; independent review |
 | RENDER-MENU-STATE-001 | done | runtime_analysis | INPUT-NAV-001 | Complete opt-in menu-frame state capture and support/gap table, independent review |
-| RENDER-MENU-PROOF-001 | ready | runtime | RENDER-MENU-STATE-001, RENDER-GPU-STATE-001, RENDER-PALETTE-001 | Verify observed menu Q/filter/alpha/blend/palette/format requirements against references |
+| RENDER-MENU-PROOF-001 | in_progress | lead | RENDER-MENU-STATE-001, RENDER-GPU-STATE-001, RENDER-PALETTE-001 | Verify observed menu Q/filter/alpha/blend/palette/format requirements against references |
+| RENDER-Q-001 | in_progress | q_trace | RENDER-MENU-STATE-001 | Aggregate eligible accepted PROJECT2D textureQ with focused tests and full-menu capture |
+| RENDER-DECODE-001 | in_progress | menu_decode | RENDER-MENU-STATE-001, RENDER-PALETTE-001 | Bounded short P8 and generic ARGB8/DXT23 decoder fixtures, build and independent review |
