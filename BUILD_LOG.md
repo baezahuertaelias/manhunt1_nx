@@ -2,6 +2,13 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-28 — P8 helper boundary and texture/state subset: PASS
+
+- Patch0005 fixes palette data loss in the backend descriptor/helper for bounded256-entry P8; CPU renderer unchanged. `scripts/backend-palette-test.sh` fixed regression and original-defect negative control PASS, including explicit failed pixel assertions after deliberately restoring the defect. Independent execution and final review by render_analysis PASS.
+- Full Switch build with0001–0005 exits0, NRO `e3b6f632efa5e26e6aa14674252fe30ba3e5f5374634312e55376906c85119a1`. Frozen private source/test/build/binary manifest: `game/build/evidence/palette-e3b6f632-20261028/manifest.json`.
+- Synthetic state proof: author and independent root wrapper run PASS for2coordinate/10state/5rejection cases; bad0, maxerror≤1. Root builds against palette-extended header, NRO `d35b8a154b053509e1e8a8eaba6cb7e384f7c1ac7141eeb2c064ecfd983a98a8`. Independent source/log/hash review accepted. Frozen private evidence under `game/build/evidence/state-d35b8a15-20261028/`.
+- [Exact results and limitations](reports/RENDER_PLAN.md). No GPU palette upload, registered backend, menu runtime, depth/stencil/coherence, hardware or FPS acceptance. Earlier profiling mutable intermediates changed after later builds; original run logs remain, integrity audit recorded. No proprietary evidence committed.
+
 ## 2026-10-28 — Synthetic NV2A coordinate/attribute proof: PASS
 
 - Author pinned build/run and primary-agent complete `scripts/nv2a-backend-proof.sh` rerun both exit 0; identical NRO SHA-256 `2ea3c6111f4c1cd266cf3fd820ffaf9739537e11f4e17a21623f457d9d018c2c`.

@@ -51,4 +51,6 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | BLOCKER-AUDIT-001 | in_progress | lead | — | Reconcile blockers against executed evidence and preserve outstanding gates |
 | EMU-GPU-PRESENT-001 | done | runner_analysis | GPU-PROOF-001 | Hardware Vulkan Eden synthetic proof; runner/port failures separated |
 | RENDER-GPU-POC-001 | done | runtime_analysis | DEKO3D-PROOF-001 | Synthetic Nv2aVertex GPU coordinate/colour/perspective readback, independent review |
-| RENDER-GPU-STATE-001 | ready | runtime | RENDER-GPU-POC-001 | Synthetic texture/address/alpha/blend/write-mask readback with independent reference |
+| RENDER-GPU-STATE-001 | done | runtime_analysis | RENDER-GPU-POC-001 | Synthetic texture/address/alpha/blend/write-mask readback with independent reference |
+| RENDER-PALETTE-001 | done | lead | RENDER-GPU-POC-001 | Carry/test bounded P8 palette metadata and helper restore; independent review |
+| RENDER-MENU-STATE-001 | in_progress | runtime_analysis | INPUT-NAV-001 | Complete opt-in menu-frame state capture and support/gap table, independent review |

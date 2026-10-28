@@ -1,0 +1,162 @@
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -51,6 +51,7 @@
+      * a linear texture) and the raw SET_TEXTURE_FILTER word (MIN in bits
+      * 16-23). A back end that ignores them samples level 0. */
+     uint32_t levels, filter;
++    uint32_t palette_va, palette_entries; /* P8 CLUT; helper supports 256 entries */
+ } Nv2aTexture;
+ 
+ typedef struct {
+@@ -103,7 +104,8 @@
+ void nv2a_backend_register(const Nv2aBackend *backend);
+ 
+ /* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
+- * Handles every format the executor can sample (swizzled, linear, DXT).
++ * Handles supported swizzled, linear and DXT formats, plus 256-entry P8.
++ * P8 index/palette spans must fit primary or contiguous 64 MiB RAM views.
+  * Returns 0 if the format is not supported. */
+ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+ 
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -844,12 +844,30 @@
+ 
+ static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
+ 
++/* shortcut: only primary/contiguous RAM views; expand after verified mirror use. */
++static int backend_ram_span(uint32_t va, uint64_t bytes)
++{
++    uint64_t end = (uint64_t)va + bytes;
++    return bytes && ((va && end <= 0x04000000ull)
++        || (va >= 0x80000000u && end <= 0x84000000ull));
++}
++
+ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+ {
+     Texture saved = s_gpu.texs[0];
+     uint32_t x, y;
+     int ok = 1;
+ 
++    if (!tex || !argb_out)
++        return 0;
++    if (tex->color == 0x0B) {
++        if (tex->palette_entries != 256 || (tex->palette_va & 0x3Fu)
++            || !tex->width || !tex->height
++            || (tex->width & (tex->width - 1)) || (tex->height & (tex->height - 1))
++            || !backend_ram_span(tex->offset, (uint64_t)tex->width * tex->height)
++            || !backend_ram_span(tex->palette_va, 256u * sizeof(uint32_t)))
++            return 0;
++    }
+     s_gpu.texs[0].offset = tex->offset;
+     s_gpu.texs[0].width  = tex->width;
+     s_gpu.texs[0].height = tex->height;
+@@ -857,7 +875,7 @@
+     s_gpu.texs[0].color  = tex->color;
+     s_gpu.texs[0].addr_u = 3;
+     s_gpu.texs[0].addr_v = 3;
+-    s_gpu.texs[0].palette = 0;          /* ponytail: no palettised formats */
++    s_gpu.texs[0].palette = tex->palette_va;
+     s_gpu.texs[0].levels = 1;
+     s_gpu.texs[0].filter = 0;
+     s_gpu.texs[0].cube   = 0;
+@@ -2064,6 +2082,8 @@
+         tex.addr_v = s_gpu.texs[0].addr_v;
+         tex.levels = s_gpu.texs[0].pitch ? 1 : s_gpu.texs[0].levels;
+         tex.filter = s_gpu.texs[0].filter;
++        tex.palette_va = s_gpu.texs[0].palette;
++        tex.palette_entries = 256u >> ((s_reg[0x1B20 / 4] >> 2) & 3u);
+         batch.texture = &tex;
+     }
+     s_backend->draw(&surf, &batch);
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -27,7 +27,8 @@
+ static uint8_t s_mem[MEM_BYTES];
+ 
+ /* ---- what the executor expects the runtime to provide ------------------ */
+-ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
++static ptrdiff_t s_guest_view_bias;
++ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem - s_guest_view_bias; }
+ uint32_t g_xbox_image_lo, g_xbox_image_hi;
+ uint32_t g_xbox_stack_base, g_xbox_stack_size;   /* #189 made the stack placement runtime state */
+ uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
+@@ -61,6 +62,7 @@
+     uint32_t count;
+     Nv2aVertex v[8];
+     int textured;
++    Nv2aTexture texture;
+     uint32_t clear_flags, clear_argb;
+ } s_be;
+ 
+@@ -82,6 +84,7 @@
+     s_be.rs = *b->state;
+     s_be.count = b->count;
+     s_be.textured = b->texture != NULL;
++    if (b->texture) s_be.texture = *b->texture;
+     for (i = 0; i < b->count && i < 8; i++)
+         s_be.v[i] = b->vertices[i];
+ }
+@@ -277,6 +280,62 @@
+     m(0x0130, 0);                                     /* FLIP_STALL */
+     CHECK(s_be.flips == 1);
+ 
++    /* Non-square P8 Morton layout and asymmetric ARGB palette, including index255. */
++    {
++        const uint8_t indices[8] = {0, 1, 254, 255, 3, 4, 5, 6};
++        const uint8_t row_indices[8] = {0, 1, 3, 4, 254, 255, 5, 6};
++        Nv2aTexture tex = {.offset=0x1000, .width=4, .height=2, .color=0x0B,
++                          .palette_va=0xA000, .palette_entries=256};
++        uint32_t decoded[8] = {0};
++        memcpy(s_mem + 0x1000, indices, sizeof indices);
++        for (i = 0; i < 256; i++) put32(0xA000 + 4*i, 0x40302010u + 0x010103u*i);
++        CHECK(nv2a_backend_decode_texture(&tex, decoded));
++        for (i = 0; i < 8; i++) CHECK(decoded[i] == 0x40302010u + 0x010103u*row_indices[i]);
++        put32(0xA000 + 4*255, 0xA137C95Bu);
++        CHECK(nv2a_backend_decode_texture(&tex, decoded));
++        CHECK(decoded[5] == 0xA137C95Bu);
++        /* Mock the same host bytes through the contiguous guest RAM view. */
++        Nv2aTexture high = tex;
++        high.offset += 0x80000000u; high.palette_va += 0x80000000u;
++        s_guest_view_bias = 0x80000000u;
++        CHECK(nv2a_backend_decode_texture(&high, decoded));
++        CHECK(decoded[5] == 0xA137C95Bu);
++        high.palette_va = 0x83FFFFC0u;
++        CHECK(!nv2a_backend_decode_texture(&high, decoded));
++        high = tex; high.offset = 0x83FFFFFCu; high.palette_va += 0x80000000u;
++        CHECK(!nv2a_backend_decode_texture(&high, decoded));
++        s_guest_view_bias = 0;
++        Nv2aTexture bad = tex;
++        bad.palette_va = 0; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        bad = tex; bad.palette_entries = 128; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        bad = tex; bad.palette_va = 0x03FFFFC0; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        bad = tex; bad.palette_va++; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        bad = tex; bad.offset = 0xFFFFFFFC; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        bad = tex; bad.width = 3; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        bad = tex; bad.width = 0x80000000u; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        CHECK(!nv2a_backend_decode_texture(NULL, decoded));
++        CHECK(!nv2a_backend_decode_texture(&tex, NULL));
++
++        /* Read the descriptor from real method dispatch, then check helper restores it. */
++        for (i = 0; i < 3; i++) { putf(0x7000+8*i, 0); putf(0x7004+8*i, 0); }
++        m(0x1744, 0x7000); m(0x1784, 2 | (2 << 4) | (8 << 8));
++        m(0x1B00, 0x1000); m(0x1B04, (0x0B << 8) | (1 << 16) | (2 << 20) | (1 << 24));
++        m(0x1B08, 0x303); m(0x1B20, 0xA000);
++        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
++        CHECK(s_be.textured && s_be.texture.palette_va == 0xA000 && s_be.texture.palette_entries == 256);
++        Nv2aTexture before = s_be.texture;
++        tex.palette_va = 0xB000;
++        CHECK(nv2a_backend_decode_texture(&tex, decoded));
++        bad = tex; bad.palette_entries = 32; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        bad = tex; bad.color = 0xFE; CHECK(!nv2a_backend_decode_texture(&bad, decoded));
++        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
++        CHECK(s_be.textured && !memcmp(&before, &s_be.texture, sizeof before));
++        m(0x1B20, 0xA004);
++        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
++        CHECK(s_be.texture.palette_va == 0xA000 && s_be.texture.palette_entries == 128);
++        CHECK(!nv2a_backend_decode_texture(&s_be.texture, decoded));
++    }
++
+     if (!s_fail)
+         printf("nv2a fixed-function path through a back end: ok\n");
+     return s_fail;

@@ -62,3 +62,7 @@ Added a separate project container layer and synthetic proof scripts using versi
 ## 2026-10-28 — Synthetic NV2A attribute proof
 
 Added a standalone pinned-toolchain build/run script using the existing Eden runner and generic upstream vertex header, with no game inputs or runtime settings changed. Two fixed surface sizes verify coordinate/channel/UV/perspective conventions. Author run and primary-agent full-wrapper rerun passed with zero pixel mismatches. Scope and rollback: remove this synthetic proof; see reports/RENDER_PLAN.md.
+
+## 2026-10-28 — Backend P8 palette boundary
+
+Prepared patch0005 to carry palette metadata into the decode helper, with a bounded256-entry P8 path and explicit rejection of unresolved cases. Added a standalone pinned-container host regression and original-defect negative control. CPU sampling is unchanged; no backend is registered. Host regression, original-defect negative control, independent review and full Switch build passed; exact scope/hashes are in reports/RENDER_PLAN.md. Game/GPU palette runtime remains UNVERIFIED.
