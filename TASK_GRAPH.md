@@ -21,4 +21,4 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | NEG-CONTROLS-001 | ready | test | RECOMP-EVAL-001 | Negative controls scripted and expected to fail inside `scripts/toolchain-proof.sh` |
 | EMU-IMAGE-001 | ready | test | — | Eden/Ryujinx image built from pinned source in this repo passes `scripts/toolchain-proof.sh` |
 | GPU-PROOF-001 | ready | test | — | Container renders via `/dev/dri`; renderer is not a software fallback |
-| REPO-REMOTE-001 | blocked | lead | user approval | Private remote created or confirmed; `main` protected |
+| REPO-REMOTE-001 | done | lead | user approval (given 2026-10-28) | Private remote created; `main` protection not available on the plan (convention only) |
