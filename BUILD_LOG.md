@@ -2,6 +2,12 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-28 — Menu sampling and bounded texture decoding: PASS within scope
+
+- Synthetic deko3d proof: pinned build/Eden run passes2coordinate/15state/9rejection checks, bad0/maxerror≤1. Independent source/log/ten frozen artifact review accepted; NRO `b6d31d94c9b44aad74d0a6e70d3160b2098e3d06129cafeb5a7401c348f5323f`.
+- Combined patches0001–0008 host CTest3/3 and both palette-dropping/leaked-limit negative controls PASS. Short-P8 bounds, ARGB8/DXT23 fixtures and CPU restoration independently reviewed. Shared Switch build exits0, NRO `6d05c9d376198a93a27e0128d01ea69a252cd61c27dd04d6ace659e4eb31e811`; all19 frozen build hashes independently verified.
+- Private evidence: `game/build/evidence/menu-sampling-b6d31d94-20261028/manifest.json`, `game/build/evidence/menu-q-6d05c9d3-20261028/build-manifest.json`. Complete180-second CPU menu capture passes:28draws,582eligible vertices allQ1/W6, five unobserved draws, actual before/after MAIN MENU images; independent raw-record/image/all36frozenartifact capture review accepted. First capture failed runner read-only SD setup before guest execution; retained separately and retried with prior staging. No registered GPU renderer, speedup or hardware/gameplay acceptance.
+
 ## 2026-10-28 — Complete CPU menu-state capture: PASS
 
 - Patch0006 host backend+trace CTest2/2 and original-defect palette negative control PASS. Full Switch build exits0; NRO `a1fdb54d2c1b6d44131c62d6a77330773cc6178d6fc0d6c12d8c66e992a01213`.

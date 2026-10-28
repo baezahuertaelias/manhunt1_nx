@@ -70,3 +70,11 @@ Prepared patch0005 to carry palette metadata into the decode helper, with a boun
 ## 2026-10-28 — Complete existing frame-trace diagnostics
 
 Patch0006 adds exact per-draw render/surface/four-texture state to the existing flag-gated whole-frame trace. No runtime default or rendering algorithm changes. Host backend/trace CTest2/2 and original-defect palette negative control pass; full Switch build exits0. A complete28-draw CPU menu-frame capture and independent final review passed within diagnostic scope; support gaps and exact evidence are in reports/RENDER_PLAN.md. Rollback: remove flag/option or patch and rebuild.
+
+## 2026-10-28 — projected-coordinate trace
+
+Patch0008 extends the existing frame-trace gate with per-draw eligible PROJECT2D Q/W aggregates at accepted clipped triangle submission. No default or rendering algorithm changes. It includes a synthetic helper test and record-contract assertions; combined host CTest3/3 and the shared Switch build pass with independent artifact review; complete-menu capture observes582eligible Q1/positive finite W6 vertices, while five empty draws remain unobserved. Independent raw-record/image/hash capture review accepted. Empty observations and unsampled stale descriptors are explicit. Rollback: remove the flag or patch and rebuild.
+
+## 2026-10-28 — short-palette helper
+
+Patch0007 adds bounded short-P8 helper decoding and generic format/restoration fixtures. CPU sampling retains its previous unrestricted palette behavior outside the temporary helper state. No option/default changes or GPU backend registration. Combined host CTest3/3, original-palette and leaked-limit negative controls, the shared Switch build and independent review pass under RENDER-DECODE-001. Rollback: remove patch0007 and rebuild.

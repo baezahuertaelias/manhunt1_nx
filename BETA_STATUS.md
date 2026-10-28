@@ -54,3 +54,5 @@ The standalone Nv2aVertex coordinate/colour/UV/perspective proof passes both sur
 The bounded P8 palette metadata/helper gap is fixed and tested on host, with the full Switch target rebuilt. Ten synthetic nearest-texture/alpha/blend/mask cases and five rejection checks pass independent emulator rerun. GPU palette upload, other states and actual backend integration remain UNVERIFIED; see RENDER_PLAN.md.
 
 One complete original-menu CPU frame now has independently reviewed state/texture/palette/combiner diagnostics. It identifies actual bilinear, alpha0, additive blending,32-entry palette, decoder, projection and coherence gaps before GPU registration. No new hardware/gameplay milestone passes from this capture.
+
+Menu-backend preparation: synthetic bilinear/clamp/combiner/alpha0/additive readbacks and bounded short-P8/ARGB8/DXT23 helper fixtures pass their scoped build/test/review gates ([details](reports/RENDER_PLAN.md)). These do not register a native renderer; surface/fence coherence and hardware/gameplay acceptance remain pending.
