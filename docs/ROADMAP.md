@@ -57,8 +57,9 @@ P0 preempts everything below it.
 
 Centralize time-step, projection, viewport and render resolution from the start, but defer these until after Beta 1:
 
-- 16:9 Hor+ widescreen
+- 16:9 Hor+ widescreen (WIDE-001…003)
 - HUD, cutscene and culling fixes
 - Optional 30/40/60 FPS or experimental uncapped modes
+- Opt-in developer/mod menu and PS2-look render options (DEVMENU-*, MODMENU-*, MHP-EVAL-001; see reports/MODDING_REFERENCES.md)
 
 A higher FPS must never speed up simulation, AI, animations or mission scripts. Validate frame caps against what the display actually supports.
