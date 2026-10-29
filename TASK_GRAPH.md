@@ -60,4 +60,8 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | RENDER-COHERENCE-001 | done | lead | RENDER-MENU-PROOF-001 | Synchronous guest-RAM/readback and semaphore/presentation ordering proof, explicit unsupported-state handling |
 | RENDER-CONTRACT-001 | done | coherence_contract | RENDER-MENU-PROOF-001 | Preflight unsupported batches without replay; surface metadata and CPU fallback tests |
 | RENDER-COHERENCE-PROOF-001 | done | coherence_proof | RENDER-CONTRACT-001 | Real executor→GPU synchronous readback, guest RAM and ordering proof |
-| RENDER-MENU-BACKEND-001 | pending | runtime | RENDER-COHERENCE-001 | Guarded native menu semantics/composition, transform-once Q/W checks, menu comparison/navigation and independent review |
+| RENDER-MENU-BACKEND-001 | in_progress | lead | RENDER-COHERENCE-001 | Guarded native menu semantics/composition, transform-once Q/W checks, menu comparison/navigation and independent review |
+| RENDER-MENU-CONTRACT-001 | in_progress | menu_contract | RENDER-COHERENCE-001 | Symbolic program semantics, transform-once rejection and shared surface guard |
+| RENDER-MENU-NATIVE-001 | in_progress | menu_native | RENDER-MENU-CONTRACT-001 | Same guarded native GPU module in game and composed synthetic references |
+| HZ-MEMORY-001 | in_progress | memory_audit | BOOT-SWITCH-001 | Horizon ownership/decommit/release/remap correction and focused failure tests |
+| HZ-ALIGN-001 | in_progress | lead | BOOT-SWITCH-001 | Correct posix_memalign contract on host and Horizon, build and independent review |
