@@ -1,0 +1,7 @@
+# Horizon aligned allocation
+
+HZ-ALIGN-001 passes its scoped gates. The former shim accepted invalid alignments and could overflow size rounding. The replacement validates POSIX power-of-two/pointer-multiple alignment, rejects rounding overflow, preserves the output pointer on failure and errno, and supports zero or non-multiple sizes. The implementation is extracted into game/src/horizon_alloc.c and linked only for Horizon; tests rename its symbol to avoid replacing host libc allocation.
+
+The same implementation passes69contract checks on the host and Horizon/Eden. Removing alignment validation causes7checks to fail, so the negative control passes by detecting the defect. Full Switch build exits0, game NRO `97689232fcb0b4c96dd866c33ad3a7edffd0973b4cf40190d9a997d917d142e9`. Standalone NRO `dcfbbf18f8fff8abf72c5ff8464bafafd8d7d8bba8ea0c8d8e6974162994118c`. Independent source/config/log review and all23frozen hashes were accepted by contract_review. Manifest: game/build/evidence/horizon-alloc-dcfbbf18-20261029/manifest.json.
+
+No game assets are inputs to the standalone proof. Actual allocator exhaustion was not induced; the deterministic ENOMEM case is rounding overflow. Hardware remains UNVERIFIED. This result does not close Horizon decommit/release/remapping, pwrite or other libc fidelity gaps. Roll back by restoring the previous shim and removing the helper/CMake entry/tests/script.

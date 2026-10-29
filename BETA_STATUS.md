@@ -58,3 +58,5 @@ One complete original-menu CPU frame now has independently reviewed state/textur
 Menu-backend preparation: synthetic bilinear/clamp/combiner/alpha0/additive readbacks and bounded short-P8/ARGB8/DXT23 helper fixtures pass their scoped build/test/review gates ([details](reports/RENDER_PLAN.md)). These do not register a native renderer; native surface/fence coherence and hardware/gameplay acceptance remain pending.
 
 Synchronous GPU/guest-RAM ordering now passes a real-executor synthetic fixture, including a deliberate stale-readback failure ([results](reports/RENDER_PLAN.md)). The fixture is restricted and is not the title renderer; guarded native menu integration remains next.
+
+Horizon aligned allocation now passes its scoped host/Horizon tests and full Switch build ([report](reports/HORIZON_ALLOCATION.md)); this does not change the pending memory, gameplay or hardware gates.

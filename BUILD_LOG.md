@@ -2,6 +2,12 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-29 — Horizon aligned-allocation correction: PASS within scope
+
+- Same C shim passes69host and69Horizon/Eden contract checks; validation-removal negative control produces7intended failures. Full Switch build exits0, NRO `97689232fcb0b4c96dd866c33ad3a7edffd0973b4cf40190d9a997d917d142e9`.
+- Independent source/config/log/all23frozenartifact review accepted. Manifest `game/build/evidence/horizon-alloc-dcfbbf18-20261029/manifest.json`; [scope/rollback](reports/HORIZON_ALLOCATION.md).
+- Actual allocator exhaustion, fresh title runtime and hardware unverified. Broader Horizon memory/libc blocker remains open.
+
 ## 2026-10-28 — Synchronous executor/GPU coherence proof: PASS within scope
 
 - Patch0009 host CTest3/3 plus original-palette negative control PASS; accepted/rejected CPU pixels and stateful VP exact-once checked. Optional preflight preserves the original CPU fallback before transformation.

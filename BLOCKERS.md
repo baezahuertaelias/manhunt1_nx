@@ -17,3 +17,5 @@ P0 investigation and the required next measurement are in [RENDER_PLAN.md](repor
 Menu-preparation gaps now pass their scoped synthetic/helper/diagnostic gates: bilinear/combiner/alpha0/additive readbacks, bounded short-P8/ARGB8/DXT23 decoding, and captured eligible Q1/W6 measurement. This does not close blocker1: native menu semantics/composition and guarded registration are next ([NEXT_ACTION.md](NEXT_ACTION.md)).
 
 Synchronous executor→GPU→guest-RAM correctness now passes a restricted synthetic fixture and negative control. Blocker1 remains open: native menu semantics/composition and guarded registration are pending; concurrent access, gameplay, performance and hardware remain UNVERIFIED.
+
+HZ-ALIGN-001 is resolved within its allocation contract:69host+69Horizon checks, deliberate-defect control, full Switch build and independent review pass ([report](reports/HORIZON_ALLOCATION.md)). Decommit/release/remap/pwrite and other Horizon fidelity work remain pending.

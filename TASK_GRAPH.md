@@ -64,4 +64,4 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | RENDER-MENU-CONTRACT-001 | in_progress | menu_contract | RENDER-COHERENCE-001 | Symbolic program semantics, transform-once rejection and shared surface guard |
 | RENDER-MENU-NATIVE-001 | in_progress | menu_native | RENDER-MENU-CONTRACT-001 | Same guarded native GPU module in game and composed synthetic references |
 | HZ-MEMORY-001 | in_progress | memory_audit | BOOT-SWITCH-001 | Horizon ownership/decommit/release/remap correction and focused failure tests |
-| HZ-ALIGN-001 | in_progress | lead | BOOT-SWITCH-001 | Correct posix_memalign contract on host and Horizon, build and independent review |
+| HZ-ALIGN-001 | done | lead | BOOT-SWITCH-001 | Correct posix_memalign contract on host and Horizon, build and independent review |

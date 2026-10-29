@@ -44,6 +44,7 @@ if(NINTENDO_SWITCH)
         src/pad_switch.c
         src/pad_script.c
         src/horizon_compat.c
+        src/horizon_alloc.c
         ${MANHUNT_GAME_SOURCES}
         ${MANHUNT_RUNTIME_SOURCES}
         ${MANHUNT_GEN_SOURCES}

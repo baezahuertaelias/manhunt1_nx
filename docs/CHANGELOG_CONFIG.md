@@ -82,3 +82,7 @@ Patch0007 adds bounded short-P8 helper decoding and generic format/restoration f
 ## 2026-10-28 — synchronous backend contract/proof
 
 Patch0009 and a standalone synthetic executor→deko3d coherence proof add tested synchronous guest-RAM readback. Optional preflight chooses CPU fallback before batch transformation; surface/clip/clear metadata permits strict rejection. No title backend registration, option or default change. Host3/3, clean synthetic build/Eden PASS, skipped-readback negative control and full Switch build pass; independent source/host/actual-log/all36frozenartifact review accepted under RENDER-COHERENCE-001. The wrapper cleans old RomFS outputs before building. Rollback: remove the isolated proof/script and patch0009 and rebuild.
+
+## 2026-10-28 — aligned-allocation contract
+
+Moves the Horizon allocation shim into a shared testable C unit and corrects invalid-alignment/rounding-overflow handling. Host69checks, Horizon69checks, deliberate validation-removal control, full Switch build and independent source/config/all23frozenartifact review pass. Actual allocator exhaustion was not induced. No runtime option/default change. Rollback: restore the previous shim and remove the isolated helper/test integration.

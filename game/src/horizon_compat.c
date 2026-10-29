@@ -140,16 +140,6 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off)
     return r;
 }
 
-int posix_memalign(void **out, size_t align, size_t size)
-{
-    void *p = aligned_alloc(align < sizeof(void *) ? sizeof(void *) : align,
-                            (size + align - 1) & ~(align - 1));
-    if (!p)
-        return ENOMEM;
-    *out = p;
-    return 0;
-}
-
 /* The watchdog closes the APU's WAV capture before dumping; there is no APU
  * (and no capture) in the Switch build. */
 int apu_wav_close_nowait(int wait_ms) { (void)wait_ms; return 0; }
