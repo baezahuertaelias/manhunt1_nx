@@ -69,3 +69,11 @@ Patch0008 adds one `projected_q` record per draw to the existing opt-in frame tr
 ## Backend menu-format decoding
 
 Patch0007 extends only the backend decode helper's P8 validation to hardware palette sizes32/64/128/256, rejects indices outside that declared palette, and restores prior CPU texture state after success or failure. No runtime option or backend registration is added. Generic ARGB8/DXT23 fixtures cover the other formats observed in the captured menu; they do not prove guest surface coherence or GPU upload. Combined host CTest3/3, both deliberate-defect controls and the shared Switch build pass; independent source/config/evidence review accepted under RENDER-DECODE-001. Rollback: remove patch0007 and rebuild.
+
+## Synchronous backend coherence proof
+
+`scripts/nv2a-coherence-proof.sh` is a standalone synthetic Switch build/run using the existing pinned devkitA64 image and Eden runner. It links only the portable executor and generic fixtures; no title assets or generated game code are inputs. The proof registers its own synchronous deko3d callbacks; the game does not register them. No game environment option/default changes. The wrapper serially cleans and rebuilds with one CPU/1GiB, no network/capabilities and the invoking uid/gid; only the prepared generic runtime/source is mounted. Host3/3, clean synthetic build/Eden run, skipped-readback negative control and full Switch build pass; independent source/config/actual-log/all36frozenartifact review accepted under RENDER-COHERENCE-001. Rollback: remove the isolated proof/script and patch0009, then rebuild.
+
+Patch0009 adds optional backend preflight callbacks. A rejected batch takes the existing CPU renderer before transformation, avoiding a second execution of a stateful vertex program. Existing backends without preflight retain their previous behavior. The synthetic backend must explicitly reject states outside its tested subset; acceptance does not establish native menu rendering or performance.
+
+The fixture accepts only declared unit-W FFP/basic opaque state and exact synthetic surfaces; textured draws require white diffuse. It rejects program/combiner paths and stops on accepted per-vertex/resource failure. It cannot be registered as the native game renderer. No hardware/concurrent-memory/performance acceptance is implied.

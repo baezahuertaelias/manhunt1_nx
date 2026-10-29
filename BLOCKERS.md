@@ -14,4 +14,6 @@ Ranked. Evidence: [reports/FEASIBILITY.md](reports/FEASIBILITY.md), [reports/REC
 
 P0 investigation and the required next measurement are in [RENDER_PLAN.md](reports/RENDER_PLAN.md). Measured raster elapsed time is 99.766% of the scanner window in the diagnostic capture; no GPU speedup or gameplay acceptance is claimed.
 
-Menu-preparation gaps now pass their scoped synthetic/helper/diagnostic gates: bilinear/combiner/alpha0/additive readbacks, bounded short-P8/ARGB8/DXT23 decoding, and captured eligible Q1/W6 measurement. This does not close blocker1: synchronous guest-surface coherence, explicit unsupported-state handling and native registration are next ([NEXT_ACTION.md](NEXT_ACTION.md)).
+Menu-preparation gaps now pass their scoped synthetic/helper/diagnostic gates: bilinear/combiner/alpha0/additive readbacks, bounded short-P8/ARGB8/DXT23 decoding, and captured eligible Q1/W6 measurement. This does not close blocker1: native menu semantics/composition and guarded registration are next ([NEXT_ACTION.md](NEXT_ACTION.md)).
+
+Synchronous executor→GPU→guest-RAM correctness now passes a restricted synthetic fixture and negative control. Blocker1 remains open: native menu semantics/composition and guarded registration are pending; concurrent access, gameplay, performance and hardware remain UNVERIFIED.

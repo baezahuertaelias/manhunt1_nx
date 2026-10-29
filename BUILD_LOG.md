@@ -2,6 +2,14 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-28 — Synchronous executor/GPU coherence proof: PASS within scope
+
+- Patch0009 host CTest3/3 plus original-palette negative control PASS; accepted/rejected CPU pixels and stateful VP exact-once checked. Optional preflight preserves the original CPU fallback before transformation.
+- Clean synthetic real-executor/deko3d build/Eden PASS:2clears+3draws, pitch padding/preserved pixels, two surfaces, intervening CPU writes, rendered-surface texture decoding, method0x1D70 semaphore and presentation-before-backendflip ordering. Proof NRO `0f056c1870af5f381b1fd11a649e5c955e96bdab6b1bde8ff9f8459de29b7239`.
+- Skipped-readback negative control completes all5GPUcallbacks but returns expected guest-RAM ordering FAIL/exit1. Full Switch game build exits0, NRO `10298000ed14dda1b6439db7cffb0739e8e7cb3845aded50b88b2e3eeb710bde`.
+- Independent source/config/actual-log/all36frozenartifact review accepted. Evidence: `game/build/evidence/coherence-0f056c18-20261028/manifest.json` and independent review JSON. Earlier NO-RESULT diagnostics and stale unused shader package retained separately; final wrapper cleans before build.
+- Synthetic unit-W FFP/basic opaque fixture only. No game backend registration, fresh title boot/playability, concurrent-memory, speedup or hardware acceptance. [Next guarded menu adapter](NEXT_ACTION.md).
+
 ## 2026-10-28 — Menu sampling and bounded texture decoding: PASS within scope
 
 - Synthetic deko3d proof: pinned build/Eden run passes2coordinate/15state/9rejection checks, bad0/maxerror≤1. Independent source/log/ten frozen artifact review accepted; NRO `b6d31d94c9b44aad74d0a6e70d3160b2098e3d06129cafeb5a7401c348f5323f`.

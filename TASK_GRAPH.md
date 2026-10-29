@@ -57,6 +57,7 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | RENDER-MENU-PROOF-001 | done | lead | RENDER-MENU-STATE-001, RENDER-GPU-STATE-001, RENDER-PALETTE-001 | Verify observed menu Q/filter/alpha/blend/palette/format requirements against references |
 | RENDER-Q-001 | done | q_trace | RENDER-MENU-STATE-001 | Aggregate eligible accepted PROJECT2D textureQ with focused tests and full-menu capture |
 | RENDER-DECODE-001 | done | menu_decode | RENDER-MENU-STATE-001, RENDER-PALETTE-001 | Bounded short P8 and generic ARGB8/DXT23 decoder fixtures, build and independent review |
-| RENDER-COHERENCE-001 | in_progress | lead | RENDER-MENU-PROOF-001 | Synchronous guest-RAM/readback and semaphore/presentation ordering proof, explicit unsupported-state handling |
-| RENDER-CONTRACT-001 | in_progress | coherence_contract | RENDER-MENU-PROOF-001 | Preflight unsupported batches without replay; surface metadata and CPU fallback tests |
-| RENDER-COHERENCE-PROOF-001 | in_progress | coherence_proof | RENDER-CONTRACT-001 | Real executor→GPU synchronous readback, guest RAM and ordering proof |
+| RENDER-COHERENCE-001 | done | lead | RENDER-MENU-PROOF-001 | Synchronous guest-RAM/readback and semaphore/presentation ordering proof, explicit unsupported-state handling |
+| RENDER-CONTRACT-001 | done | coherence_contract | RENDER-MENU-PROOF-001 | Preflight unsupported batches without replay; surface metadata and CPU fallback tests |
+| RENDER-COHERENCE-PROOF-001 | done | coherence_proof | RENDER-CONTRACT-001 | Real executor→GPU synchronous readback, guest RAM and ordering proof |
+| RENDER-MENU-BACKEND-001 | pending | runtime | RENDER-COHERENCE-001 | Guarded native menu semantics/composition, transform-once Q/W checks, menu comparison/navigation and independent review |

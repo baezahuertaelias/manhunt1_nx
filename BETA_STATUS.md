@@ -55,4 +55,6 @@ The bounded P8 palette metadata/helper gap is fixed and tested on host, with the
 
 One complete original-menu CPU frame now has independently reviewed state/texture/palette/combiner diagnostics. It identifies actual bilinear, alpha0, additive blending,32-entry palette, decoder, projection and coherence gaps before GPU registration. No new hardware/gameplay milestone passes from this capture.
 
-Menu-backend preparation: synthetic bilinear/clamp/combiner/alpha0/additive readbacks and bounded short-P8/ARGB8/DXT23 helper fixtures pass their scoped build/test/review gates ([details](reports/RENDER_PLAN.md)). These do not register a native renderer; surface/fence coherence and hardware/gameplay acceptance remain pending.
+Menu-backend preparation: synthetic bilinear/clamp/combiner/alpha0/additive readbacks and bounded short-P8/ARGB8/DXT23 helper fixtures pass their scoped build/test/review gates ([details](reports/RENDER_PLAN.md)). These do not register a native renderer; native surface/fence coherence and hardware/gameplay acceptance remain pending.
+
+Synchronous GPU/guest-RAM ordering now passes a real-executor synthetic fixture, including a deliberate stale-readback failure ([results](reports/RENDER_PLAN.md)). The fixture is restricted and is not the title renderer; guarded native menu integration remains next.

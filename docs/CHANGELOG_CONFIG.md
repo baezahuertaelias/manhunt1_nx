@@ -78,3 +78,7 @@ Patch0008 extends the existing frame-trace gate with per-draw eligible PROJECT2D
 ## 2026-10-28 — short-palette helper
 
 Patch0007 adds bounded short-P8 helper decoding and generic format/restoration fixtures. CPU sampling retains its previous unrestricted palette behavior outside the temporary helper state. No option/default changes or GPU backend registration. Combined host CTest3/3, original-palette and leaked-limit negative controls, the shared Switch build and independent review pass under RENDER-DECODE-001. Rollback: remove patch0007 and rebuild.
+
+## 2026-10-28 — synchronous backend contract/proof
+
+Patch0009 and a standalone synthetic executor→deko3d coherence proof add tested synchronous guest-RAM readback. Optional preflight chooses CPU fallback before batch transformation; surface/clip/clear metadata permits strict rejection. No title backend registration, option or default change. Host3/3, clean synthetic build/Eden PASS, skipped-readback negative control and full Switch build pass; independent source/host/actual-log/all36frozenartifact review accepted under RENDER-COHERENCE-001. The wrapper cleans old RomFS outputs before building. Rollback: remove the isolated proof/script and patch0009 and rebuild.
