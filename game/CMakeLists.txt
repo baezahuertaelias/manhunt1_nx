@@ -45,6 +45,7 @@ if(NINTENDO_SWITCH)
         src/pad_script.c
         src/horizon_compat.c
         src/horizon_alloc.c
+        src/nv2a_deko3d.c
         ${MANHUNT_GAME_SOURCES}
         ${MANHUNT_RUNTIME_SOURCES}
         ${MANHUNT_GEN_SOURCES}
@@ -58,9 +59,31 @@ if(NINTENDO_SWITCH)
     )
     target_compile_definitions(manhunt PRIVATE MANHUNT_HORIZON=1)
     target_compile_options(manhunt PRIVATE -g -fno-strict-aliasing -ffp-contract=off)
+    target_link_libraries(manhunt PRIVATE deko3d)
     set_source_files_properties(${MANHUNT_RUNTIME_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-w")
+    find_program(MANHUNT_UAM uam HINTS "${DEVKITPRO}/tools/bin" REQUIRED)
+    set(MANHUNT_ROMFS "${CMAKE_CURRENT_BINARY_DIR}/nv2a_romfs")
+    dkp_add_asset_target(manhunt_romfs "${MANHUNT_ROMFS}")
+    set(MANHUNT_SHADERS)
+    foreach(shader nv2a_attribute_vsh nv2a_diffuse_fsh nv2a_texture_fsh)
+        if(shader MATCHES "_vsh$")
+            set(stage vert)
+        else()
+            set(stage frag)
+        endif()
+        set(output "${MANHUNT_ROMFS}/shaders/${shader}.dksh")
+        add_custom_command(OUTPUT "${output}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${MANHUNT_ROMFS}/shaders"
+            COMMAND "${MANHUNT_UAM}" -s ${stage} -o "${output}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.glsl"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.glsl"
+            VERBATIM)
+        list(APPEND MANHUNT_SHADERS "${output}")
+    endforeach()
+    add_custom_target(manhunt_shaders DEPENDS ${MANHUNT_SHADERS})
+    add_dependencies(manhunt_romfs manhunt_shaders)
+    set_property(TARGET manhunt_romfs APPEND PROPERTY DKP_ASSET_FILES ${MANHUNT_SHADERS})
     nx_generate_nacp(manhunt.nacp NAME "Manhunt (recomp)" AUTHOR "Manhunt Recompilation Team" VERSION "0.2.0")
-    nx_create_nro(manhunt NACP manhunt.nacp)
+    nx_create_nro(manhunt NACP manhunt.nacp ROMFS manhunt_romfs)
 else()
     add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
     add_executable(manhunt

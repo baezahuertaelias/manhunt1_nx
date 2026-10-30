@@ -19,10 +19,10 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | HZ-PORT-002 | ready | runtime | BOOT-SWITCH-001 | Horizon memory backend and libc shims match POSIX semantics (review findings) |
 | CODEX-AGENTS-001 | ready | lead | — | Codex 0.164.0 config syntax and available models verified; `.codex/agents/*.toml` for the WORKFLOW roles, documented in CONFIGURATION.md |
 | NEG-CONTROLS-001 | ready | test | RECOMP-EVAL-001 | Negative controls scripted and expected to fail inside `scripts/toolchain-proof.sh` |
-| EMU-IMAGE-001 | ready | test | — | Eden/Ryujinx image built from pinned source in this repo passes `scripts/toolchain-proof.sh` |
+| EMU-IMAGE-001 | in_progress | provenance_audit | — | Eden/Ryujinx image built from pinned source in this repo passes `scripts/toolchain-proof.sh` |
 | GPU-PROOF-001 | done | runner_analysis | — | Container renders via `/dev/dri`; renderer is not a software fallback |
 | REPO-REMOTE-001 | done | lead | user approval (given 2026-10-28) | Remote created (public on user instruction); `main` protected (no force-push/deletion, PRs) |
-| LEVEL-LOAD-001 | pending | runtime | INPUT-NAV-001, RENDER-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
+| LEVEL-LOAD-001 | in_progress | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
 | X87-CW-001 | in_progress | re | BOOT-HOST-001 | Game's x87 control word(s) known: sites + runtime value; double-based x87 decision revisited |
 | MEM-MIRROR-002 | pending | runtime | LEVEL-LOAD-001 | Mirror/tiled-aperture traps silent through level load, or an address-wrapping design |
 | LGPL-LINK-001 | ready | lead | — | Link maps show whether LGPL objects are linked; THIRD_PARTY.md updated (before any distribution) |
@@ -60,8 +60,25 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | RENDER-COHERENCE-001 | done | lead | RENDER-MENU-PROOF-001 | Synchronous guest-RAM/readback and semaphore/presentation ordering proof, explicit unsupported-state handling |
 | RENDER-CONTRACT-001 | done | coherence_contract | RENDER-MENU-PROOF-001 | Preflight unsupported batches without replay; surface metadata and CPU fallback tests |
 | RENDER-COHERENCE-PROOF-001 | done | coherence_proof | RENDER-CONTRACT-001 | Real executor→GPU synchronous readback, guest RAM and ordering proof |
-| RENDER-MENU-BACKEND-001 | in_progress | lead | RENDER-COHERENCE-001 | Guarded native menu semantics/composition, transform-once Q/W checks, menu comparison/navigation and independent review |
-| RENDER-MENU-CONTRACT-001 | in_progress | menu_contract | RENDER-COHERENCE-001 | Symbolic program semantics, transform-once rejection and shared surface guard |
-| RENDER-MENU-NATIVE-001 | in_progress | menu_native | RENDER-MENU-CONTRACT-001 | Same guarded native GPU module in game and composed synthetic references |
-| HZ-MEMORY-001 | in_progress | memory_audit | BOOT-SWITCH-001 | Horizon ownership/decommit/release/remap correction and focused failure tests |
+| RENDER-MENU-BACKEND-001 | done | lead | RENDER-COHERENCE-001 | Guarded native menu semantics/composition, transform-once Q/W checks, menu comparison/navigation and independent review |
+| RENDER-MENU-CONTRACT-001 | done | lead | RENDER-COHERENCE-001 | Symbolic program semantics, transform-once rejection and shared surface guard |
+| RENDER-MENU-NATIVE-001 | done | lead | RENDER-MENU-CONTRACT-001 | Same guarded native GPU module in game and composed synthetic references |
+| HZ-MEMORY-001 | done | lead | BOOT-SWITCH-001 | Horizon ownership/decommit/release/remap correction and focused failure tests |
 | HZ-ALIGN-001 | done | lead | BOOT-SWITCH-001 | Correct posix_memalign contract on host and Horizon, build and independent review |
+| RENDER-MENU-REG-001 | done | lead | RENDER-MENU-CONTRACT-001, RENDER-MENU-NATIVE-001 | Opt-in shader/adapter integration and actual menu image/navigation evidence |
+
+| HZ-PWRITE-001 | done | lead | HZ-MEMORY-001 | Remove broken global pwrite; use private partition-initialization descriptor with focused proof and review |
+
+| HZ-TIME-001 | done | lead | HZ-MEMORY-001 | Validate UTC calendar/range conversions, pre1970 inverse and focused proofs |
+
+| RENDER-QUEUE-001 | done | lead | RENDER-MENU-NATIVE-001 | Bounded OOM isolation, queue lifetime reuse, repeat/RSS proof and review |
+
+| EMU-GPU-GAME-001 | in_progress | intel_runner | EMU-GPU-PRESENT-001, RENDER-MENU-REG-001 | Optional IntelWayland game runner and bounded native-menu validation |
+
+### Level-load investigation (2026-10-30)
+
+| ID | State | Owner | Scope / acceptance | Rollback |
+|---|---|---|---|---|
+| LEVEL-LOAD-CONTROL-001 | in_progress | load_control | Private game/build/level-load/control/; Trace actual original loading control flow and exit trigger; identify state transition and precise evidence-backed probe | Remove isolated diagnostics |
+| LEVEL-LOAD-FAULT-001 | in_progress | host_fault | Private game/build/level-load/fault/; Determine original caller/target semantics causing loading failure and host invalid pointer, with assembly and runtime evidence | Remove isolated diagnostics |
+| LEVEL-LOAD-REVIEW-001 | in_progress | evidence_review | Private game/build/level-load/review/; Independently inspect actual frames/logs/source/provenance and review eventual critical fix and acceptance evidence | Remove isolated diagnostics |

@@ -128,3 +128,14 @@ Provenance for every build and proof. Newest first.
 - Base: `dd-ghidra-mcp:local` `sha256:fc4729a6…f6ad`; loader `build-202610161023`
 - Output: `manhunt-analysis:ghidra-xbe` `sha256:e513e945173e7a22469e0432add84699064d3c33f37aa03d104caca8ab988d68`
 - XBE: `af69e803…afde`; asset manifest: `reports/ASSET_MANIFEST.sha256`
+
+
+## 2026-10-29 — native menu/memory integration build
+
+Pinned `scripts/game-build.sh switch` passes with maintained0010transform/combiner contract,0011Horizon memory ownership and opt-in native deko3d module. NRO SHA-256 `9666205d0c9eea08dffff973389ab3c6285c69f0c05114d01c73faf457d934a6`. An executed shader-source touch rebuilt its DKSH and NRO while leaving the ELF unchanged. Exact19-artifact evidence is private at `game/build/evidence/integration-9666205d-20261029/manifest.json`; independent integration review passes. Actual registered-menu capture, gameplay and hardware remain UNVERIFIED.
+
+2026-10-29: final private partition write/shim removal also builds successfully; NRO `e271accbcadf21a4569375f1f39156a35e84cb6dbcd75269a28e05a52d96bcee`. Scoped host28/Eden25/control and all27-artifact/fullbuild independent review pass. Native original-menu run in progress.
+
+## 2026-10-30 — LEVEL-LOAD-001 runtime investigation (no new build)
+
+Existing Switch NRO `1f93749d7d7b534da5608ac35f77f957a3f8995ee8de4a81cc926fb44fdf5f48` enters Jury_Turf asset loading after scripted B at the save screen, then logs HalReturnToFirmware(2) at 212.55 seconds. Environment/spawn UNVERIFIED; no milestone pass. Existing host binary independently faults during level loading (guest VA 0xFFFFFFFC); GDB confirms sub_0001A4D0. Private attempt2 manifest retains hashed run config/logs/frames; [investigation](reports/LEVEL_LOAD.md). No production fix or new build is claimed.

@@ -86,3 +86,40 @@ Patch0009 and a standalone synthetic executor→deko3d coherence proof add teste
 ## 2026-10-28 — aligned-allocation contract
 
 Moves the Horizon allocation shim into a shared testable C unit and corrects invalid-alignment/rounding-overflow handling. Host69checks, Horizon69checks, deliberate validation-removal control, full Switch build and independent source/config/all23frozenartifact review pass. Actual allocator exhaustion was not induced. No runtime option/default change. Rollback: restore the previous shim and remove the isolated helper/test integration.
+
+## 2026-10-29 — guarded native menu option (Eden menu validated)
+
+Adds experimental `MANHUNT_GPU_BACKEND=1`; unset/0 keeps CPU rendering, invalid values or native initialization failure stop startup. Shader RomFS assets are tracked build dependencies. Native device teardown waits for process exit, avoiding destruction under bridge callbacks. Rounding/unused-UV/bounds regressions, exactmoduleclear/draw/fallback tests, full integration build and independent synthetic/build review pass; actual menu comparison/navigation pass the scoped Eden gate. The measured emulator menu presentation rate improves; gameplay and hardware performance remain UNVERIFIED. Rollback: unset the option or revert the isolated integration and rebuild.
+
+The synthetic menu proof adds `MENU_PROOF_NO_RC=1` for a separate non-combiner filtered CPU-fallback regression; executed Eden result passes. It does not change runtime defaults.
+
+## 2026-10-29 — Horizon memory ownership proof
+
+Adds patch0011 and `scripts/horizon-memory-test.sh host|switch` with pinned, restricted build containers and a synthetic close/publication negative control. No game option/default changes. Host303,506 checks and Eden4,128 checks pass; full-game build and independent review pass. Single whole-object mapping view only; protection fidelity and mirrors remain open. Rollback: remove0011/proof and rebuild.
+
+The memory proof accepts `EMU_RUN_SCRIPT` to select the existing runner from an isolated worktree; no runtime option is introduced.
+
+Native transform eligibility now bounds common W to1e-3..1e6 and sampled coordinates to1e6texels before diversion; diffuse-only mode ignores unused UVs. Explicit float filtering and final source packing pass the scoped prior regression run; final bounds/clear/non-combiner runs and full build pass; actual menu comparison passes; gameplay remains UNVERIFIED.
+
+## 2026-10-29 — private partition write
+
+Removes the incorrect global Horizon `pwrite` shim; its sole caller uses a private descriptor and checked seek/write with meaningful failure reporting. Adds `scripts/horizon-partition-test.sh host|switch` using synthetic files and existing runner directory/log settings. Host28/Eden25 checks and missing-seek control pass; full Switch build passes, independent integration review passes. No game option/default change. Rollback: remove0012 and restore the previous shim, then rebuild.
+
+## 2026-10-29 — synchronous native queue lifetime
+
+Reuses one lifetime graphics queue without changing synchronous guest-RAM ordering; invalidates newly loaded shader code before binding. Old repeated-queue control OOMs; candidate671draw proof and independent review pass, fullSwitchbuild passes. Actual native-menu240s recapture/navigation pass independent review. No new option/default. Rollback: disable the native option or restore the previous adapter and rebuild.
+
+## 2026-10-29 — Horizon UTC conversion proof
+
+Adds strict Horizon calendar conversion and `scripts/horizon-time-test.sh host|switch`; no option/default changes. Host1,632,300checks, old-code defect reproduction and removed-validation control pass. Horizon1,632,300checks, fullSwitchbuild and independent25artifact review pass. Rollback: remove0013/proof and rebuild.
+
+## 2026-10-29 — optional Intel game runner (game validation pending)
+
+Adds opt-in `infra/emulator/wayland/run-game.sh` with writableEMU_DATA, retainedEMU_LOG, bounded marker/duration runs and Intel prerequisites. Uses the existing pinned image and least-privileged project container; no default runner/host change. Knownpixels and10second bounded run pass independent13artifact review. Actual game validation pending; adversarial shutdown/guestFAIL execution UNVERIFIED. Rollback: remove the isolated runner/report.
+
+## 2026-10-30 — LEVEL-LOAD-001 generation provenance
+
+- Apply maintained recompiler patches before analysis/lifting and import tools from the patched tree. Include patches in the generation cache key so translator changes cannot silently reuse old output.
+- Document reviewed bounded function additions separately from hand-written replacements. Level-load build/runtime acceptance remains pending; details in `reports/LEVEL_LOAD.md`.
+
+- Added reviewed bounded entry `0x0005C620..0x0005C69C`; patch0014 expands existing bounded switch-table scans to4096 for the measured300-entry table. Synthetic author/independent regressions pass; rebuilt gameplay acceptance is still pending.

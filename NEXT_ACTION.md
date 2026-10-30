@@ -1,7 +1,8 @@
 # Next action
 
-**RENDER-MENU-BACKEND-001** (P0): implement a guarded native menu adapter with generic combiner semantics, transform-once full-batch Q/W eligibility, actual menu surface/texture/filter/alpha/blend composition and explicit CPU fallback. Keep guest RAM authoritative with synchronous per-callback wait/readback. Opt-in game registration needs original-menu image/navigation comparison and independent review. [Evidence and scope](reports/RENDER_PLAN.md).
+**LEVEL-LOAD-001** (P0): the corrected Switch build (attempt3) now reaches in-level 3D rendering with no guest exit in 420 s, but frames are intermittently corrupted and player spawn is UNVERIFIED ([reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Attempt3 result").
 
-The synchronous coherence fixture passes host3/3, a clean real-executor/deko3d NRO run, deliberate skipped-readback failure, full Switch build and independent source/log/all36artifact review. It covers two clears/three draws, padding/preserved pixels, two surfaces, CPU writes, rendered-texture reads and semaphore/presentation ordering. It supports only declared unit-W FFP/basic opaque inputs and exact synthetic surfaces, so it cannot be registered as the game backend.
+1. Run the prepared host hardware-watchpoint probe (`fault/watch-header.gdb`) to find the writer that corrupts allocator header 0x81C6BFF8 before the invalid free in 1F0720 (1F1040←1F79B0←13D730). Do not patch the final invalid write without that writer.
+2. Then rerun the Switch build with movement input after the loading screen, to distinguish a controllable spawn from an intro cutscene and to check whether frame corruption remains.
 
-No native game GPU renderer, gameplay, concurrent CPU/GPU coherence, performance or hardware acceptance follows from these proofs. Audio, Horizon memory/x87 fidelity and level loading remain open. Preserve configurable resolution/aspect/projection for WIDE-002.
+Environment display is partially observed; spawn, gameplay graphics, audio, x87/protection/mirror fidelity, playable performance and physical Switch validation remain open. Emulator rates are diagnostic only. Preserve configurable resolution/aspect/projection for WIDE-002.

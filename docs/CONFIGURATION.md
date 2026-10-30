@@ -18,7 +18,7 @@
 | devkitA64 packages | devkitA64 r29.2, gcc 15.2.0, libnx 4.12.0, deko3d 0.5.0, uam 1.1.0, switch-tools 1.13.1 | pinned image digest | From `dkp-pacman -Q` |
 | Recompiler image (milestone 2) | same tag, ID `sha256:fc226cc9dd0cead9bd0a5e4d3f59a705812a9c699c0a4c105d05e8da893eec63` | `infra/recompiler/Dockerfile` | Adds cmake/ninja, SDL2, libepoxy, OpenSSL, ffmpeg dev, gdb, Xvfb, Mesa for the host game build. apt packages not version-pinned. |
 | Game analysis | all executable sections (no `--text-only`) | `scripts/game-build.sh` | `.text`-only missed most XDK library functions |
-| Function fixes | `game/function_fixes.json` | `scripts/fix-functions.py` | Reviewed removal of false entries; fails if the database no longer matches |
+| Function fixes | `game/function_fixes.json` | `scripts/fix-functions.py` | Reviewed boundary corrections and bounded added entries; fails on database drift or overlapping entries |
 | Hand-written functions | `game/manual_functions.json` (XInput ×4, `D3D_BlockOnTime`, DirectSound ×3) | lifter `--manual-functions` | Their bodies are not generated; `game/src/*.c` defines them |
 | xboxrecomp patches | `game/patches/xboxrecomp/0001`–`0003` | applied by `scripts/game-build.sh` | Case-insensitive paths; pseudo-handle close; Horizon port |
 | Runtime switches (boot) | `RECOMP_PB_EXEC=1 RECOMP_PB_WALK=dma RECOMP_TITLE_KEVENTS=1 RECOMP_VBLANK=paced RECOMP_DISPATCH_GATE=1 RECOMP_FLIP_PACING=1` | host: environment; Switch: `main_switch.c` defaults + `sdmc:/manhunt.env` | Each is needed (FEASIBILITY.md steps 2, 4, 5) |
@@ -81,3 +81,45 @@ The fixture accepts only declared unit-W FFP/basic opaque state and exact synthe
 ## Horizon aligned allocation
 
 The Horizon-only `posix_memalign` shim lives in `game/src/horizon_alloc.c`, shared with the standalone contract proof. It rejects invalid alignments, checks size-rounding overflow, preserves the output pointer on failure and preserves errno. No option/default changes. `scripts/horizon-alloc-test.sh` runs host contract checks and a removed-validation negative control, then builds the same implementation in the pinned devkitA64 image (one CPU/1GiB, no network/capabilities, invoking uid/gid) and runs its synthetic NRO in Eden. Game assets are not inputs. Host69checks, Horizon69checks, validation-removal negative control, full Switch build and independent source/config/all23frozenartifact review pass under HZ-ALIGN-001. Actual allocator exhaustion was not induced. Rollback: restore the previous shim and remove the helper/CMake entry/proof script.
+
+## Experimental native menu rendering (Eden menu validated)
+
+`MANHUNT_GPU_BACKEND=1` in `sdmc:/manhunt.env` requests the guarded synchronous deko3d adapter. Unset or `0` retains the CPU renderer; other values stop startup with a configuration error. Initialization failure also stops rather than silently falling back to a different requested backend. The option is experimental: sameNROCPU/native240second Eden menu/navigation and startup checks pass independent review. Gameplay and physical Switch performance remain UNVERIFIED.
+
+The Switch target links the adapter and packages three tracked shaders in RomFS using explicit asset/file dependencies. Shader changes must rebuild the NRO. Only the opt-in path mounts RomFS and initializes/registers the adapter, before the kernel bridge submits guest work. Device lifetime extends to process exit because the bridge threads are not joined on guest-entry return; the standalone single-threaded proof can unregister and destroy it safely.
+
+Unknown draw state takes the existing CPU path; post-transform rejection uses already-computed outputs without replaying vertex programs. Accepted GPU operations import current guest pixels and wait/read back before returning. The adapter uses explicit float bilinear sampling for the RC path and packs final source colour before blending. Post-transform eligibility conservatively requires common W within1e-3..1e6 and sampled absolute UV within1e6 texels; diffuse-only mode ignores unused UVs. Other values use the CPU renderer. Final synthetic bounds/clear/draw and separate non-combiner fallback tests, full Switch build and independent review pass. Actual menu comparison/navigation passes its scoped Eden gate. No default is changed. Rollback: unset the option, or revert the isolated registration/module/shader integration and rebuild.
+
+The synthetic `scripts/nv2a-menu-proof.sh` accepts `MENU_PROOF_NO_RC=1` to build a separate fixture that enables the executor’s existing `RECOMP_NO_COMBINERS` path and checks filtered-draw CPU fallback. This is a proof-script option, not a game option. Its separate Eden execution passes with exact CPU fallback and zero native draws.
+
+## Horizon memory ownership proof
+
+`scripts/horizon-memory-test.sh host` reconstructs the runtime from the pinned recompiler image and maintained patches, then runs the synthetic ownership/failure/race harness and its deliberate close-before-lock negative control. `switch` also builds the actual-service wrapper NRO in the pinned devkitA64 image and runs it in Eden. Containers use one CPU/1GiB, no network/capabilities and the invoking uid/gid. No game assets or runtime options are added. The harness shares the actual memory include but simplifies object-manager glue; full-game build/review is required separately.
+
+Patch0011 tracks reservations, commits and anonymous mapping ownership, implements transactional split/rebuild decommit, and serializes view publication with handle release. Registry exhaustion fails before mutation; unrecoverable rollback stops execution. Only a single whole-object anonymous view is supported. Protection fidelity and RAM mirrors remain open. Host303,506 checks, deliberate race control and Eden4,128 checks pass; integration build and independent review pass. Rollback: remove0011 and the isolated proof, then rebuild.
+
+For an isolated worktree, `EMU_RUN_SCRIPT` selects the emulator-runner path (default: that worktree’s `scripts/emu-run.sh`). Existing `EMU_LOG` retains its complete log. These proof-runner settings do not affect game behavior.
+
+## Private partition write proof
+
+`scripts/horizon-partition-test.sh [host|switch]` defaults to host. Switch mode creates a private ignored proof SD directory unless existing `EMU_DATA` is supplied; `EMU_LOG` retains the raw runner log (default: proof `build/eden.log`). It uses synthetic files without game inputs. No game runtime option changes. Patch0012 replaces the sole Horizon `pwrite` caller using its private descriptor; the incorrect global shim is removed. Missing error codes and short writes receive EIO locally. Host28checks, Eden25checks and missing-seek control pass; full Switch build passes, independent integration review passes. General native errno fidelity remains open. Rollback: remove0012 and restore the prior shim, then rebuild.
+
+The synchronous native adapter now reuses one graphics queue for its device lifetime and invalidates reloaded shader code before binding. Per-callback import/wait/error-check/readback is preserved. A671draw synthetic stress test passes with stable sampled runner memory, while per-draw queue creation reproduces DockerOOM in the pinned Eden image. FullSwitchbuild passes; the240s original-menu recapture and navigation pass independent review. No option/default changes. See `reports/RENDER_QUEUE_LIFETIME.md`.
+
+## Horizon UTC conversion proof
+
+`scripts/horizon-time-test.sh host|switch` defaults to host and uses pinned restricted containers, synthetic calendar inputs and the exact production Horizon conversion include. It reproduces the old invalid-date/pre-1970 defects and checks a removed-validation control. No game option/default changes. Host1,632,300checks and174expected control failures pass; Horizon1,632,300checks, fullSwitchbuild and independent25artifact review pass. Patch0013 validates dates/ranges and preserves output on failure while retaining POSIX branches. Rollback: remove0013 and the isolated proof, then rebuild.
+
+## Optional Intel Wayland game runner (game validation pending)
+
+`infra/emulator/wayland/run-game.sh <NRO> <marker> [seconds]` uses the existing pinned047af837image, headless Weston and Intel Vulkan. `EMU_DATA` mounts a writable project Eden directory (`sdmc/manhunt` beneath it); `EMU_LOG` retains complete logs and `CPUS` defaults to all cores. `EMU_SDMC_GAME` is rejected. The container stays nonroot, network-disabled,6GiB, capabilities dropped with only renderD128 exposed. It checks actual Intel compositor/device/driver logs and keeps0PASS/1guestFAIL/2NO-RESULT/3setup classes. Marker `-` requires the emulator alive at the bound. Readiness and supervisor/shutdown waits are bounded; no host changes/public ports.
+
+Known-pixel Intel proof and10second bounded run pass independent source/all13artifact review. Game/SD validation remains pending; adversarial shutdown and guestFAIL runtime classification are UNVERIFIED. Existing Xvfb and synthetic runners remain unchanged. Rollback: remove the isolated runner/report.
+
+## Level-load analysis corrections
+
+`scripts/game-build.sh` copies and applies the maintained xboxrecomp patches before importing analysis/lifting tools, then runs Python from that patched tree. The generated-code cache key includes `game/manual_functions.json`, `game/function_fixes.json`, `scripts/fix-functions.py` and every maintained xboxrecomp patch. A change to any of these invalidates the generated-code cache and requires relifting and rebuilding both targets.
+
+`game/function_fixes.json` may declare an independently reviewed explicit function start and exclusive end for a measured unresolved indirect call. These entries are generated normally; they are distinct from hand-written replacements in `game/manual_functions.json`. All decoded game code and runtime evidence stay beneath gitignored `game/build/`.
+
+For LEVEL-LOAD-001, the reviewed added function is `0x0005C620..0x0005C69C` (exclusive end). Patch `0014-large-local-switch-tables.patch` raises the existing forward/backward/local table scan limits from 256 to 4096; code-address, local-owner, adjacent-table and file bounds remain enforced. This recovers the observed 300-entry local switch without treating its interior arm `0x0019B572` as a function. Synthetic regression: `tests/recomp-large-switch/test_large_switch.py <patched-xboxrecomp-dir>` inside the pinned recompiler container. Function-correction tests: `python3 -I tests/test_fix_functions.py`.
