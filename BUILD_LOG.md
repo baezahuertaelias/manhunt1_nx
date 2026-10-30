@@ -2,6 +2,63 @@
 
 Provenance for every build and proof. Newest first.
 
+## 2026-10-29 — Horizon aligned-allocation correction: PASS within scope
+
+- Same C shim passes69host and69Horizon/Eden contract checks; validation-removal negative control produces7intended failures. Full Switch build exits0, NRO `97689232fcb0b4c96dd866c33ad3a7edffd0973b4cf40190d9a997d917d142e9`.
+- Independent source/config/log/all23frozenartifact review accepted. Manifest `game/build/evidence/horizon-alloc-dcfbbf18-20261029/manifest.json`; [scope/rollback](reports/HORIZON_ALLOCATION.md).
+- Actual allocator exhaustion, fresh title runtime and hardware unverified. Broader Horizon memory/libc blocker remains open.
+
+## 2026-10-28 — Synchronous executor/GPU coherence proof: PASS within scope
+
+- Patch0009 host CTest3/3 plus original-palette negative control PASS; accepted/rejected CPU pixels and stateful VP exact-once checked. Optional preflight preserves the original CPU fallback before transformation.
+- Clean synthetic real-executor/deko3d build/Eden PASS:2clears+3draws, pitch padding/preserved pixels, two surfaces, intervening CPU writes, rendered-surface texture decoding, method0x1D70 semaphore and presentation-before-backendflip ordering. Proof NRO `0f056c1870af5f381b1fd11a649e5c955e96bdab6b1bde8ff9f8459de29b7239`.
+- Skipped-readback negative control completes all5GPUcallbacks but returns expected guest-RAM ordering FAIL/exit1. Full Switch game build exits0, NRO `10298000ed14dda1b6439db7cffb0739e8e7cb3845aded50b88b2e3eeb710bde`.
+- Independent source/config/actual-log/all36frozenartifact review accepted. Evidence: `game/build/evidence/coherence-0f056c18-20261028/manifest.json` and independent review JSON. Earlier NO-RESULT diagnostics and stale unused shader package retained separately; final wrapper cleans before build.
+- Synthetic unit-W FFP/basic opaque fixture only. No game backend registration, fresh title boot/playability, concurrent-memory, speedup or hardware acceptance. [Next guarded menu adapter](NEXT_ACTION.md).
+
+## 2026-10-28 — Menu sampling and bounded texture decoding: PASS within scope
+
+- Synthetic deko3d proof: pinned build/Eden run passes2coordinate/15state/9rejection checks, bad0/maxerror≤1. Independent source/log/ten frozen artifact review accepted; NRO `b6d31d94c9b44aad74d0a6e70d3160b2098e3d06129cafeb5a7401c348f5323f`.
+- Combined patches0001–0008 host CTest3/3 and both palette-dropping/leaked-limit negative controls PASS. Short-P8 bounds, ARGB8/DXT23 fixtures and CPU restoration independently reviewed. Shared Switch build exits0, NRO `6d05c9d376198a93a27e0128d01ea69a252cd61c27dd04d6ace659e4eb31e811`; all19 frozen build hashes independently verified.
+- Private evidence: `game/build/evidence/menu-sampling-b6d31d94-20261028/manifest.json`, `game/build/evidence/menu-q-6d05c9d3-20261028/build-manifest.json`. Complete180-second CPU menu capture passes:28draws,582eligible vertices allQ1/W6, five unobserved draws, actual before/after MAIN MENU images; independent raw-record/image/all36frozenartifact capture review accepted. First capture failed runner read-only SD setup before guest execution; retained separately and retried with prior staging. No registered GPU renderer, speedup or hardware/gameplay acceptance.
+
+## 2026-10-28 — Complete CPU menu-state capture: PASS
+
+- Patch0006 host backend+trace CTest2/2 and original-defect palette negative control PASS. Full Switch build exits0; NRO `a1fdb54d2c1b6d44131c62d6a77330773cc6178d6fc0d6c12d8c66e992a01213`.
+- One complete original menu frame,28draws×7state records, before/after menu images and fault-free bounded180-second runner capture; CPU combiner reference128channel checks PASS. Independent source/config/build/capture/hash review by render_analysis accepted for diagnostic scope.
+- Frozen private evidence under `game/build/evidence/menu-state-a1fdb54d-20261028/`. [Actual supported/gap table](reports/RENDER_PLAN.md) identifies bilinear/ref0/addONEONE/32-entry palette/format/Q/coherence work. No registered GPU renderer, speedup or hardware/gameplay acceptance.
+
+## 2026-10-28 — P8 helper boundary and texture/state subset: PASS
+
+- Patch0005 fixes palette data loss in the backend descriptor/helper for bounded256-entry P8; CPU renderer unchanged. `scripts/backend-palette-test.sh` fixed regression and original-defect negative control PASS, including explicit failed pixel assertions after deliberately restoring the defect. Independent execution and final review by render_analysis PASS.
+- Full Switch build with0001–0005 exits0, NRO `e3b6f632efa5e26e6aa14674252fe30ba3e5f5374634312e55376906c85119a1`. Frozen private source/test/build/binary manifest: `game/build/evidence/palette-e3b6f632-20261028/manifest.json`.
+- Synthetic state proof: author and independent root wrapper run PASS for2coordinate/10state/5rejection cases; bad0, maxerror≤1. Root builds against palette-extended header, NRO `d35b8a154b053509e1e8a8eaba6cb7e384f7c1ac7141eeb2c064ecfd983a98a8`. Independent source/log/hash review accepted. Frozen private evidence under `game/build/evidence/state-d35b8a15-20261028/`.
+- [Exact results and limitations](reports/RENDER_PLAN.md). No GPU palette upload, registered backend, menu runtime, depth/stencil/coherence, hardware or FPS acceptance. Earlier profiling mutable intermediates changed after later builds; original run logs remain, integrity audit recorded. No proprietary evidence committed.
+
+## 2026-10-28 — Synthetic NV2A coordinate/attribute proof: PASS
+
+- Author pinned build/run and primary-agent complete `scripts/nv2a-backend-proof.sh` rerun both exit 0; identical NRO SHA-256 `2ea3c6111f4c1cd266cf3fd820ffaf9739537e11f4e17a21623f457d9d018c2c`.
+- Both sizes (128×96, 192×128): bad=0, max_error=0 against independent analytical perspective/colour/UV reference, plus exterior clear and population guards. Primary-agent independent source/shader/artifact review accepted. [Exact counts/provenance/limits](reports/RENDER_PLAN.md).
+- Synthetic offscreen scope only, llvmpipe. No registered game GPU backend, texture/state/depth/sync acceptance or hardware/performance claim.
+
+## 2026-10-28 — Scripted Switch menu navigation: PASS (Eden only)
+
+- Same Switch NRO `bf122c4f…fca8`; 240-second default-runner capture, 23 private BMPs, scripted DOWN/UP and 10-second dumps. Actual frames before/after show PLAY → BONUS FEATURES after sampled UP. Root and independent runtime_analysis both inspected actual images/logs; [authored report](reports/INPUT_NAVIGATION.md).
+- Runner exit 0; entry/menu assets, continued presents and no logged guest/Eden fault. No runtime/input source changes. Periodic surfaces can be torn while rasterizing; selected complete frames support only menu selection movement. Gameplay, level loading and hardware remain UNVERIFIED.
+
+## 2026-10-28 — Switch timing build/captures and Wayland proof
+
+- `scripts/game-build.sh switch`: exit 0; NRO SHA-256 `bf122c4f763163727efb15ad223d884743ce3a904e49b398891ae1cf9082fca8`. Two runtime objects also compiled on host. `scripts/render-profile-test.sh`: PASS (accounting/TLS/disabled/backwards-clock controls). Post-build patch cleanup removes one trailing blank line only.
+- Two serialized 240-second llvmpipe captures, dumps disabled, profile off/on: entry and menu asset checks PASS; no logged guest/emulator fault; runner alive at end. Enabled thirteen snapshots invalid=0, monotonic and nested-accounting checks PASS. Private manifest/summary under `game/build/render-profile/`; [authored results and limits](reports/RENDER_PLAN.md). Independent diagnostic source/config/build/runtime review by runtime_analysis: accepted. Guest CPU, robust overhead, visual/input and hardware gates are not established here.
+- Corrected `infra/emulator/wayland/run-proof.sh`: exit 0; Intel Vulkan exact synthetic deko3d pixel/coverage/row assertions PASS. Independent source/config/log review by runtime_analysis: accepted after fixing unbounded shutdown wait. Same-container timeout hung-child control PASS, kill after 1.018 seconds with shortened grace. [Provenance](reports/EMU_GPU_PRESENT.md). No game run on Wayland or emulator-source reproducibility claim.
+
+## 2026-10-28 — Standalone GPU proof: PASS; x87 investigation partial
+
+- `scripts/gpu-proof.sh`: freshly compiled with clang 19.1.7, `-Wall -Wextra -Werror`; classifier/channel self-tests and Intel ADL-N GBM/EGL readback PASS, RGBA 64,128,191,255. Repeated by the primary agent, exit 0. Image/source/script hashes: [GPU_PROOF.md](reports/GPU_PROOF.md). Independent source/config/evidence review by render_analysis: PASS, no blockers.
+- `bash -n scripts/gpu-proof.sh` and `git diff --check`: PASS. No game/NRO rebuild was needed for the standalone synthetic proof.
+- Bounded existing-host-debug GDB watch: 53/64-bit precision and directed rounding observed; five private evidence hashes independently checked. [X87_CONTROL_WORD.md](reports/X87_CONTROL_WORD.md) records exact provenance and limits. Binary-source match, complete inventory and fidelity remain UNVERIFIED.
+- Rendering plan added; required Switch-build timing breakdown is pending. No new gameplay, emulator hardware presentation or Switch hardware result. No binaries or proprietary logs committed.
+
 ## 2026-10-27 — Milestone 2 after review fixes: PASS
 
 - `scripts/switch-boot-proof.sh` (stricter checks: successful menu opens, Eden-side fault scan, increasing presents, provenance): `MH-BOOT-PROOF PASS nro=95f77035d0f869c7`, 32 presents, 11 frames (9 with ≥5 % non-black pixels, all distinct).
@@ -71,3 +128,14 @@ Provenance for every build and proof. Newest first.
 - Base: `dd-ghidra-mcp:local` `sha256:fc4729a6…f6ad`; loader `build-202610161023`
 - Output: `manhunt-analysis:ghidra-xbe` `sha256:e513e945173e7a22469e0432add84699064d3c33f37aa03d104caca8ab988d68`
 - XBE: `af69e803…afde`; asset manifest: `reports/ASSET_MANIFEST.sha256`
+
+
+## 2026-10-29 — native menu/memory integration build
+
+Pinned `scripts/game-build.sh switch` passes with maintained0010transform/combiner contract,0011Horizon memory ownership and opt-in native deko3d module. NRO SHA-256 `9666205d0c9eea08dffff973389ab3c6285c69f0c05114d01c73faf457d934a6`. An executed shader-source touch rebuilt its DKSH and NRO while leaving the ELF unchanged. Exact19-artifact evidence is private at `game/build/evidence/integration-9666205d-20261029/manifest.json`; independent integration review passes. Actual registered-menu capture, gameplay and hardware remain UNVERIFIED.
+
+2026-10-29: final private partition write/shim removal also builds successfully; NRO `e271accbcadf21a4569375f1f39156a35e84cb6dbcd75269a28e05a52d96bcee`. Scoped host28/Eden25/control and all27-artifact/fullbuild independent review pass. Native original-menu run in progress.
+
+## 2026-10-30 — LEVEL-LOAD-001 runtime investigation (no new build)
+
+Existing Switch NRO `1f93749d7d7b534da5608ac35f77f957a3f8995ee8de4a81cc926fb44fdf5f48` enters Jury_Turf asset loading after scripted B at the save screen, then logs HalReturnToFirmware(2) at 212.55 seconds. Environment/spawn UNVERIFIED; no milestone pass. Existing host binary independently faults during level loading (guest VA 0xFFFFFFFC); GDB confirms sub_0001A4D0. Private attempt2 manifest retains hashed run config/logs/frames; [investigation](reports/LEVEL_LOAD.md). No production fix or new build is claimed.

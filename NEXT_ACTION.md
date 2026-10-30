@@ -1,4 +1,7 @@
 # Next action
 
-**RENDER-001** (analysis for milestone 3, First image): measure where frame time goes on the Switch build (pushbuffer walk vs CPU rasteriser vs guest code), and evaluate a deko3d back end for xboxrecomp's `nv2a_backend.h` interface, using the methods the menu actually issues (the executor's "unhandled methods" ranking). Write `reports/RENDER_PLAN.md`; create implementation tasks only from it. Exercise menu navigation with a scripted pad (`sdmc:/manhunt.env`, `MANHUNT_PAD_SCRIPT`) at the same time.
-The plan must keep render resolution, aspect ratio and projection configurable, so 16:9 (WIDE-002) needs no back-end redesign.
+**LEVEL-LOAD-001** (P0): find the writer that turns a live physical-allocator block header into FFFFFFFF/FFFFFFFF during Jury_Turf loading (step 1 of the measured chain in [reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Allocator corruption chain"). Steps 2–3 (free copies the bad header into a node, a later allocation faults at guest 0xFFFFFFFF) are consequences and must not be patched.
+
+Proposed bounded probe (one host run): in the ignored diagnostic build, track each 0x3800-byte allocation from caller 0x001F0FE8 and hardware-watch only the header that follows the most recent such block, on both the 0x8xxxxxxx and low aliases, so the corrupted candidate cannot be evicted as it was before. Also record whether native NV2A clear/surface/DMA writes touch that range. Then confirm on the Switch build with movement input after loading, to tell a controllable spawn from a cutscene.
+
+Attempt3 on Switch reaches in-level 3D rendering with no guest exit in 420 s; frames are intermittently corrupted and spawn is UNVERIFIED. Gameplay graphics, audio, x87/protection/mirror fidelity, playable performance and physical Switch validation remain open. Emulator rates are diagnostic only.

@@ -1,0 +1,133 @@
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -3280,6 +3280,44 @@
+         raster_batch();
+         nv2a_profile_end(NV_PROFILE_DRAW, profile);
+         if (s_ftrace == 2) {
++            Nv2aRenderState rs;
++            current_render_state(&rs);
++            fprintf(stderr, "[FTRACE] state draw=%u blend=%u src=%X dst=%X eq=%X constant=%08X"
++                    " alpha=%u func=%X ref=%u mask=%08X cull=%u face=%X front=%X\n",
++                    s_gpu.draws, rs.blend_enable, rs.blend_src, rs.blend_dst, rs.blend_eq,
++                    rs.blend_color, rs.alpha_test_enable, rs.alpha_func, rs.alpha_ref,
++                    rs.color_mask, rs.cull_enable, rs.cull_face, rs.front_face);
++            fprintf(stderr, "[FTRACE] depth draw=%u test=%u func=%X write=%u zeta=%08X"
++                    " min=%.9g max=%.9g min_raw=%08X max_raw=%08X"
++                    " stencil=%u stencil_func=%X stencil_ref=%X compare_mask=%X write_mask=%X ops=%X/%X/%X\n",
++                    s_gpu.draws, rs.depth_test_enable, rs.depth_func, rs.depth_write, rs.zeta_va,
++                    rs.depth_min, rs.depth_max, s_reg[0x0394 / 4], s_reg[0x0398 / 4],
++                    rs.stencil_enable, rs.stencil_func, rs.stencil_ref, rs.stencil_func_mask,
++                    rs.stencil_write_mask, rs.stencil_fail, rs.stencil_zfail, rs.stencil_zpass);
++            fprintf(stderr, "[FTRACE] surface draw=%u format_raw=%08X color_format=%X zeta_format=%X"
++                    " pitch_raw=%08X color_offset_raw=%08X zeta_offset_raw=%08X"
++                    " clip_h_raw=%08X clip_v_raw=%08X aa=%g/%g\n",
++                    s_gpu.draws, s_gpu.format, s_gpu.format & 0xF, (s_gpu.format >> 4) & 0xF,
++                    s_reg[0x020C / 4], s_reg[0x0210 / 4], s_reg[0x0214 / 4],
++                    s_gpu.clip_raw_h, s_gpu.clip_raw_v, s_gpu.aa_sx, s_gpu.aa_sy);
++            for (unsigned stage = 0; stage < 4; stage++) {
++                const Texture *t = &s_gpu.texs[stage];
++                uint32_t reg = (0x1B00 + stage * 0x40) / 4;
++                uint32_t palette_raw = s_reg[reg + 0x20 / 4];
++                fprintf(stderr, "[FTRACE] texture draw=%u stage=%u valid=%d offset_raw=%08X va=%08X"
++                        " width=%u height=%u pitch=%u format_raw=%08X format=%02X"
++                        " address_raw=%08X uv=%X/%X control0_raw=%08X control1_raw=%08X"
++                        " filter=%08X levels=%u effective_levels=%u rect_raw=%08X"
++                        " palette_raw=%08X palette_va=%08X palette_count_code=%u palette_entries=%u"
++                        " cube=%d border_source=%d border=%08X\n",
++                        s_gpu.draws, stage, t->valid, s_reg[reg], t->offset,
++                        t->width, t->height, t->pitch, s_reg[reg + 4 / 4], t->color,
++                        s_reg[reg + 8 / 4], t->addr_u, t->addr_v,
++                        s_reg[reg + 0xC / 4], s_reg[reg + 0x10 / 4],
++                        t->filter, t->levels, t->pitch ? 1u : t->levels, s_reg[reg + 0x1C / 4],
++                        palette_raw, t->palette, (palette_raw >> 2) & 3u,
++                        256u >> ((palette_raw >> 2) & 3u), t->cube, t->border_color, t->border);
++            }
+             fprintf(stderr, "[FTRACE] %s prim %u n %u surf %08X %ux%u+%u+%u"
+                     " pitch %u | tex %s %08X %ux%u fmt %02X | blend %u %X/%X"
+                     " eq %X | z test %u func %X mask %u | tris %u px %llu\n",
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -110,6 +110,8 @@
+     uint32_t i;
+
+     nv2a_backend_register(&s_backend);
++    /* Existing trace option: start a synthetic frame for the opt-in trace check. */
++    if (getenv("RECOMP_FRAME_TRACE")) m(0x012C, 0);
+
+     /* The flip hold is opt-in: unset, RECOMP_FLIP_PACING leaves every flip
+      * completing at once and method 0x100 an unhandled no-op, as before. */
+--- /dev/null
++++ b/tests/nv2a_ffp_backend/check_trace.sh
+@@ -0,0 +1,64 @@
++#!/usr/bin/env bash
++# Synthetic opt-in diagnostics check; no game inputs.
++set -euo pipefail
++[[ $# == 1 && -x "$1" ]] || { echo 'usage: check_trace.sh fixture-binary' >&2; exit 3; }
++binary="$(realpath -e "$1")"
++work="$(mktemp -d)"
++trap 'rm -rf "$work"' EXIT
++env -u RECOMP_FRAME_TRACE "$binary" >"$work/off.stdout" 2>"$work/off.stderr"
++touch "$work/trace.flag"
++RECOMP_FRAME_TRACE="$work/trace.flag" "$binary" >"$work/on.stdout" 2>"$work/on.stderr"
++cmp "$work/off.stdout" "$work/on.stdout"
++python3 - "$work/off.stderr" "$work/on.stderr" <<'PY'
++from pathlib import Path
++import collections
++import re
++import sys
++
++off, on = (Path(p).read_text() for p in sys.argv[1:])
++assert '[FTRACE]' not in off, 'trace output while disabled'
++records = collections.defaultdict(dict)
++for line in on.splitlines():
++    m = re.match(r'\[FTRACE\] (state|depth|surface|texture) draw=(\d+) (.*)', line)
++    if not m:
++        continue
++    kind, draw, payload = m.groups()
++    values = dict(re.findall(r'(\w+)=([^ ]+)', payload))
++    if kind == 'texture':
++        stage = int(values['stage'])
++        assert 0 <= stage < 4
++        key = (kind, stage)
++    else:
++        key = (kind,)
++    assert key not in records[draw], 'duplicate per-draw record'
++    records[draw][key] = values
++assert records, 'trace did not capture a batch'
++fields = {
++    'state': 'blend src dst eq constant alpha func ref mask cull face front',
++    'depth': 'test func write zeta min max min_raw max_raw stencil stencil_func stencil_ref compare_mask write_mask ops',
++    'surface': 'format_raw color_format zeta_format pitch_raw color_offset_raw zeta_offset_raw clip_h_raw clip_v_raw aa',
++    'texture': 'stage valid offset_raw va width height pitch format_raw format address_raw uv control0_raw control1_raw filter levels effective_levels rect_raw palette_raw palette_va palette_count_code palette_entries cube border_source border',
++}
++for draw, batch in records.items():
++    assert len(batch) == 7, (draw, 'expected state/depth/surface/four textures')
++    for kind, expected in fields.items():
++        for stage in range(4) if kind == 'texture' else [None]:
++            values = batch[(kind, stage) if stage is not None else (kind,)]
++            assert set(expected.split()) <= values.keys(), (draw, kind, 'missing fields')
++assert any(batch[('depth',)]['stencil'] == '1'
++           and batch[('depth',)]['stencil_func'] == '206'
++           and batch[('depth',)]['stencil_ref'] == '5'
++           and batch[('depth',)]['ops'].endswith('/1E02')
++           for batch in records.values()), 'written stencil state was not traced'
++assert any(batch[('surface',)]['format_raw'] == '00002008'
++           and batch[('surface',)]['aa'] == '2/2'
++           and batch[('surface',)]['pitch_raw'] == '00001400'
++           for batch in records.values()), 'raw AA surface state was not traced'
++assert any(batch[('texture', 0)]['palette_raw'] == '0000A004'
++           and batch[('texture', 0)]['palette_va'] == '0000A000'
++           and batch[('texture', 0)]['palette_count_code'] == '1'
++           and batch[('texture', 0)]['palette_entries'] == '128'
++           and batch[('texture', 0)]['format'] == '0B'
++           for batch in records.values()), 'raw 128-entry P8 descriptor was not traced'
++print(f'NV2A-FRAME-STATE-TRACE PASS batches={len(records)} off_on_stdout_equal=1')
++PY
+--- a/tests/nv2a_ffp_backend/CMakeLists.txt
++++ b/tests/nv2a_ffp_backend/CMakeLists.txt
+@@ -13,3 +13,5 @@
+     target_link_libraries(nv2a-ffp-backend-test PRIVATE m pthread)
+ endif()
+ add_test(NAME nv2a-ffp-backend COMMAND nv2a-ffp-backend-test)
++add_test(NAME nv2a-frame-state-trace
++    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/check_trace.sh $<TARGET_FILE:nv2a-ffp-backend-test>)

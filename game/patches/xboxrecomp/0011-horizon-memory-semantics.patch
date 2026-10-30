@@ -1,0 +1,759 @@
+--- a/src/platform/win32_compat.c
++++ b/src/platform/win32_compat.c
+@@ -355,9 +355,14 @@
+ HANDLE GetCurrentThread(void)   { return t_self_obj ? (HANDLE)t_self_obj : PSEUDO_CURRENT_THREAD; }
+ HANDLE GetCurrentProcess(void)  { return PSEUDO_CURRENT_PROCESS; }
+ 
++#if defined(__SWITCH__)
++static int hz_mapping_unref(w32_object *o);
++#endif
++
+ static w32_object *obj_alloc(w32_kind kind)
+ {
+     w32_object *o = (w32_object *)calloc(1, sizeof(w32_object));
++    if (!o) return NULL;
+     o->kind     = kind;
+     o->refcount = 1;
+     pthread_mutex_init(&o->lock, NULL);
+@@ -368,6 +373,11 @@
+ 
+ static void obj_release(w32_object *o)
+ {
++#if defined(__SWITCH__)
++    if (o->kind == K_FILEMAP) {
++        if (!hz_mapping_unref(o)) return;
++    } else
++#endif
+     if (InterlockedDecrement(&o->refcount) > 0)
+         return;
+     if (o->kind == K_FILE) {
+@@ -1923,6 +1933,9 @@
+  */
+ SIZE_T VirtualQuery(LPCVOID address, PMEMORY_BASIC_INFORMATION buffer, SIZE_T length)
+ {
++#if defined(__SWITCH__)
++    return hz_virtual_query(address, buffer, length);
++#else
+     if (!buffer || length < sizeof(*buffer)) return 0;
+     memset(buffer, 0, sizeof(*buffer));
+ 
+@@ -1961,6 +1974,7 @@
+     buffer->Protect          = PAGE_READWRITE;
+     buffer->Type             = MEM_PRIVATE;
+     return sizeof(*buffer);
++#endif
+ }
+ 
+ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+--- a/src/platform/win32_compat.h
++++ b/src/platform/win32_compat.h
+@@ -58,6 +58,7 @@
+ #define MEM_RELEASE    0x00008000u
+ #define MEM_FREE       0x00010000u
+ #define MEM_PRIVATE    0x00020000u
++#define MEM_MAPPED     0x00040000u
+ #define MEM_TOP_DOWN   0x00100000u
+ #define PAGE_NOACCESS          0x01u
+ #define PAGE_READONLY          0x02u
+--- a/src/platform/win32_compat_horizon.inc
++++ b/src/platform/win32_compat_horizon.inc
+@@ -1,201 +1,423 @@
+-/*
+- * Horizon (Nintendo Switch, libnx) backing for the Win32 virtual-memory
+- * vocabulary the runtime uses: VirtualAlloc/Free/Protect, CreateFileMapping,
+- * MapViewOfFile(Ex), UnmapViewOfFile. Included by win32_compat.c under
+- * __SWITCH__ in place of the mmap-based versions.
+- *
+- * Horizon has no mmap. What it offers (measured in Eden by the Manhunt
+- * project's tests/horizon-probe):
+- *   - address-space reservations (libnx virtmem), and
+- *   - code memory: a page-aligned heap buffer mapped read/write at a chosen
+- *     address with svcControlCodeMemory(MapOwner).
+- * Not available: a second read/write view of the same pages. So a file
+- * mapping gets one view; asking for another (the 64 MiB RAM mirrors) fails,
+- * and the memory layout reports fewer mirrors. Protection changes are
+- * accepted and ignored, and decommit keeps the pages.
+- */
++/* Horizon owner views are whole code-memory objects. Split private commits
++ * transactionally; keep file-mapping backings alive independently of views. */
+ #include <switch.h>
+ 
+ #define HZ_PAGE 0x1000u
+ #define HZ_MAX_RES 64
+ #define HZ_MAX_COMMIT 512
+-
+-typedef struct { uintptr_t base; size_t size; VirtmemReservation *rv; } hz_res;
+-typedef struct { uintptr_t base; size_t size; void *src; Handle h; } hz_commit;
+-
+-static hz_res    s_res[HZ_MAX_RES];
++#define HZ_MAX_MAP 64
++
++typedef struct { uintptr_t base, allocation; size_t size; uint64_t id; int view; VirtmemReservation *rv; } hz_res;
++typedef struct { void *src; Handle h; size_t size; uintptr_t mapped; int initialized; } hz_backing;
++typedef struct { uintptr_t base; size_t size; hz_backing *backing; w32_object *owner; } hz_commit;
++typedef struct { w32_object *owner; hz_backing *backing; } hz_mapping;
++static hz_res s_res[HZ_MAX_RES];
+ static hz_commit s_commit[HZ_MAX_COMMIT];
++static hz_mapping s_mapping[HZ_MAX_MAP];
++static uint64_t s_res_id;
+ static pthread_mutex_t s_hz_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+-static size_t hz_round(size_t n) { return (n + HZ_PAGE - 1) & ~(size_t)(HZ_PAGE - 1); }
+-
+-static int hz_unmapped(uintptr_t addr, size_t size)
+-{
+-    while (size) {
+-        MemoryInfo mi;
+-        u32 pi;
+-        if (R_FAILED(svcQueryMemory(&mi, &pi, addr)) || mi.type != MemType_Unmapped)
+-            return 0;
+-        uintptr_t end = (uintptr_t)(mi.addr + mi.size);
+-        if (end >= addr + size) return 1;
+-        size -= end - addr;
+-        addr = end;
++static void hz_broken(const char *why)
++{
++    fprintf(stderr, "Horizon memory rollback failed: %s\n", why);
++    abort();
++}
++
++static int hz_span(uintptr_t a, size_t size, uintptr_t *lo, uintptr_t *hi)
++{
++    if (!size || size > UINTPTR_MAX - a || a + size > UINTPTR_MAX - (HZ_PAGE - 1)) return 0;
++    *lo = a & ~(uintptr_t)(HZ_PAGE - 1);
++    *hi = (a + size + HZ_PAGE - 1) & ~(uintptr_t)(HZ_PAGE - 1);
++    return *hi > *lo;
++}
++
++static int hz_unmapped(uintptr_t a, size_t size)
++{
++    uintptr_t end;
++    if (!size || size > UINTPTR_MAX - a) return 0;
++    end = a + size;
++    while (a < end) {
++        MemoryInfo mi; u32 pi;
++        if (R_FAILED(svcQueryMemory(&mi, &pi, a)) || mi.type != MemType_Unmapped
++            || !mi.size || mi.addr > a || mi.size > UINTPTR_MAX - mi.addr) return 0;
++        uintptr_t next = (uintptr_t)(mi.addr + mi.size);
++        if (next <= a) return 0;
++        a = next;
+     }
+     return 1;
+ }
+ 
+-/* Back [addr, addr+size) with fresh zeroed memory. Caller holds the lock. */
+-static void *hz_commit_at(uintptr_t addr, size_t size)
++static int hz_res_at(uintptr_t a)
++{
++    for (int i = 0; i < HZ_MAX_RES; i++)
++        if (s_res[i].base && a >= s_res[i].base && a - s_res[i].base < s_res[i].size) return i;
++    return -1;
++}
++
++static int hz_commit_at(uintptr_t a)
++{
++    for (int i = 0; i < HZ_MAX_COMMIT; i++)
++        if (s_commit[i].base && a >= s_commit[i].base && a - s_commit[i].base < s_commit[i].size) return i;
++    return -1;
++}
++
++static int hz_owned(uintptr_t a, uintptr_t end, uint64_t *id)
++{
++    uint64_t found = 0;
++    while (a < end) {
++        int i = hz_res_at(a);
++        if (i < 0 || s_res[i].view || (found && found != s_res[i].id)) return 0;
++        found = s_res[i].id;
++        a = s_res[i].base + s_res[i].size;
++    }
++    if (id) *id = found;
++    return found != 0;
++}
++
++/* Caller holds s_hz_lock. Fixed reserves are tracked as well as ASLR ones. */
++static int hz_reserve(uintptr_t requested, size_t size, int view)
+ {
+     int slot;
+-    void *src;
+-    Handle h;
+-
+-    size = hz_round(size);
+-    for (slot = 0; slot < HZ_MAX_COMMIT && s_commit[slot].base; slot++) {}
+-    if (slot == HZ_MAX_COMMIT || !hz_unmapped(addr, size))
+-        return NULL;
+-    src = aligned_alloc(HZ_PAGE, size);
+-    if (!src)
+-        return NULL;
+-    memset(src, 0, size);
+-    if (R_FAILED(svcCreateCodeMemory(&h, src, size))) {
+-        free(src);
+-        return NULL;
+-    }
+-    if (R_FAILED(svcControlCodeMemory(h, CodeMapOperation_MapOwner, (void *)addr, size, Perm_Rw))) {
+-        svcCloseHandle(h);
+-        free(src);
+-        return NULL;
+-    }
+-    s_commit[slot] = (hz_commit){addr, size, src, h};
+-    /* Zero the view itself: Eden presents an owner view as 0xFF-filled, not
+-     * with the source buffer's contents (measured: device apertures read
+-     * FFFFFFFF and XAPI spun on the USB controller's HcControl). Guest BSS and
+-     * the "zeroed" apertures depend on this. */
+-    memset((void *)addr, 0, size);
+-    return (void *)addr;
+-}
+-
+-/* Commit every unmapped page run inside [addr, addr+size). */
+-static int hz_commit_range(uintptr_t addr, size_t size)
+-{
+-    uintptr_t end = addr + hz_round(size);
+-    addr &= ~(uintptr_t)(HZ_PAGE - 1);
+-    while (addr < end) {
+-        MemoryInfo mi;
+-        u32 pi;
+-        if (R_FAILED(svcQueryMemory(&mi, &pi, addr)))
+-            return 0;
+-        uintptr_t run_end = (uintptr_t)(mi.addr + mi.size);
+-        if (run_end > end) run_end = end;
+-        if (mi.type == MemType_Unmapped && !hz_commit_at(addr, run_end - addr))
+-            return 0;
+-        addr = run_end;
+-    }
++    for (slot = 0; slot < HZ_MAX_RES && s_res[slot].base; slot++) {}
++    if (slot == HZ_MAX_RES || s_res_id == UINT64_MAX) return -1;
++    if (requested) {
++        if (!hz_unmapped(requested, size)) return -1;
++        for (int i = 0; i < HZ_MAX_RES; i++)
++            if (s_res[i].base && requested < s_res[i].base + s_res[i].size
++                && s_res[i].base < requested + size) return -1;
++    }
++    virtmemLock();
++    void *base = requested ? (void *)requested : virtmemFindAslr(size, 0x10000);
++    VirtmemReservation *rv = base ? virtmemAddReservation(base, size) : NULL;
++    virtmemUnlock();
++    if (!rv) return -1;
++    s_res[slot] = (hz_res){(uintptr_t)base, (uintptr_t)base, size, ++s_res_id, view, rv};
++    return slot;
++}
++
++static void hz_drop_res(int i)
++{
++    virtmemLock(); virtmemRemoveReservation(s_res[i].rv); virtmemUnlock();
++    memset(&s_res[i], 0, sizeof s_res[i]);
++}
++
++static hz_backing *hz_backing_new(size_t size)
++{
++    hz_backing *b = calloc(1, sizeof *b);
++    if (!b) return NULL;
++    b->size = size;
++    b->src = aligned_alloc(HZ_PAGE, size);
++    if (!b->src) { free(b); return NULL; }
++    memset(b->src, 0, size);
++    if (R_FAILED(svcCreateCodeMemory(&b->h, b->src, size))) { free(b->src); free(b); return NULL; }
++    return b;
++}
++
++static int hz_map(hz_backing *b, uintptr_t a)
++{
++    if (b->mapped || R_FAILED(svcControlCodeMemory(b->h, CodeMapOperation_MapOwner, (void *)a, b->size, Perm_Rw))) return 0;
++    b->mapped = a;
+     return 1;
+ }
+ 
+-static void hz_uncommit(int slot)
+-{
+-    hz_commit *c = &s_commit[slot];
+-    svcControlCodeMemory(c->h, CodeMapOperation_UnmapOwner, (void *)c->base, c->size, 0);
+-    svcCloseHandle(c->h);
+-    free(c->src);
+-    memset(c, 0, sizeof *c);
+-}
+-
+-static uintptr_t hz_reserve(size_t size)
+-{
+-    int slot;
+-    void *base;
+-    VirtmemReservation *rv;
+-
+-    size = hz_round(size);
+-    for (slot = 0; slot < HZ_MAX_RES && s_res[slot].base; slot++) {}
+-    if (slot == HZ_MAX_RES)
+-        return 0;
++static int hz_unmap(hz_backing *b)
++{
++    if (!b->mapped || R_FAILED(svcControlCodeMemory(b->h, CodeMapOperation_UnmapOwner, (void *)b->mapped, b->size, 0))) return 0;
++    b->mapped = 0;
++    return 1;
++}
++
++static void hz_backing_free(hz_backing *b)
++{
++    if (!b) return;
++    if (b->mapped) hz_broken("free of a live owner view");
++    if (R_FAILED(svcCloseHandle(b->h))) hz_broken("close backing handle");
++    free(b->src); free(b);
++}
++
++static int hz_free_commit_slot(void)
++{
++    for (int i = 0; i < HZ_MAX_COMMIT; i++) if (!s_commit[i].base) return i;
++    return -1;
++}
++
++typedef struct { hz_commit c; void *shadow; } hz_piece;
++static void hz_piece_free(hz_piece *p)
++{
++    hz_backing_free(p->c.backing); free(p->shadow); memset(p, 0, sizeof *p);
++}
++
++/* Create every hole before publishing any. Existing committed bytes survive. */
++static int hz_commit_range(uintptr_t a, uintptr_t end)
++{
++    hz_piece *p = calloc(HZ_MAX_COMMIT, sizeof *p);
++    int n = 0, active = 0, ok = 0;
++    if (!p) return 0;
++    for (int i = 0; i < HZ_MAX_COMMIT; i++) active += s_commit[i].base != 0;
++    while (a < end) {
++        int c = hz_commit_at(a);
++        if (c >= 0) {
++            if (s_commit[c].owner) goto done;
++            a = s_commit[c].base + s_commit[c].size;
++            continue;
++        }
++        uintptr_t next = end;
++        for (int i = 0; i < HZ_MAX_COMMIT; i++)
++            if (s_commit[i].base > a && s_commit[i].base < next) next = s_commit[i].base;
++        if (active + n == HZ_MAX_COMMIT || !hz_unmapped(a, next - a)) goto done;
++        p[n].c = (hz_commit){a, next - a, NULL, NULL};
++        p[n].c.backing = hz_backing_new(next - a);
++        if (!p[n].c.backing) goto done;
++        n++; a = next;
++    }
++    for (int i = 0; i < n; i++) {
++        if (!hz_map(p[i].c.backing, p[i].c.base)) goto done;
++        /* Code-memory initialization can overwrite the source in Eden. */
++        memset((void *)p[i].c.base, 0, p[i].c.size);
++        p[i].c.backing->initialized = 1;
++    }
++    for (int i = 0; i < n; i++) {
++        int slot = hz_free_commit_slot();
++        if (slot < 0) hz_broken("commit registry capacity");
++        s_commit[slot] = p[i].c;
++        p[i].c.backing = NULL;
++    }
++    ok = 1;
++done:
++    for (int i = 0; i < n; i++) {
++        if (p[i].c.backing && p[i].c.backing->mapped && !hz_unmap(p[i].c.backing)) hz_broken("new commit rollback");
++        hz_piece_free(&p[i]);
++    }
++    free(p);
++    return ok;
++}
++
++/* Decommit arbitrary private subranges without keeping readable backing. */
++static int hz_trim_commits(uintptr_t a, uintptr_t end)
++{
++    int *old = calloc(HZ_MAX_COMMIT, sizeof *old);
++    hz_piece *p = calloc(2 * HZ_MAX_COMMIT, sizeof *p);
++    int nold = 0, np = 0, active = 0, unmapped = 0, ok = 0;
++    if (!old || !p) { free(old); free(p); return 0; }
++    for (int i = 0; i < HZ_MAX_COMMIT; i++) {
++        hz_commit *c = &s_commit[i];
++        if (!c->base) continue;
++        active++;
++        if (c->base >= end || c->base + c->size <= a) continue;
++        if (c->owner) goto done;
++        old[nold++] = i;
++        uintptr_t ends[4] = {c->base, a < c->base + c->size ? a : c->base + c->size,
++                             end > c->base ? end : c->base, c->base + c->size};
++        for (int side = 0; side < 2; side++) {
++            uintptr_t lo = ends[2 * side], hi = ends[2 * side + 1];
++            if (hi <= lo) continue;
++            p[np].c = (hz_commit){lo, hi - lo, NULL, NULL};
++            p[np].shadow = malloc(hi - lo);
++            if (!p[np].shadow) goto done;
++            memcpy(p[np].shadow, (void *)lo, hi - lo);
++            p[np].c.backing = hz_backing_new(hi - lo);
++            if (!p[np].c.backing) { free(p[np].shadow); p[np].shadow = NULL; goto done; }
++            np++;
++        }
++    }
++    if (active - nold + np > HZ_MAX_COMMIT) goto done;
++    for (; unmapped < nold; unmapped++)
++        if (!hz_unmap(s_commit[old[unmapped]].backing)) goto rollback;
++    for (int i = 0; i < np; i++) {
++        if (!hz_map(p[i].c.backing, p[i].c.base)) goto rollback;
++        memcpy((void *)p[i].c.base, p[i].shadow, p[i].c.size);
++        p[i].c.backing->initialized = 1;
++    }
++    for (int i = 0; i < nold; i++) {
++        hz_backing_free(s_commit[old[i]].backing);
++        memset(&s_commit[old[i]], 0, sizeof s_commit[old[i]]);
++    }
++    for (int i = 0; i < np; i++) {
++        int slot = hz_free_commit_slot();
++        if (slot < 0) hz_broken("split registry capacity");
++        s_commit[slot] = p[i].c; p[i].c.backing = NULL;
++    }
++    ok = 1;
++    goto done;
++rollback:
++    for (int i = 0; i < np; i++)
++        if (p[i].c.backing->mapped && !hz_unmap(p[i].c.backing)) hz_broken("split rollback unmap");
++    for (int i = 0; i < unmapped; i++)
++        if (!hz_map(s_commit[old[i]].backing, s_commit[old[i]].base)) hz_broken("split rollback restore");
++done:
++    for (int i = 0; i < np; i++) hz_piece_free(&p[i]);
++    free(p); free(old);
++    return ok;
++}
++
++typedef struct { int old; hz_res left, right; } hz_res_change;
++static void hz_res_plan_drop(hz_res_change *p, int n)
++{
+     virtmemLock();
+-    base = virtmemFindAslr(size, 0x10000);
+-    rv = base ? virtmemAddReservation(base, size) : NULL;
++    for (int i = 0; i < n; i++) {
++        if (p[i].left.rv) virtmemRemoveReservation(p[i].left.rv);
++        if (p[i].right.rv) virtmemRemoveReservation(p[i].right.rv);
++    }
+     virtmemUnlock();
+-    if (!rv)
+-        return 0;
+-    s_res[slot] = (hz_res){(uintptr_t)base, size, rv};
+-    return (uintptr_t)base;
++}
++
++/* Allocate replacement reservation records before changing any mapping. */
++static int hz_release_range(uintptr_t a, uintptr_t end, uint64_t id)
++{
++    hz_res_change p[HZ_MAX_RES] = {0};
++    int n = 0, count = 0, replacements = 0, ok = 0;
++    for (int i = 0; i < HZ_MAX_RES; i++) {
++        hz_res *r = &s_res[i];
++        if (!r->base) continue;
++        count++;
++        if (r->base >= end || r->base + r->size <= a) continue;
++        if (r->view || r->id != id) return 0;
++        p[n].old = i;
++        if (a > r->base) { p[n].left = *r; p[n].left.size = a - r->base; p[n].left.rv = NULL; replacements++; }
++        if (end < r->base + r->size) { p[n].right = *r; p[n].right.base = end; p[n].right.size = r->base + r->size - end; p[n].right.rv = NULL; replacements++; }
++        n++;
++    }
++    if (!n || count - n + replacements > HZ_MAX_RES) return 0;
++    virtmemLock();
++    for (int i = 0; i < n; i++) {
++        if (p[i].left.base) {
++            p[i].left.rv = virtmemAddReservation((void *)p[i].left.base, p[i].left.size);
++            if (!p[i].left.rv) goto reserve_failed;
++        }
++        if (p[i].right.base) {
++            p[i].right.rv = virtmemAddReservation((void *)p[i].right.base, p[i].right.size);
++            if (!p[i].right.rv) goto reserve_failed;
++        }
++    }
++    virtmemUnlock();
++    if (!hz_trim_commits(a, end)) goto done;
++    for (int i = 0; i < n; i++) hz_drop_res(p[i].old);
++    for (int i = 0; i < n; i++) {
++        hz_res parts[2] = {p[i].left, p[i].right};
++        for (int j = 0; j < 2; j++) if (parts[j].base) {
++            int slot;
++            for (slot = 0; slot < HZ_MAX_RES && s_res[slot].base; slot++) {}
++            if (slot == HZ_MAX_RES) hz_broken("reservation split capacity");
++            s_res[slot] = parts[j];
++        }
++        p[i].left.rv = p[i].right.rv = NULL;
++    }
++    ok = 1;
++    goto done;
++reserve_failed:
++    virtmemUnlock();
++done:
++    hz_res_plan_drop(p, n);
++    return ok;
+ }
+ 
+ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD protect)
+ {
+-    uintptr_t base = (uintptr_t)address;
+-    void *p = NULL;
++    uintptr_t lo, hi, a = (uintptr_t)address;
++    int created = -1, ok = 0;
+     (void)protect;
+-
+-    pthread_mutex_lock(&s_hz_lock);
+-    if (!base) {
+-        base = hz_reserve(size);
+-        if (base && (allocationType & MEM_COMMIT))
+-            p = hz_commit_at(base, size);
+-        else if (base)
+-            p = (void *)base;
+-    } else if (allocationType & MEM_COMMIT) {
+-        /* Fixed address: inside a reservation or not, back the pages. */
+-        p = hz_commit_range(base, size) ? (void *)base : NULL;
++    if (!(allocationType & (MEM_RESERVE | MEM_COMMIT))
++        || (allocationType & ~(MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN))
++        || !hz_span(a, size, &lo, &hi)) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
++    pthread_mutex_lock(&s_hz_lock);
++    if (!a || (allocationType & MEM_RESERVE)) {
++        created = hz_reserve(a ? lo : 0, hi - lo, 0);
++        if (created < 0) goto done;
++        lo = s_res[created].base; hi = lo + s_res[created].size;
++    } else if (!hz_owned(lo, hi, NULL)) {
++        created = hz_reserve(lo, hi - lo, 0);
++        if (created < 0) goto done;
++    }
++    ok = !(allocationType & MEM_COMMIT) || hz_commit_range(lo, hi);
++    if (!ok && created >= 0) hz_drop_res(created);
++done:
++    pthread_mutex_unlock(&s_hz_lock);
++    if (!ok) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
++    return ok ? (void *)lo : NULL;
++}
++
++BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD freeType)
++{
++    uintptr_t a = (uintptr_t)address, lo, hi;
++    uint64_t id = 0;
++    int ok = 0;
++    if (!a || (freeType != MEM_RELEASE && freeType != MEM_DECOMMIT)) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
++    pthread_mutex_lock(&s_hz_lock);
++    if (!size) {
++        int r = hz_res_at(a);
++        if (r < 0) {
++            for (int i = 0; i < HZ_MAX_RES; i++)
++                if (s_res[i].base && !s_res[i].view && s_res[i].allocation == a) { r = i; break; }
++        }
++        if (r < 0 || s_res[r].view || s_res[r].allocation != a) goto done;
++        id = s_res[r].id; lo = a; hi = a;
++        for (int i = 0; i < HZ_MAX_RES; i++)
++            if (s_res[i].base && s_res[i].id == id && s_res[i].base + s_res[i].size > hi) hi = s_res[i].base + s_res[i].size;
++    } else if (!hz_span(a, size, &lo, &hi)) goto done;
++    if (freeType == MEM_DECOMMIT) {
++        if (hz_owned(lo, hi, &id)) ok = hz_trim_commits(lo, hi);
+     } else {
+-        p = hz_unmapped(base, hz_round(size)) ? (void *)base : NULL;
+-    }
+-    pthread_mutex_unlock(&s_hz_lock);
+-    if (!p)
+-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-    return p;
+-}
+-
+-BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD freeType)
+-{
+-    uintptr_t a = (uintptr_t)address;
+-    int i;
+-    (void)size;
+-
+-    if (!(freeType & MEM_RELEASE))
+-        return TRUE;                        /* MEM_DECOMMIT: pages stay */
+-    pthread_mutex_lock(&s_hz_lock);
+-    for (i = 0; i < HZ_MAX_COMMIT; i++)
+-        if (s_commit[i].base == a) {
+-            hz_uncommit(i);
+-            break;
+-        }
+-    for (i = 0; i < HZ_MAX_RES; i++)
+-        if (s_res[i].base == a && size == 0) {   /* whole reservation */
+-            virtmemLock();
+-            virtmemRemoveReservation(s_res[i].rv);
+-            virtmemUnlock();
+-            memset(&s_res[i], 0, sizeof s_res[i]);
+-            break;
+-        }
+-    /* A partial release of a reservation (the layout frees the first 64 MiB
+-     * of its span to place the RAM view there) needs nothing: a reservation
+-     * has no backing, and the view is committed at that address next. */
+-    pthread_mutex_unlock(&s_hz_lock);
+-    return TRUE;
++        if (a != lo) goto done;
++        if (!id) {
++            int r = hz_res_at(a);
++            if (r >= 0) id = s_res[r].id;
++            else for (int i = 0; i < HZ_MAX_RES; i++)
++                if (s_res[i].base && s_res[i].allocation == a) { id = s_res[i].id; break; }
++        }
++        if (id) ok = hz_release_range(lo, hi, id);
++    }
++done:
++    pthread_mutex_unlock(&s_hz_lock);
++    if (!ok) SetLastError(ERROR_INVALID_ADDRESS);
++    return ok;
+ }
+ 
+ BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldProtect)
+ {
+     (void)address; (void)size; (void)newProtect;
+     if (oldProtect) *oldProtect = PAGE_READWRITE;
+-    return TRUE;                            /* no per-page protection here */
++    return TRUE; /* Existing protection emulation is outside HZ-MEMORY-001. */
++}
++
++static hz_mapping *hz_mapping_find(w32_object *o)
++{
++    for (int i = 0; i < HZ_MAX_MAP; i++) if (s_mapping[i].owner == o) return &s_mapping[i];
++    return NULL;
++}
++
++/* Serialize the last handle close with view publication and its held reference. */
++static int hz_mapping_unref(w32_object *o)
++{
++    pthread_mutex_lock(&s_hz_lock);
++    LONG references = InterlockedDecrement(&o->refcount);
++    if (references < 0) hz_broken("mapping reference underflow");
++    if (!references) {
++        hz_mapping *m = hz_mapping_find(o);
++        if (!m) hz_broken("mapping registry lost");
++        hz_backing_free(m->backing);
++        memset(m, 0, sizeof *m);
++    }
++    pthread_mutex_unlock(&s_hz_lock);
++    return references == 0;
+ }
+ 
+ HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
+                           DWORD maxSizeHigh, DWORD maxSizeLow, LPCSTR name)
+ {
+-    (void)file; (void)sa; (void)protect; (void)name;
++    uintptr_t lo, hi;
+     SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
+-    if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
+-    w32_object *o = obj_alloc(K_FILEMAP);
+-    o->fd       = -1;
+-    o->map_size = size;
+-    o->map_view = NULL;
++    (void)sa; (void)protect; (void)name;
++    if (file != INVALID_HANDLE_VALUE || !hz_span(0, size, &lo, &hi)) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
++    pthread_mutex_lock(&s_hz_lock);
++    int slot;
++    for (slot = 0; slot < HZ_MAX_MAP && s_mapping[slot].owner; slot++) {}
++    w32_object *o = slot < HZ_MAX_MAP ? obj_alloc(K_FILEMAP) : NULL;
++    if (o) {
++        o->fd = -1; o->map_size = size; o->map_view = NULL;
++        s_mapping[slot].owner = o;
++    }
++    pthread_mutex_unlock(&s_hz_lock);
++    if (!o) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+     return (HANDLE)o;
+ }
+ 
+@@ -210,27 +432,32 @@
+                        SIZE_T count, LPVOID baseAddr)
+ {
+     w32_object *o = (w32_object *)mapping;
+-    void *p;
++    uintptr_t lo, hi;
++    void *p = NULL;
++    int created = -1;
++    DWORD error = ERROR_NOT_ENOUGH_MEMORY;
+     (void)access;
+-
+-    if (!o || o->kind != K_FILEMAP) { SetLastError(ERROR_INVALID_HANDLE); return NULL; }
+-    if (offHigh || offLow || o->map_view) {
+-        /* A second view of the same pages (a mirror) or an offset view:
+-         * Horizon cannot alias read/write memory. */
+-        SetLastError(ERROR_NOT_SUPPORTED);
+-        return NULL;
+-    }
+-    SIZE_T len = count ? count : o->map_size;
+-    pthread_mutex_lock(&s_hz_lock);
+-    if (baseAddr)
+-        p = hz_commit_at((uintptr_t)baseAddr, len);
+-    else {
+-        uintptr_t b = hz_reserve(len);
+-        p = b ? hz_commit_at(b, len) : NULL;
+-    }
+-    pthread_mutex_unlock(&s_hz_lock);
+-    if (!p) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+-    o->map_view = p;
++    if (!o || o == (w32_object *)INVALID_HANDLE_VALUE) { SetLastError(ERROR_INVALID_HANDLE); return NULL; }
++    pthread_mutex_lock(&s_hz_lock);
++    hz_mapping *m = hz_mapping_find(o);
++    if (!m) { error = ERROR_INVALID_HANDLE; goto done; }
++    if (o->map_view || offHigh || offLow || (count && count != o->map_size)) { error = ERROR_NOT_SUPPORTED; goto done; }
++    if (!hz_span(0, o->map_size, &lo, &hi) || ((uintptr_t)baseAddr & (HZ_PAGE - 1))) { error = ERROR_INVALID_PARAMETER; goto done; }
++    if (!m->backing) m->backing = hz_backing_new(hi);
++    if (!m->backing) goto done;
++    int c = hz_free_commit_slot();
++    if (c < 0) goto done;
++    created = hz_reserve((uintptr_t)baseAddr, hi, 1);
++    if (created < 0) goto done;
++    uintptr_t a = s_res[created].base;
++    if (!hz_map(m->backing, a)) { hz_drop_res(created); goto done; }
++    if (!m->backing->initialized) { memset((void *)a, 0, hi); m->backing->initialized = 1; }
++    s_commit[c] = (hz_commit){a, hi, m->backing, o};
++    InterlockedIncrement(&o->refcount);
++    o->map_view = p = (void *)a;
++done:
++    pthread_mutex_unlock(&s_hz_lock);
++    if (!p) SetLastError(error);
+     return p;
+ }
+ 
+@@ -241,13 +468,51 @@
+ 
+ BOOL UnmapViewOfFile(LPCVOID baseAddr)
+ {
+-    int i;
+-    pthread_mutex_lock(&s_hz_lock);
+-    for (i = 0; i < HZ_MAX_COMMIT; i++)
+-        if (s_commit[i].base == (uintptr_t)baseAddr) {
+-            hz_uncommit(i);
+-            break;
+-        }
+-    pthread_mutex_unlock(&s_hz_lock);
+-    return i < HZ_MAX_COMMIT;
+-}
++    w32_object *owner = NULL;
++    pthread_mutex_lock(&s_hz_lock);
++    int c = hz_commit_at((uintptr_t)baseAddr);
++    if (c >= 0 && s_commit[c].base == (uintptr_t)baseAddr && s_commit[c].owner
++        && hz_unmap(s_commit[c].backing)) {
++        owner = s_commit[c].owner;
++        owner->map_view = NULL;
++        memset(&s_commit[c], 0, sizeof s_commit[c]);
++        int r = hz_res_at((uintptr_t)baseAddr);
++        if (r < 0 || !s_res[r].view) hz_broken("view reservation lost");
++        hz_drop_res(r);
++    }
++    pthread_mutex_unlock(&s_hz_lock);
++    if (owner) obj_release(owner);
++    else SetLastError(ERROR_INVALID_ADDRESS);
++    return owner != NULL;
++}
++
++static SIZE_T hz_virtual_query(LPCVOID address, PMEMORY_BASIC_INFORMATION b, SIZE_T length)
++{
++    if (!b || length < sizeof *b) return 0;
++    uintptr_t a = (uintptr_t)address & ~(uintptr_t)(HZ_PAGE - 1), end = UINTPTR_MAX;
++    memset(b, 0, sizeof *b);
++    pthread_mutex_lock(&s_hz_lock);
++    int c = hz_commit_at(a), r = hz_res_at(a);
++    b->BaseAddress = (void *)a;
++    if (c >= 0) {
++        hz_commit *v = &s_commit[c];
++        if (r < 0) hz_broken("commit reservation lost");
++        b->AllocationBase = (void *)s_res[r].allocation;
++        b->AllocationProtect = PAGE_READWRITE;
++        b->State = MEM_COMMIT; b->Protect = PAGE_READWRITE;
++        b->Type = v->owner ? MEM_MAPPED : MEM_PRIVATE;
++        end = v->base + v->size;
++    } else if (r >= 0) {
++        b->AllocationBase = (void *)s_res[r].allocation;
++        b->AllocationProtect = PAGE_READWRITE;
++        b->State = MEM_RESERVE; b->Protect = PAGE_NOACCESS; b->Type = MEM_PRIVATE;
++        end = s_res[r].base + s_res[r].size;
++        for (int i = 0; i < HZ_MAX_COMMIT; i++) if (s_commit[i].base > a && s_commit[i].base < end) end = s_commit[i].base;
++    } else {
++        b->State = MEM_FREE; b->Protect = PAGE_NOACCESS;
++        for (int i = 0; i < HZ_MAX_RES; i++) if (s_res[i].base > a && s_res[i].base < end) end = s_res[i].base;
++    }
++    b->RegionSize = end > a ? end - a : HZ_PAGE;
++    pthread_mutex_unlock(&s_hz_lock);
++    return sizeof *b;
++}

@@ -1,0 +1,149 @@
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -277,6 +277,7 @@
+     uint32_t color;                     /* NV097 colour-format code      */
+     uint32_t addr_u, addr_v;            /* wrap mode per axis            */
+     uint32_t palette;                   /* guest address of the CLUT, P8 */
++    uint32_t palette_limit;             /* helper-only bound; zero preserves CPU sampling */
+     uint32_t levels;                    /* mip levels, from FORMAT       */
+     uint32_t filter;                    /* SET_TEXTURE_FILTER            */
+     uint32_t border;                    /* SET_TEXTURE_BORDER_COLOR      */
+@@ -861,11 +862,13 @@
+     if (!tex || !argb_out)
+         return 0;
+     if (tex->color == 0x0B) {
+-        if (tex->palette_entries != 256 || (tex->palette_va & 0x3Fu)
++        if ((tex->palette_entries != 32 && tex->palette_entries != 64
++             && tex->palette_entries != 128 && tex->palette_entries != 256)
++            || (tex->palette_va & 0x3Fu)
+             || !tex->width || !tex->height
+             || (tex->width & (tex->width - 1)) || (tex->height & (tex->height - 1))
+             || !backend_ram_span(tex->offset, (uint64_t)tex->width * tex->height)
+-            || !backend_ram_span(tex->palette_va, 256u * sizeof(uint32_t)))
++            || !backend_ram_span(tex->palette_va, (uint64_t)tex->palette_entries * sizeof(uint32_t)))
+             return 0;
+     }
+     s_gpu.texs[0].offset = tex->offset;
+@@ -876,6 +879,7 @@
+     s_gpu.texs[0].addr_u = 3;
+     s_gpu.texs[0].addr_v = 3;
+     s_gpu.texs[0].palette = tex->palette_va;
++    s_gpu.texs[0].palette_limit = tex->palette_entries;
+     s_gpu.texs[0].levels = 1;
+     s_gpu.texs[0].filter = 0;
+     s_gpu.texs[0].cube   = 0;
+@@ -1251,11 +1255,16 @@
+     /* 8-bit palette index, swizzled. Burnout 3 draws its logo and frontend
+      * header art this way; without a case every such quad came out as the
+      * unsupported-format fill, a white box where the logo should be. */
+-    case 0x0B:                                      /* SZ_I8_A8R8G8B8 */
++    case 0x0B: {                                    /* SZ_I8_A8R8G8B8 */
++        uint32_t index;
+         if (!t->palette)
+             return 0;
+-        *argb = ((const uint32_t *)(mem + t->palette))[p[u]];
++        index = p[u];
++        if (t->palette_limit && index >= t->palette_limit)
++            return 0;
++        *argb = ((const uint32_t *)(mem + t->palette))[index];
+         return 1;
++    }
+ 
+     /* 32-bit, other channel orders. The name gives the byte order from the
+      * top of the dword down, so each is a permutation of the same four. */
+--- a/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
++++ b/tests/nv2a_ffp_backend/nv2a_ffp_backend_test.c
+@@ -338,6 +338,93 @@
+         CHECK(!nv2a_backend_decode_texture(&s_be.texture, decoded));
+     }
+ 
++    /* Every hardware CLUT length accepts its last index and rejects the next. */
++    {
++        const uint32_t counts[] = {32, 64, 128};
++        Nv2aTexture tex = {.offset=0x1000, .width=2, .height=2, .color=0x0B,
++                          .palette_va=0xA000};
++        uint32_t decoded[4];
++        Nv2aTexture before = s_be.texture;
++        unsigned n;
++        for (n = 0; n < sizeof counts / sizeof counts[0]; n++) {
++            tex.palette_entries = counts[n];
++            s_mem[0x1000] = 0; s_mem[0x1001] = 1;
++            s_mem[0x1002] = 2; s_mem[0x1003] = counts[n] - 1;
++            put32(0xA000 + 4*(counts[n]-1), 0xA137C95Bu);
++            CHECK(nv2a_backend_decode_texture(&tex, decoded));
++            CHECK(decoded[3] == 0xA137C95Bu);
++            put32(0xA000 + 4*(counts[n]-1), 0x001257E3u);
++            CHECK(nv2a_backend_decode_texture(&tex, decoded));
++            CHECK(decoded[3] == 0x001257E3u);
++            s_mem[0x1003] = counts[n];
++            CHECK(!nv2a_backend_decode_texture(&tex, decoded));
++            /* A subsequent full-palette decode still accepts the larger index. */
++            tex.palette_entries = 256;
++            CHECK(nv2a_backend_decode_texture(&tex, decoded));
++        }
++        tex.palette_entries = 16; CHECK(!nv2a_backend_decode_texture(&tex, decoded));
++        tex.palette_entries = 0; CHECK(!nv2a_backend_decode_texture(&tex, decoded));
++        tex.palette_entries = 33; CHECK(!nv2a_backend_decode_texture(&tex, decoded));
++        m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
++        CHECK(s_be.textured && !memcmp(&before, &s_be.texture, sizeof before));
++    }
++
++    /* Handwritten 4x2 Morton ARGB8: top row uses words 0,1,4,5. */
++    {
++        const uint32_t raw[] = {0x00112233u, 0x44778899u, 0xA1B2C3D4u, 0xFFEEDDCCu,
++                                0x1289ABCDu, 0xFEDCBA98u, 0x76543210u, 0xC907E35Bu};
++        const uint32_t expected[] = {0x00112233u, 0x44778899u, 0x1289ABCDu, 0xFEDCBA98u,
++                                     0xA1B2C3D4u, 0xFFEEDDCCu, 0x76543210u, 0xC907E35Bu};
++        Nv2aTexture tex = {.offset=0xC000, .width=4, .height=2, .color=0x06};
++        uint32_t decoded[8];
++        memcpy(s_mem + 0xC000, raw, sizeof raw);
++        CHECK(nv2a_backend_decode_texture(&tex, decoded));
++        for (i = 0; i < 8; i++) CHECK(decoded[i] == expected[i]);
++    }
++
++    /* DXT23 explicit alpha 0..15; reversed green/red endpoints still use four colours. */
++    {
++        const uint8_t block[] = {0x10,0x32,0x54,0x76,0x98,0xBA,0xDC,0xFE,
++                                 0xE0,0x07,0x00,0xF8,0xE4,0xE4,0xE4,0xE4};
++        const uint32_t rgb[] = {0x00FF00u, 0xFF0000u, 0x55AA00u, 0xAA5500u};
++        Nv2aTexture tex = {.offset=0xC100, .width=4, .height=4, .color=0x0E};
++        uint32_t decoded[16];
++        memcpy(s_mem + 0xC100, block, sizeof block);
++        CHECK(nv2a_backend_decode_texture(&tex, decoded));
++        for (i = 0; i < 16; i++) CHECK(decoded[i] == ((i*17u << 24) | rgb[i & 3]));
++        /* Same address, changed block: the decoder cache must observe both changes. */
++        s_mem[0xC100] = 0xFF; s_mem[0xC10C] = 0x1B;
++        CHECK(nv2a_backend_decode_texture(&tex, decoded));
++        CHECK(decoded[0] == 0xFFAA5500u && decoded[1] == 0xFF55AA00u);
++        CHECK(decoded[2] == 0x22FF0000u && decoded[3] == 0x3300FF00u);
++    }
++
++    /* CPU rendering after each helper outcome must retain its unrestricted CLUT. */
++    {
++        const float M[16] = {2,0,0,2, 0,-2,0,2, 0,0,1,0, 0,0,0,1};
++        Nv2aTexture short_tex = {.offset=0x1100, .width=2, .height=2, .color=0x0B,
++                                .palette_va=0xB000, .palette_entries=32};
++        uint32_t decoded[4], pixel;
++        unsigned outcome;
++        nv2a_backend_register(NULL);
++        m(0x0208, 8); m(0x0200, 4u << 16); m(0x0204, 4u << 16);
++        m(0x020C, 16); m(0x0210, 0xD000); m(0x032C, 0);
++        for (i = 0; i < 16; i++) mf(0x0680 + 4*i, M[i]);
++        for (i = 0; i < 3; i++) put32(0x3000 + 4*i, 0xFFFFFFFFu);
++        memset(s_mem + 0x1000, 255, 8);
++        memset(s_mem + 0x1100, 0, 4);
++        put32(0xA000 + 4*255, 0xFF257BE1u);
++        m(0x1B20, 0xA000); m(0x1B14, 0);
++        for (outcome = 0; outcome < 2; outcome++) {
++            if (outcome) s_mem[0x1103] = 32;
++            CHECK(nv2a_backend_decode_texture(&short_tex, decoded) == !outcome);
++            memset(s_mem + 0xD000, 0, 64);
++            m(0x17FC, 5); m(0x1810, 2u << 24); m(0x17FC, 0);
++            memcpy(&pixel, s_mem + 0xD000 + 16 + 4, sizeof pixel);
++            CHECK(pixel == 0xFF257BE1u);
++        }
++    }
++
+     if (!s_fail)
+         printf("nv2a fixed-function path through a back end: ok\n");
+     return s_fail;

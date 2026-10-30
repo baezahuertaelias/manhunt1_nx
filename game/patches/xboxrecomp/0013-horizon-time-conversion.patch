@@ -1,0 +1,118 @@
+diff --git a/src/platform/win32_compat.c b/src/platform/win32_compat.c
+--- a/src/platform/win32_compat.c
++++ b/src/platform/win32_compat.c
+@@ -38,18 +38,7 @@
+ #define PROT_READ  1
+ #define PROT_WRITE 2
+ #define PROT_EXEC  4
+-/* newlib has no timegm: UTC broken-down time to seconds (days from civil). */
+-static time_t timegm(struct tm *t)
+-{
+-    long long y = t->tm_year + 1900LL, m = t->tm_mon + 1;
+-    y -= m <= 2;
+-    long long era = (y >= 0 ? y : y - 399) / 400;
+-    long long yoe = y - era * 400;
+-    long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + t->tm_mday - 1;
+-    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+-    long long days = era * 146097 + doe - 719468;
+-    return (time_t)(days * 86400 + t->tm_hour * 3600 + t->tm_min * 60 + t->tm_sec);
+-}
++
+ #endif
+ #if defined(__APPLE__)
+ #include <sys/sysctl.h>
+@@ -2100,6 +2089,9 @@
+ /* Time conversion                                                        */
+ /* ===================================================================== */
+ 
++#if defined(__SWITCH__)
++#include "win32_compat_horizon_time.inc"
++#else
+ BOOL SystemTimeToFileTime(const SYSTEMTIME *st, LPFILETIME ft)
+ {
+     struct tm tm;
+@@ -2131,6 +2123,8 @@
+     return TRUE;
+ }
+ 
++#endif /* __SWITCH__ */
++
+ /* ===================================================================== */
+ /* Exception handling (compile-shim -- SEH not yet emulated on Linux)     */
+ /* ===================================================================== */
+diff --git a/src/platform/win32_compat_horizon_time.inc b/src/platform/win32_compat_horizon_time.inc
+new file mode 100644
+--- /dev/null
++++ b/src/platform/win32_compat_horizon_time.inc
+@@ -0,0 +1,71 @@
++/* UTC calendar conversion for the Horizon compatibility layer. No time_t range
++ * dependency; validate fields instead of normalizing an invalid SYSTEMTIME. */
++#define HZ_TIME_DAY_TICKS 864000000000ULL
++
++static BOOL hz_time_invalid(void)
++{
++    SetLastError(ERROR_INVALID_PARAMETER);
++    return FALSE;
++}
++
++static int hz_time_valid(const SYSTEMTIME *s)
++{
++    static const unsigned char days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
++    if (s->wYear < 1601 || s->wYear > 30827 || !s->wMonth || s->wMonth > 12
++        || !s->wDay || s->wHour > 23 || s->wMinute > 59 || s->wSecond > 59
++        || s->wMilliseconds > 999) return 0;
++    unsigned limit = days[s->wMonth - 1];
++    if (s->wMonth == 2 && s->wYear % 4 == 0
++        && (s->wYear % 100 != 0 || s->wYear % 400 == 0)) limit++;
++    return s->wDay <= limit;
++}
++
++static int64_t hz_time_civil_days(int64_t year, unsigned month, unsigned day)
++{
++    year -= month <= 2;
++    int64_t era = year / 400, yoe = year - era * 400;
++    int64_t shifted = (int64_t)month + (month > 2 ? -3 : 9);
++    int64_t doy = (153 * shifted + 2) / 5 + day - 1;
++    return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
++}
++
++BOOL SystemTimeToFileTime(const SYSTEMTIME *st, LPFILETIME ft)
++{
++    if (!st || !ft) return hz_time_invalid();
++    if (!hz_time_valid(st)) return hz_time_invalid();
++    int64_t days = hz_time_civil_days(st->wYear, st->wMonth, st->wDay) + 134774;
++    /* The validated maximum is 9223149887999990000, below INT64_MAX. */
++    uint64_t ticks = (uint64_t)days * HZ_TIME_DAY_TICKS
++        + ((uint64_t)st->wHour * 3600 + st->wMinute * 60 + st->wSecond) * 10000000
++        + (uint64_t)st->wMilliseconds * 10000;
++    FILETIME result = {(DWORD)ticks, (DWORD)(ticks >> 32)};
++    *ft = result;
++    return TRUE;
++}
++
++BOOL FileTimeToSystemTime(const FILETIME *ft, LPSYSTEMTIME st)
++{
++    if (!ft || !st) return hz_time_invalid();
++    uint64_t ticks = ((uint64_t)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
++    if (ticks >> 63) return hz_time_invalid();
++    uint64_t days = ticks / HZ_TIME_DAY_TICKS;
++    int64_t z = (int64_t)days - 134774 + 719468;
++    int64_t era = z / 146097, doe = z - era * 146097;
++    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
++    int64_t year = yoe + era * 400;
++    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++    int64_t mp = (5 * doy + 2) / 153;
++    int64_t day = doy - (153 * mp + 2) / 5 + 1;
++    int64_t month = mp + (mp < 10 ? 3 : -9);
++    year += month <= 2;
++    uint64_t seconds = (ticks / 10000000) % 86400;
++    /* FILETIME's upper valid tick decodes into year30828; wYear fits a WORD. */
++    SYSTEMTIME result = {
++        .wYear = (WORD)year, .wMonth = (WORD)month, .wDayOfWeek = (WORD)((days + 1) % 7),
++        .wDay = (WORD)day, .wHour = (WORD)(seconds / 3600),
++        .wMinute = (WORD)((seconds / 60) % 60), .wSecond = (WORD)(seconds % 60),
++        .wMilliseconds = (WORD)((ticks / 10000) % 1000)
++    };
++    *st = result;
++    return TRUE;
++}

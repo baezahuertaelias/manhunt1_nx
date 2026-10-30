@@ -6,7 +6,7 @@
  *     libnx 1280x720 RGBA framebuffer, counted, and dumpable as BMP;
  *   - host FMV playback reports "not playing" (XMV is decoded by the
  *     title's own lifted code);
- *   - newlib gaps: sysconf, pwrite, posix_memalign.
+ *   - newlib gap: sysconf (allocation compatibility lives in horizon_alloc.c).
  */
 #include <errno.h>
 #include <stdint.h>
@@ -128,26 +128,6 @@ long sysconf(int name)
     case _SC_NPROCESSORS_CONF: return 3;     /* cores available to applications */
     default: errno = EINVAL; return -1;
     }
-}
-
-ssize_t pwrite(int fd, const void *buf, size_t n, off_t off)
-{
-    off_t cur = lseek(fd, 0, SEEK_CUR);
-    if (cur < 0 || lseek(fd, off, SEEK_SET) < 0)
-        return -1;
-    ssize_t r = write(fd, buf, n);
-    lseek(fd, cur, SEEK_SET);
-    return r;
-}
-
-int posix_memalign(void **out, size_t align, size_t size)
-{
-    void *p = aligned_alloc(align < sizeof(void *) ? sizeof(void *) : align,
-                            (size + align - 1) & ~(align - 1));
-    if (!p)
-        return ENOMEM;
-    *out = p;
-    return 0;
 }
 
 /* The watchdog closes the APU's WAV capture before dumping; there is no APU

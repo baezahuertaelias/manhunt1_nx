@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Build the recompiled Manhunt for the POSIX host (milestone 2 bring-up).
-#   1. lift DEFAULT.xbe to C if missing (game/build/gen, reuses the
-#      tests/recomp-proof pipeline cache);
-#   2. copy the pinned xboxrecomp tree and apply game/patches/xboxrecomp/*.patch;
+#   1. copy the pinned xboxrecomp tree and apply game/patches/xboxrecomp/*.patch;
+#   2. lift DEFAULT.xbe with the patched tools when its cache key changes;
 #   3. cmake + ninja with all cores.
 # Everything generated lands in game/build/ (gitignored: game-derived).
 # "scripts/game-build.sh debug" builds generated code at -O0 into game/build/host-O0.
@@ -25,6 +24,13 @@ docker run --rm --network none --hostname localhost --cpus "$CPUS" --memory 12g 
 set -euo pipefail
 G=/repo/game/build
 P=$G/pipeline
+rm -rf "$G/xboxrecomp" && cp -r /opt/xboxrecomp "$G/xboxrecomp"
+for p in /repo/game/patches/xboxrecomp/*.patch; do
+  git -C "$G/xboxrecomp" apply "$p"
+  echo "applied $(basename "$p")"
+done
+# Analysis and lifting must import the patched tools, not the image copy.
+cd "$G/xboxrecomp"
 # Full analysis of every executable section. --text-only (the getting-started
 # default) leaves the statically linked XDK sections (DSOUND, D3D, XGRPH, XMV,
 # DOLBY, ...) almost undiscovered, and boot dies on unresolved indirect calls.
@@ -41,7 +47,7 @@ fi
 # Re-lift when the hand-written function list or the false-entry repairs change.
 # function_fixes.json: detected starts that fall inside an instruction of the
 # real owner (reports/FEASIBILITY.md), removed before translation.
-manual_key=$(cat /repo/game/manual_functions.json /repo/game/function_fixes.json /repo/scripts/fix-functions.py | sha256sum | cut -d" " -f1)
+manual_key=$(cat /repo/game/manual_functions.json /repo/game/function_fixes.json /repo/scripts/fix-functions.py /repo/game/patches/xboxrecomp/*.patch | sha256sum | cut -d" " -f1)
 if [ "$(cat "$G/gen/.manual.sha256" 2>/dev/null)" != "$manual_key" ]; then rm -rf "$G/gen"; fi
 if [ ! -f "$G/gen/recomp_dispatch.c" ]; then
   mkdir -p "$G/gen"
@@ -51,10 +57,6 @@ if [ ! -f "$G/gen/recomp_dispatch.c" ]; then
     > "$G/logs/lift.log" 2>&1 || { tail -5 "$G/logs/lift.log"; exit 1; }
   echo "$manual_key" > "$G/gen/.manual.sha256"
 fi
-rm -rf "$G/xboxrecomp" && cp -r /opt/xboxrecomp "$G/xboxrecomp"
-for p in /repo/game/patches/xboxrecomp/*.patch; do
-  git -C "$G/xboxrecomp" apply "$p" && echo "applied $(basename "$p")"
-done
 [ "$BDIR" = prep ] && exit 0
 cmake -S /repo/game -B "$G/$BDIR" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMANHUNT_GEN_OPT="$GOPT" > "$G/logs/cmake-$BDIR.log"
 if ! cmake --build "$G/$BDIR" -j "$CPUS" > "$G/logs/build-$BDIR.log" 2>&1; then tail -40 "$G/logs/build-$BDIR.log"; exit 1; fi

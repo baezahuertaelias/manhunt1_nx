@@ -2,9 +2,9 @@
 """Apply reviewed function-boundary fixes to a tools.disasm functions.json.
 
 Usage: python3 -I scripts/fix-functions.py <functions.json> <fixes.json> <out.json>
-Each fix removes false entries (detected starts inside an instruction of the
-real owner) and extends the owner to its true exclusive end. Fails if a fix no
-longer matches the database, so a re-analysis cannot silently drift.
+Boundary fixes remove false entries and extend their real owner. An `add`
+record inserts a reviewed, measured entry only in an uncovered gap. Both forms
+fail when the analysis changes, so a re-analysis cannot silently drift.
 """
 import json
 import sys
@@ -13,6 +13,24 @@ src, fixes_path, out = sys.argv[1:4]
 funcs = json.load(open(src))
 by = {int(f["start"], 16): f for f in funcs}
 for fix in json.load(open(fixes_path)):
+    if "add" in fix:
+        entry = fix["add"]
+        start, end = int(entry["start"], 16), int(entry["end"], 16)
+        if not (0 < start < end <= 0x100000000):
+            sys.exit("fix-functions: invalid added function range")
+        if start in by:
+            sys.exit(f"fix-functions: added entry {start:#x} already in database; re-review")
+        overlaps = [s for s, f in by.items()
+                    if start < int(f["end"], 16) and s < end]
+        if overlaps:
+            sys.exit(f"fix-functions: added entry {start:#x} overlaps {[hex(s) for s in overlaps]}")
+        if entry["num_instructions"] <= 0 or not entry["section"] or not fix["why"]:
+            sys.exit("fix-functions: added entry needs instruction count, section and rationale")
+        by[start] = dict(entry, start=f"0x{start:08X}", end=f"0x{end:08X}",
+                         size=end - start, name=f"sub_{start:08X}",
+                         detection_method="reviewed_runtime_target", confidence=0.9,
+                         has_prologue=False, called_by=[])
+        continue
     owner, end = int(fix["owner"], 16), int(fix["end"], 16)
     if owner not in by:
         sys.exit(f"fix-functions: owner {fix['owner']} not in database")

@@ -31,6 +31,7 @@
 #include "kernel.h"
 #include "xbox_memory_layout.h"
 #include "recomp_types.h"
+#include "nv2a_deko3d.h"
 
 #define MANHUNT_ENTRY_POINT 0x001FE908u
 #define GAME_DIR  "sdmc:/manhunt"
@@ -41,6 +42,23 @@
 extern RECOMP_TLS uint32_t g_esp;
 extern ptrdiff_t g_xbox_mem_offset;
 extern int recomp_dispatch_init(void);
+
+static void gpu_backend_init(void)
+{
+    const char *option = getenv("MANHUNT_GPU_BACKEND");
+    if (!option || strcmp(option, "0") == 0)
+        return;
+    if (strcmp(option, "1") != 0) {
+        printf("[MH-BOOT] FAIL MANHUNT_GPU_BACKEND must be 0 or 1\n");
+        exit(1);
+    }
+    if (R_FAILED(romfsInit()) || !manhunt_nv2a_deko3d_init()) {
+        printf("[MH-BOOT] FAIL native GPU initialization\n");
+        exit(1);
+    }
+    nv2a_backend_register(manhunt_nv2a_deko3d_backend());
+    printf("[MH-GPU] enabled synchronous deko3d menu backend\n");
+}
 extern void xbox_path_init(const char *game_dir, const char *save_dir);
 extern void manhunt_input_init(void);
 extern void xbox_FramebufferDumpBmp(const char *prefix);
@@ -186,6 +204,7 @@ static void *guest_main(void *xbe_arg)
         }
     }
 
+    gpu_backend_init();
     manhunt_input_init();
     xbox_kernel_init();
     mkdir(SAVE_DIR, 0777);
