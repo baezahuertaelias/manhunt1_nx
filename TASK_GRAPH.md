@@ -86,6 +86,7 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | LEVEL-LOAD-REVIEW-001 | done | evidence_review | Private game/build/level-load/review/; Independently inspect actual frames/logs/source/provenance and review eventual critical fix and acceptance evidence | Remove isolated diagnostics |
 
 | LEVEL-SPAWN-PROOF-001 | done | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Switch scene plus original player-class/render-frame spawn proof; read-only diagnostics, expected watchdog stop separate from crash; independent review |
-| ICALL-NULL-001 | ready | re | LEVEL-LOAD-001 | Explain the skipped null indirect call (call #109186 at about 10 s); faithful fix or documented harmless behaviour | Revert game/ change |
+| ICALL-NULL-001 | done | re | LEVEL-LOAD-001 | Explain the skipped null indirect call (call #109186 at about 10 s); faithful fix or documented harmless behaviour | Revert game/ change |
 | HW-SWITCH-001 | ready | user | LEVEL-LOAD-001 | Physical-Switch run: menu, first level, real-controller control test, real FPS; evidence returned from the SD card | n/a (measurement) |
 | HW-LOG-001 | done | runtime | LEVEL-LOAD-001 | Optional MANHUNT_LOG_FILE so hardware runs return text logs (stdout/stderr are debug-channel only today); default off | Revert main_switch.c |
+| ICALL-NULL-002 | ready | re | ICALL-NULL-001 | Explain the second null indirect call at guest 0x00222AF1 (late in host runs); faithful fix or documented harmless behaviour | Revert game/ change |

@@ -171,3 +171,23 @@ Next: HW-SWITCH-001 (physical-Switch control and performance test, see `docs/MAC
 ## HW-LOG-001 check (2026-10-31)
 
 Optional `MANHUNT_LOG_FILE=sdmc:/<file>` (default off) mirrors the runtime log to the SD card, because a physical console cannot see `svcOutputDebugString` (`game/src/main_switch.c`; `docs/CONFIGURATION.md`, `docs/CHANGELOG_CONFIG.md`). NRO SHA-256 `34ebe1f71ee0752ce3fdd8c0c484da05bc88e2db84b45de1b137076581417c3e`. Three 70 s Eden runs (private `game/build/level-load/hwlog-test/`): key set creates the file with the `[MH-BOOT] start` and config lines first (1,457 lines); key absent creates no file; `/tmp/x.txt` logs `[MH-BOOT] log file ...: FAILED` and creates no file. Physical-console behaviour is UNVERIFIED; independent review: PASS WITH NITS, no blocking finding (hidden-failure nits fixed, others documented); rerun on the final NRO passes.
+
+## ICALL-NULL-001 (2026-10-31): the skipped null call is a consequence of missing audio
+
+The `[ICALL] target 0x00000000 is not code -- skipped` line at about 10 s comes from guest 0x000E7C96 (`call dword ptr [ecx+4]`, `this` in eax) in the release loop of sub_000E7C20, the cleanup of the intro-movie (XMV) player: for each slot of the DirectSound stream array at 0x0039C8D8 (count at 0x0039C8F0) it calls the object's vtable slot 1 (Release) and zeroes the slot. Host gdb at the skip showed the array as `0 0 0 0` with count 2, so `obj` is null, `ecx = [0]` and the target is `[4] = 0`; the stack return address is 0x000E7C99.
+
+Chain, in the Switch/Eden log (attempt4-1/runner.log, lines 1050–1052): `[MH-AUDIO] DirectSoundCreateStream -> DSERR_NODRIVER (audio not implemented)`, then the title's `Unable to enable audio stream 0 (error 88780078)`, then the skipped call. `game/src/dsound_hle.c` returns that error because DirectSound is not implemented (BLOCKERS #2); the original code, given valid streams on a real console, would not take this cleanup path. Releasing never-created streams is a no-op and the runtime's ICALL guard restores `esp`; the game overwrites `eax` immediately after (0x000E7C99).
+
+Classification: harmless by design for now, caused by the audio gap; no code change. It should disappear once `DirectSoundCreateStream` is implemented (not run: UNVERIFIED). The call number printed with the line varies by run. Verified by the lead against the log and `text.asm`; produced by an investigation agent (host gdb, no code changes).
+
+A second null call appears much later in host runs (call number about 2.4 million, 60–90 s): guest site 0x00222AF1 in sub_00222AE1, a `[vtbl+8]` virtual call on `this = ptr ? ptr-8 : 0` (a null-guarded release thunk), reached via sub_000143C0 and sub_00011760 from sub_000D8750. It was not seen in the boot-time Eden logs checked. Whether it is also benign is UNVERIFIED and is tracked as ICALL-NULL-002.
+
+## Host gameplay observation (2026-10-31, qualitative, host build only)
+
+An earlier host run (private `game/build/level-load/control2/run1/`, 221 frames about every 11 s, 2,393 s wall time, pad script: menu A/A/A/B at 15/30/45/60 s, then 300 s forward-stick holds starting at 400, 800, 1200, 1600 and 2000 s) was inspected frame by frame:
+
+- **About 657 s:** the opening cinematic: close-up of the protagonist with the REC overlay and a running TCR timecode, and white streaks across the top and bottom. The same streaks appear in the Switch/Eden cinematic frames, and the cinematic's REC overlay suggests the streaks are an intended camcorder-static effect; that is a hypothesis (not compared with a reference).
+- **About 1,296 s:** the in-game hint "You can review the director's objectives on the pause screen by pressing START."
+- **About 1,300–2,393 s:** the player character seen from behind, walking away from the camera; then third-person gameplay with a radar circle, hand icon and health bars, and the tutorial hints "Watch your noise. Sneaking is totally silent, but hunters can hear you running…" and "Walk over items to pick them up." Street lamps and walls scroll between frames. The gameplay frames are clean but very dark (brightness settings were left at their defaults).
+
+What this does and does not show: on the host build the opening cinematic ends and the game reaches its first gameplay tutorial, so the static scene in the Switch/Eden runs is consistent with the cinematic still playing at about 0.1 fps rather than a control defect. It is **qualitative only**: no player position, input-correlated numbers or Switch frames from this stage exist, and host results do not carry over to the Switch. Quantitative position-versus-input evidence (which would also tie the visible figure to the player object at 0x01462000) is the next host probe.

@@ -5,7 +5,7 @@
 The hardware run now returns text logs too: HW-LOG-001 (`MANHUNT_LOG_FILE`, default off) is implemented and checked in Eden; its independent review is recorded in the task, and the console behaviour is UNVERIFIED.
 
 Without hardware, the next engineering work is, in order:
-1. **ICALL-NULL-001** (P1): explain the skipped null indirect call at about 10 s (call #109186).
+1. **Host probe: player position versus input** (runs in progress): the host build reaches gameplay after about 25 minutes (reports/LEVEL_LOAD.md, "Host gameplay observation"); log the player position at 0x4004A0 against the scripted input to tie the visible figure to the player object and to show control, to strengthen the minimal M4 bar; and **ICALL-NULL-002** (P2, second null call, late in host runs). ICALL-NULL-001 is explained: it follows from audio not being implemented.
 2. **LEVEL-INPUT-TRACE-001 / LEVEL-MOVE-001** (M5): follow the title's input gate (word 0x002ECA30, mode word 0x004025E4, player+0x844 bit 0x100, script opcodes 0x147/0x148) on the host to learn what ends the scripted mode; do not force-skip it without evidence.
 3. Graphics fidelity (dark scene, streaks) and performance, BLOCKERS #1.
 
