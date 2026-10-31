@@ -101,8 +101,9 @@ So the Switch build needs no RW aliasing for milestone 2. Re-check at level load
 
 - **`D3D_BlockOnTime` replacement** (`game/src/d3d_fence.c`) differs from the original at `0x00292200`:
   - it drops the `device+0x19FC` callback and the make-space branch (`flags & 8`);
-  - it gives up after 250 ms with a logged timeout instead of stalling;
-  - `eax` holds the semaphore value.
+  - with the executor (`RECOMP_PB_EXEC`, the boot default) it waits without a bound, like the original's final spin, logging every 2 s while it waits; a fence outside (semaphore, newest] returns at once, as in the original. The earlier 250 ms give-up let the title free render targets the executor had not finished drawing into, corrupting reused allocator memory (LEVEL-LOAD-001, [LEVEL_LOAD.md](LEVEL_LOAD.md)). Without the executor the logged 250 ms bound remains, because nothing would release the semaphore;
+  - `eax` holds the semaphore value;
+  - the fetch-pointer early return after `sub_00292010` (`0x0029223C`) is not reproduced.
   - A further false entry `0x00292207` sits inside it; no references, harmless.
 - **One null function-pointer call is skipped** on the boot path, right after `DirectSoundCreateStream -> DSERR_NODRIVER` (`[ICALL] target 0x00000000 is not code -- skipped`). Investigate in AUDIO-HLE-001.
 - **XInput replacement:** the packet number increments on every call (the original does so only on change), and `XInputSetState` doesn't signal the feedback header's event.

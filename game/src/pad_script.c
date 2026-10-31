@@ -4,7 +4,9 @@
  * MANHUNT_PAD_SCRIPT="<ms>:<button>[+<button>...][:<hold_ms>],..."
  *   ms is milliseconds since the first sample; hold defaults to 150 ms.
  *   Buttons: up down left right start back lthumb rthumb a b x y black white
- *   lt rt. Example: "15000:start,20000:a:300".
+ *   lt rt. Stick directions at full deflection: lup ldown lleft lright (left
+ *   stick) and rup rdown rleft rright (right stick); opposite directions in
+ *   one step cancel. Example: "15000:start,20000:a:300,30000:lup+rleft:2000".
  * Every press is logged once as "[MH-INPUT] press <name> at <ms>" so a run's
  * log shows exactly what the game was given.
  */
@@ -22,6 +24,7 @@ typedef struct {
     unsigned long at, hold;
     uint16_t buttons;
     uint8_t analog_mask;    /* bit i -> bAnalogButtons[i] = 255 */
+    int8_t lx, ly, rx, ry;  /* stick direction, -1/0/+1 per axis */
     char text[48];
     int logged;
 } Step;
@@ -46,6 +49,18 @@ static int parse_button(const char *name, size_t n, Step *st)
         {"a", 0, MH_A}, {"b", 0, MH_B}, {"x", 0, MH_X}, {"y", 0, MH_Y},
         {"black", 0, MH_BLACK}, {"white", 0, MH_WHITE}, {"lt", 0, MH_LT}, {"rt", 0, MH_RT},
     };
+    static const struct { const char *name; int stick, axis, dir; } sticks[] = {
+        {"lup", 0, 1, 1}, {"ldown", 0, 1, -1}, {"lleft", 0, 0, -1}, {"lright", 0, 0, 1},
+        {"rup", 1, 1, 1}, {"rdown", 1, 1, -1}, {"rleft", 1, 0, -1}, {"rright", 1, 0, 1},
+    };
+    for (size_t i = 0; i < sizeof sticks / sizeof sticks[0]; i++) {
+        if (strlen(sticks[i].name) == n && strncasecmp(sticks[i].name, name, n) == 0) {
+            int8_t *v = sticks[i].stick ? (sticks[i].axis ? &st->ry : &st->rx)
+                                        : (sticks[i].axis ? &st->ly : &st->lx);
+            *v = (int8_t)(*v + sticks[i].dir);
+            return 1;
+        }
+    }
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
         if (strlen(map[i].name) == n && strncasecmp(map[i].name, name, n) == 0) {
             st->buttons |= map[i].bit;
@@ -98,6 +113,17 @@ static void load_script(void)
         printf("[MH-INPUT] pad script: %d step(s)\n", s_count);
 }
 
+/* XINPUT thumb range: positive is right/up. An active step overrides an
+ * idle axis; later overlapping steps win. */
+static int16_t stick_value(int16_t cur, int8_t dir)
+{
+    if (dir > 0)
+        return 32767;
+    if (dir < 0)
+        return -32768;
+    return cur;
+}
+
 /* Returns 1 and fills *out when a script is configured, else 0. */
 int manhunt_pad_script(ManhuntPad *out)
 {
@@ -116,6 +142,10 @@ int manhunt_pad_script(ManhuntPad *out)
         for (int k = 0; k < 8; k++)
             if (st->analog_mask & (1u << k))
                 out->analog[k] = 255;
+        out->lx = stick_value(out->lx, st->lx);
+        out->ly = stick_value(out->ly, st->ly);
+        out->rx = stick_value(out->rx, st->rx);
+        out->ry = stick_value(out->ry, st->ry);
         if (!st->logged) {
             st->logged = 1;
             printf("[MH-INPUT] press %s at %lu ms\n", st->text, t);

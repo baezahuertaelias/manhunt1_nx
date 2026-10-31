@@ -107,3 +107,19 @@ Private evidence: `game/build/level-load/fault/{watch-header,alloc-segv,pool-ptr
 Measured chain: (1) a live block header becomes FFFFFFFF/FFFFFFFF (the earlier diagnostic build shows it valid at allocation, invalid at free); (2) freeing that block copies the invalid header into a free-list node; (3) a later allocation from that node writes to guest 0xFFFFFFFF and faults. (2) and (3) are original game behaviour given (1); they are not lifting defects. Do not patch (2) or (3).
 
 Lead for (1), not yet proven: in the earlier diagnostic, the corrupted header 0x81CACB08 begins exactly at the end of the preceding 0x3800-byte allocation (user 0x01CA9308 + 0x3800). That fits an overrun past the end of that preceding resource, by guest code or by native NV2A emulation writing guest RAM, but a write aimed at the header directly is not excluded. The writer remains UNVERIFIED.
+
+## Root cause: early fence return (2026-10-30)
+
+Investigation and independent review evidence: `game/build/level-load/fault2/` (private, `SHA256SUMS` verified by the reviewer).
+
+- **Writer:** native, not lifted guest code. The NV2A software rasteriser `put_pixel` (xboxrecomp `nv2a_pb_exec.c`) on the pushbuffer executor thread (`nv2a_ack_thread` → `pb_consume` → `draw_primitive` → … → `xf_rows` → `put_pixel`) wrote 0xFFFFFFFF texels over a live allocator header. Caught in 3 of 3 instrumented host runs; guest registers on that thread are all zero.
+- **Cause:** our `D3D_BlockOnTime` replacement (`game/src/d3d_fence.c`, guest 0x00292200) gave up after 250 ms. The original's final spin (0x00292370–0x00292378) has no bound. D3DResource_BlockUntilNotBusy (0x002926B0, via 0x002907A0 from 0x001EF210) waits there before a texture free (0x001EF1E0 → sub_001F0720). After the timeout the title freed a 512x32 A8R8G8B8 render target (block 0x01CAA080, size 0x10080, freed at semaphore 707 while fence 733 was outstanding). The allocator reused that memory for 0x3800 vertex blocks, and the executor's late draws (semaphore 729) wrote into the stale surface footprint, over header 0x81CAF408. The earlier "0x3800 adjacency" lead was coincidental.
+- **Fix:** with `RECOMP_PB_EXEC` (the boot default) the wait is unbounded, logging every 2 s while it waits. As in the original (0x0029221E), a fence outside (semaphore, newest] returns at once. Without the executor the logged 250 ms bound is unchanged. Focused test `tests/d3d-fence/run.sh`: 7 cases pass; the previous code fails the lagging-semaphore cases. Host: one instrumented run (300 s bound) showed no header change across 1,856 watched blocks and one plain run showed no crash; their exit codes and exact durations are not recorded. Independent review: PASS WITH NITS; the nits are addressed.
+
+## Attempt4 (Switch, fence fix without the window check)
+
+NRO `f2c463121ddcd0b3d7767122a2b881bd657bd0feb53d0d808df7693976c33fc2`, native backend, runner exit 0 after 565 s (560 s bound), no guest exit or fault logged. Menu inputs sampled at 60.6/90.4/120.8/180.2 s. 31 `still waiting … 2000 ms` fence logs during level load and play, all of which completed.
+
+All 85 frames were inspected. Loading screen, then CCTV static, then from about 326 s to 546 s a consistent in-level scene: the camcorder REC overlay, an advancing TCR timecode, a standing figure and a vehicle. The coloured-noise bands of attempt3 are absent; one frame (about 344 s) is mostly black.
+
+Frames arrive about every 18 s, and the timecode advances only a second or two between them, so the emulated game runs at a small fraction of real time. The movement steps (4–12 s holds at 360–482 s) were never sampled, because the title reads the pad about once per game frame. The figure did not move, so spawn and controllability remain UNVERIFIED. Attempt5 uses the window-checked fence wait (NRO `7b3c6f90…`) and holds the stick for minutes.
