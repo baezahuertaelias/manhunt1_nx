@@ -191,8 +191,19 @@ static void config_init(void)
         setenv(defaults[i][0], defaults[i][1], 1);
 
     FILE *f = fopen("sdmc:/manhunt.env", "r");
-    char line[512];
+    char line[4096];
     while (f && fgets(line, sizeof line, f)) {
+        size_t n = strlen(line);
+        if (n == sizeof line - 1 && line[n - 1] != '\n') {
+            /* Longer than the buffer: a cut-off value must not be applied (a 512-byte
+             * buffer once silently truncated a long MANHUNT_PAD_SCRIPT). */
+            int c;
+            while ((c = fgetc(f)) != EOF && c != '\n')
+                ;
+            printf("[MH-BOOT] config line longer than %zu bytes ignored (starts \"%.40s\")\n",
+                   sizeof line - 1, line);
+            continue;
+        }
         char *eq = strchr(line, '=');
         if (line[0] == '#' || !eq)
             continue;

@@ -26,7 +26,7 @@ The repository is **public** (AGENTS.md). It contains no game data. Everything i
 | Item | Where it is on the Linux host | Size | Check |
 |---|---|---|---|
 | Your lawful game files | `assets/manhunt1_xbe/` (`DEFAULT.xbe`, `audio/`, `levels/`) | 2.4 GiB, 836 files, largest 535 MB | `DEFAULT.xbe` SHA-256 `af69e803695e29c3f99b38d6a759fac4c9300c9a540a2c244e4e7a07fb96afde`; whole set against `reports/ASSET_MANIFEST.sha256` (tracked) |
-| Prebuilt NRO | `game/build/switch/manhunt.nro` | about 21 MB | SHA-256 `34ebe1f71ee0752ce3fdd8c0c484da05bc88e2db84b45de1b137076581417c3e`: the source of branch `macos-switch-handoff` with the optional SD-card log (`MANHUNT_LOG_FILE`, section 4). The earlier spawn-proof NRO `7b3c6f90…600c6` is identical except it lacks that log feature |
+| Prebuilt NRO | `game/build/switch/manhunt.nro` | about 21 MB | SHA-256 `367b97b7795caa44aea52bf9d53e6159d3b68a55d721945b8fa8c788a05daf5f`: the source of branch `macos-switch-handoff` with the optional SD-card log (`MANHUNT_LOG_FILE`, section 4). The earlier spawn-proof NRO `7b3c6f90…600c6` is identical except it lacks that log feature |
 | Docker images (path B only) | rebuilt from `infra/`, see section 5 | several GB | see section 5 |
 
 The NRO is a build product that contains code derived from the game. Treat it like game data: do not commit it and do not share it.

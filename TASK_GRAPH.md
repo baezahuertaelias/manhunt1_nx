@@ -90,3 +90,4 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | HW-SWITCH-001 | ready | user | LEVEL-LOAD-001 | Physical-Switch run: menu, first level, real-controller control test, real FPS; evidence returned from the SD card | n/a (measurement) |
 | HW-LOG-001 | done | runtime | LEVEL-LOAD-001 | Optional MANHUNT_LOG_FILE so hardware runs return text logs (stdout/stderr are debug-channel only today); default off | Revert main_switch.c |
 | ICALL-NULL-002 | ready | re | ICALL-NULL-001 | Explain the second null indirect call at guest 0x00222AF1 (late in host runs); faithful fix or documented harmless behaviour | Revert game/ change |
+| CFG-LINE-001 | done | runtime | HW-LOG-001 | Switch config reader: 4095-byte lines, over-long lines rejected visibly instead of silently truncated | Revert config_init |
