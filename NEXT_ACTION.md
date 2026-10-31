@@ -1,7 +1,10 @@
 # Next action
 
-**LEVEL-LOAD-001** (P0): find the writer that turns a live physical-allocator block header into FFFFFFFF/FFFFFFFF during Jury_Turf loading (step 1 of the measured chain in [reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Allocator corruption chain"). Steps 2–3 (free copies the bad header into a node, a later allocation faults at guest 0xFFFFFFFF) are consequences and must not be patched.
+**HW-SWITCH-001** (P1, owner: user): run the in-level build on a physical homebrew-capable Switch with your own game files and a real controller, following [docs/MACOS_SWITCH_SETUP.md](docs/MACOS_SWITCH_SETUP.md), and return the SD-card log (`MANHUNT_LOG_FILE`) and frames. Eden is too slow to confirm the Switch build's cinematic-to-gameplay hand-over: a 111-minute Eden run was still in the cinematic ([reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Long Eden run"), while the host build hands control to the player after about 28 minutes of wall time and then responds to the stick ("Host probe"). No further long Eden runs are planned.
 
-Proposed bounded probe (one host run): in the ignored diagnostic build, track each 0x3800-byte allocation from caller 0x001F0FE8 and hardware-watch only the header that follows the most recent such block, on both the 0x8xxxxxxx and low aliases, so the corrupted candidate cannot be evicted as it was before. Also record whether native NV2A clear/surface/DMA writes touch that range. Then confirm on the Switch build with movement input after loading, to tell a controllable spawn from a cutscene.
+Without hardware, the next engineering work is, in order:
+1. **ICALL-NULL-002** (P2): the second null indirect call (guest 0x00222AF1) late in host runs.
+2. Graphics fidelity and performance, BLOCKERS #1; audio (AUDIO-HLE-001), which would also remove the boot-time skipped null call (ICALL-NULL-001, explained).
+3. M5 interaction on the host: crouch, collision, further controls; the meaning of the player flag bits is a hypothesis.
 
-Attempt3 on Switch reaches in-level 3D rendering with no guest exit in 420 s; frames are intermittently corrupted and spawn is UNVERIFIED. Gameplay graphics, audio, x87/protection/mirror fidelity, playable performance and physical Switch validation remain open. Emulator rates are diagnostic only.
+Milestone 4 is recorded at a minimal bar only, UNVERIFIED on hardware: [reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Milestone 4 acceptance", with the host probe as supporting (host-only, not independently reviewed) evidence. Audio, x87/protection/mirror fidelity, playable performance and physical Switch validation remain open. Emulator rates are diagnostic only.

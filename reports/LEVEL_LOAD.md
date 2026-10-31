@@ -107,3 +107,109 @@ Private evidence: `game/build/level-load/fault/{watch-header,alloc-segv,pool-ptr
 Measured chain: (1) a live block header becomes FFFFFFFF/FFFFFFFF (the earlier diagnostic build shows it valid at allocation, invalid at free); (2) freeing that block copies the invalid header into a free-list node; (3) a later allocation from that node writes to guest 0xFFFFFFFF and faults. (2) and (3) are original game behaviour given (1); they are not lifting defects. Do not patch (2) or (3).
 
 Lead for (1), not yet proven: in the earlier diagnostic, the corrupted header 0x81CACB08 begins exactly at the end of the preceding 0x3800-byte allocation (user 0x01CA9308 + 0x3800). That fits an overrun past the end of that preceding resource, by guest code or by native NV2A emulation writing guest RAM, but a write aimed at the header directly is not excluded. The writer remains UNVERIFIED.
+
+## Root cause: early fence return (2026-10-30)
+
+Investigation and independent review evidence: `game/build/level-load/fault2/` (private, `SHA256SUMS` verified by the reviewer).
+
+- **Writer:** native, not lifted guest code. The NV2A software rasteriser `put_pixel` (xboxrecomp `nv2a_pb_exec.c`) on the pushbuffer executor thread (`nv2a_ack_thread` → `pb_consume` → `draw_primitive` → … → `xf_rows` → `put_pixel`) wrote 0xFFFFFFFF texels over a live allocator header. Caught in 3 of 3 instrumented host runs; guest registers on that thread are all zero.
+- **Cause:** our `D3D_BlockOnTime` replacement (`game/src/d3d_fence.c`, guest 0x00292200) gave up after 250 ms. The original's final spin (0x00292370–0x00292378) has no bound. D3DResource_BlockUntilNotBusy (0x002926B0, via 0x002907A0 from 0x001EF210) waits there before a texture free (0x001EF1E0 → sub_001F0720). After the timeout the title freed a 512x32 A8R8G8B8 render target (block 0x01CAA080, size 0x10080, freed at semaphore 707 while fence 733 was outstanding). The allocator reused that memory for 0x3800 vertex blocks, and the executor's late draws (semaphore 729) wrote into the stale surface footprint, over header 0x81CAF408. The earlier "0x3800 adjacency" lead was coincidental.
+- **Fix:** with `RECOMP_PB_EXEC` (the boot default) the wait is unbounded, logging every 2 s while it waits. As in the original (0x0029221E), a fence outside (semaphore, newest] returns at once. Without the executor the logged 250 ms bound is unchanged. Focused test `tests/d3d-fence/run.sh`: 7 cases pass; the previous code fails the lagging-semaphore cases. Host: one instrumented run (300 s bound) showed no header change across 1,856 watched blocks and one plain run showed no crash; their exit codes and exact durations are not recorded. Independent review: PASS WITH NITS; the nits are addressed.
+
+## Attempt4 (Switch, fence fix without the window check)
+
+NRO `f2c463121ddcd0b3d7767122a2b881bd657bd0feb53d0d808df7693976c33fc2`, native backend, runner exit 0 after 565 s (560 s bound), no guest exit or fault logged. Menu inputs sampled at 60.6/90.4/120.8/180.2 s. 31 `still waiting … 2000 ms` fence logs during level load and play, all of which completed.
+
+All 85 frames were inspected. Loading screen, then CCTV static, then from about 326 s to 546 s a consistent in-level scene: the camcorder REC overlay, an advancing TCR timecode, a standing figure and a vehicle. The coloured-noise bands of attempt3 are absent; one frame (about 344 s) is mostly black.
+
+Frames arrive about every 18 s, and the timecode advances only a second or two between them, so the emulated game runs at a small fraction of real time. Independent reinspection of the actual guest log finds short holds sampled at 368346 ms (forward), 403532 ms (right camera stick), and 476754 ms (forward); the 430000 ms left hold is not recorded. The earlier assertion that no movement steps were sampled was incorrect. These inputs and the inspected frames do not establish controllable player movement, so spawn and controllability remain UNVERIFIED. Attempt5 uses the window-checked fence wait (NRO `7b3c6f90…`) and holds the stick for minutes.
+
+## Movement verification follow-up (LEVEL-MOVE-001, 2026-10-30)
+
+Attempt5 final-window-check NRO SHA-256 `7b3c6f90f2be7e77f24a32eb52d6c17b7fed0cb80eaa787c62628af54ab600c6` ends with runner exit2/NO-RESULT after598.177seconds (1100-second bound). Its runner guest.log contains only temporary-home permission errors, but the separate persistent Eden log reaches about591seconds and records `330000:lup:270000` sampled at331953ms. Those permission errors also occur in successful attempt4, so their causal role is UNVERIFIED. The final inspected attempt5 frames still show the standing figure/vehicle/REC overlay; sampled input and advancing timecode alone do not establish control.
+
+The persistent log was preserved before rerun under private `game/build/level-load/movement-20261030/attempt5-eden-persistent.log`. A bounded1100-second run reused the existing NRO and runner, with long forward/camera/left holds and separate Docker state, memory and event capture. Recovered results are below. No game code was changed or artifacts published for this probe.
+
+### Movement follow-up result and capture limitation
+
+The capture execution session terminated with143 near the end and did not produce its normal `result.json` or restore configuration. The cause of that host capture termination is UNVERIFIED. The emulator container continued independently: Docker events record1108.810seconds from start to exit0, with no `oom` event. Its persistent Eden log reaches1107seconds, records228presentations, and contains none of the searched `HalReturnToFirmware`, `unresolved ICALL`, `SIGSEGV` or `Unhandled exception` patterns. This is recovered container/log evidence, **not a wrapper PASS or gameplay acceptance**. Attempt5's early stop was not reproduced; its cause remains unresolved.
+
+The run samples forward at335136ms, right camera stick at600218ms, forward again at674992ms, and left at912338ms (times relative to the first pad sample). All four menu inputs are also recorded. Preserved artifacts include81executor BMPs and8final periodic BMPs. Inspected frames continue to show the figure/vehicle/REC scene, intermittent mostly black captures and horizontal artefacts. No input-correlated player translation or camera response is established. **Controllable spawn and milestone4 remain UNVERIFIED.** An opening cinematic is a hypothesis, not a proven explanation.
+
+The original `manhunt.env` was restored only after verifying its contents still matched this probe's config; the capture flag is absent. No game source was changed. Fresh fence-wait and pad-script tests pass in the pinned recompiler container. Exact source/image/config/log/frame hashes and container evidence are frozen in private `game/build/level-load/movement-20261030/manifest.json` (114files); final independent review in `review-final.json` accepts reporting/evidence only, verifies all114hashes and inspects all contact sheets plus selected raw input-adjacent/final frames. It does not accept gameplay or graphics.
+
+### Technique change / next bounded proof
+
+Attempt4's short holds and attempts5/6's long holds have not established control. Another longer input-only run would not distinguish cinematic input gating, title-side input interpretation, or graphics that fail to display movement. Next: one bounded host diagnostic tracing the guest caller and state returned by `XInputGetState` (guest0x002A01D2) in the in-level scene, then follow the consumed stick values to the control/mode gate and an evidence-backed player/camera state. Preserve original instruction addresses and actual values; do not patch the input mapping or skip a presumed cinematic without this evidence. A300-second host probe is the initial timebox; gameplay/hardware acceptance stays open.
+
+## Gate lifetime follow-up (2026-10-31)
+
+Reinspection of the terminal corrected control-event capture confirms forward-stick values reach the original dispatcher and global vector. All56 input-gate calls return0; in26 forward samples the gate word0x002ECA30 is0. The first gate sample has that word1 but no directional flag, so do not describe it as always zero. Original0x0016E100 implements this condition without an identified lifting discrepancy.
+
+Original script opcode0x147 calls0x0018EFB0, setting0x004025E4 and player+0x844 bit0x100; paired0x148 calls0x0018F0E0 to clear those mode fields. Input resets in state routine0x0017F8E0 and the enabling timed branches require runtime ordering evidence before calling this a stuck cinematic. A new300-second host probe records gate and mode-word writes, paired calls, current player vectors and relevant mode timers. It uses the existing binary, isolated saves and retained pre/post container inspection; no guest-memory writes or production changes. Evidence directory: `game/build/level-load/gate-lifetime-20261031/`.
+
+## Milestone 4 acceptance (2026-10-31)
+
+Independent read-only review of the actual artifacts (NRO hash, logs, frames, original disassembly, host/Switch comparison) found no falsifying evidence and accepts only this wording:
+
+> **M4 (first-level load) MET AT A MINIMAL BAR, UNVERIFIED on hardware:** in Eden (software GPU path, diagnostic only) the original menu leads to the Jury_Turf load, the level files are read, a heavily artefacted, dark but recognisable in-level scene (vehicle, standing figure, REC/TCR overlay) is rendered at about 0.1 fps, and a 'player'-registered entity exists at guest 0x01462000 (global 0x4004A0). Not claimed: clean rendering, control or movement (M5), audio, performance, physical Switch hardware, a link between the visible figure and the player object. One null indirect call is skipped, cause unexplained.
+
+Evidence (private, `game/build/level-load/spawn-proof-20261031/`): NRO SHA-256 `7b3c6f90f2be7e77f24a32eb52d6c17b7fed0cb80eaa787c62628af54ab600c6`, commit 615e640. The 450 s run ends by the deliberate watchdog snapshot (guest `_exit(3)`; the emulator stayed alive and the outer timeout ended it, docker exit 124); it is not a survival PASS. `eden.log` has no HalReturnToFirmware, SIGSEGV, unhandled exception or abort.
+
+Player identity: the watchdog peek reads `[004004A0]=01462000 [01462000]=002C2F20 [002C2F20]=0017A0C0 [01462014]=42960000 [01462080]=0259C6F0 [01462844]=00001900`; 14 chain samples (244–437 s) end in 0x43D5934C = 427.1507568359375. The host diagnostic (`gate-lifetime-20261031/summary.json`) shows the same object address (0x01462000), flags (0x1900) and X. The vtable 0x002C2F20 is stored by constructors at 0x001781AA, 0x0017833B, 0x0017888D; 0x0017A0C0 is a scalar-deleting destructor. The reviewer found that the store to 0x004004A0 at 0x000F4523 executes only after a compare against the string "player" (sibling string "hunter"), and the destructor at 0x00178870 clears the global, so the vtable class owns the player global. Script opcode 0x147 (0x0018EFB0) sets player+0x844 bit 0x100 and 0x004025E4; that this is a cutscene/script mode is still a hypothesis.
+
+Disclosed by the review:
+- `[ICALL] target 0x00000000 is not code -- skipped` (call #109186, about 10 s; also in attempt4): a skipped null indirect call with unexplained cause. Tracked as ICALL-NULL-001.
+- 24 `still waiting for fence` lines (2 s, a few 4 s) with no give-up text and advancing presents; the last at 441 s.
+- Tiled aperture 0xF0000000 mapping fails (error 50); up to 46k unhandled NV2A methods (239 distinct).
+- Progress is about 0.1 fps (presents 215 at 224 s to 240 at 446 s) and the scene is static from about 315 s, so "no motion" cannot be separated from slowness, and late-run stability is weak evidence.
+- The spawn-proof run contains only the menu A/B presses; the long stick holds were in attempts 4–6.
+- Not verified by the review: physical hardware, attempt4 frames, the runtime path of the name compare (static evidence only), the other stores to 0x004004A0 (0x00189BED, 0x0018BB5F).
+
+Next: HW-SWITCH-001 (physical-Switch control and performance test, see `docs/MACOS_SWITCH_SETUP.md`), the M5 control investigation (LEVEL-MOVE-001, LEVEL-INPUT-TRACE-001), and ICALL-NULL-001.
+
+## HW-LOG-001 check (2026-10-31)
+
+Optional `MANHUNT_LOG_FILE=sdmc:/<file>` (default off) mirrors the runtime log to the SD card, because a physical console cannot see `svcOutputDebugString` (`game/src/main_switch.c`; `docs/CONFIGURATION.md`, `docs/CHANGELOG_CONFIG.md`). NRO SHA-256 `34ebe1f71ee0752ce3fdd8c0c484da05bc88e2db84b45de1b137076581417c3e`. Three 70 s Eden runs (private `game/build/level-load/hwlog-test/`): key set creates the file with the `[MH-BOOT] start` and config lines first (1,457 lines); key absent creates no file; `/tmp/x.txt` logs `[MH-BOOT] log file ...: FAILED` and creates no file. Physical-console behaviour is UNVERIFIED; independent review: PASS WITH NITS, no blocking finding (hidden-failure nits fixed, others documented); rerun on the final NRO passes.
+
+## ICALL-NULL-001 (2026-10-31): the skipped null call is a consequence of missing audio
+
+The `[ICALL] target 0x00000000 is not code -- skipped` line at about 10 s comes from guest 0x000E7C96 (`call dword ptr [ecx+4]`, `this` in eax) in the release loop of sub_000E7C20, the cleanup of the intro-movie (XMV) player: for each slot of the DirectSound stream array at 0x0039C8D8 (count at 0x0039C8F0) it calls the object's vtable slot 1 (Release) and zeroes the slot. Host gdb at the skip showed the array as `0 0 0 0` with count 2, so `obj` is null, `ecx = [0]` and the target is `[4] = 0`; the stack return address is 0x000E7C99.
+
+Chain, in the Switch/Eden log (attempt4-1/runner.log, lines 1050–1052): `[MH-AUDIO] DirectSoundCreateStream -> DSERR_NODRIVER (audio not implemented)`, then the title's `Unable to enable audio stream 0 (error 88780078)`, then the skipped call. `game/src/dsound_hle.c` returns that error because DirectSound is not implemented (BLOCKERS #2); the original code, given valid streams on a real console, would not take this cleanup path. Releasing never-created streams is a no-op and the runtime's ICALL guard restores `esp`; the game overwrites `eax` immediately after (0x000E7C99).
+
+Classification: harmless by design for now, caused by the audio gap; no code change. It should disappear once `DirectSoundCreateStream` is implemented (not run: UNVERIFIED). The call number printed with the line varies by run. Verified by the lead against the log and `text.asm`; produced by an investigation agent (host gdb, no code changes).
+
+A second null call appears much later in host runs (call number about 2.4 million, 60–90 s): guest site 0x00222AF1 in sub_00222AE1, a `[vtbl+8]` virtual call on `this = ptr ? ptr-8 : 0` (a null-guarded release thunk), reached via sub_000143C0 and sub_00011760 from sub_000D8750. It was not seen in the boot-time Eden logs checked. Whether it is also benign is UNVERIFIED and is tracked as ICALL-NULL-002.
+
+## Host gameplay observation (2026-10-31, qualitative, host build only)
+
+An earlier host run (private `game/build/level-load/control2/run1/`, 221 frames about every 11 s, 2,393 s wall time, pad script: menu A/A/A/B at 15/30/45/60 s, then 300 s forward-stick holds starting at 400, 800, 1200, 1600 and 2000 s) was inspected frame by frame:
+
+- **About 657 s:** the opening cinematic: close-up of the protagonist with the REC overlay and a running TCR timecode, and white streaks across the top and bottom. The same streaks appear in the Switch/Eden cinematic frames, and the cinematic's REC overlay suggests the streaks are an intended camcorder-static effect; that is a hypothesis (not compared with a reference).
+- **About 1,296 s:** the in-game hint "You can review the director's objectives on the pause screen by pressing START."
+- **About 1,300–2,393 s:** the player character seen from behind, walking away from the camera; then third-person gameplay with a radar circle, hand icon and health bars, and the tutorial hints "Watch your noise. Sneaking is totally silent, but hunters can hear you running…" and "Walk over items to pick them up." Street lamps and walls scroll between frames. The gameplay frames are clean but very dark (brightness settings were left at their defaults).
+
+What this does and does not show: on the host build the opening cinematic ends and the game reaches its first gameplay tutorial, so the static scene in the Switch/Eden runs is consistent with the cinematic still playing at about 0.1 fps rather than a control defect. It is **qualitative only**: no player position, input-correlated numbers or Switch frames from this stage exist, and host results do not carry over to the Switch. Quantitative position-versus-input evidence (which would also tie the visible figure to the player object at 0x01462000) is the next host probe.
+
+## Host probe: player position versus input (2026-10-31)
+
+Private evidence `game/build/level-load/pos-probe/` (probe.py: a read-only gdb breakpoint on XInputGetState, `run1-probe.log` 1,665 valid rows, about one per second, 0 probe errors; `analysis.txt`; `frame-times.txt`; docker exit 0, inner timeout 124 at the 3,000 s bound). Pad script: menu A/A/A/B at 15/30/45/60 s, then `lup` 120 s windows at 1,500/1,800/2,100/2,400 s and `rright` 60 s windows at 1,680/1,980/2,280/2,580 s. All twelve steps were sampled at their scheduled times (`[MH-INPUT]` lines). The lead recomputed the numbers below from the raw rows; they are not independently reviewed yet.
+
+- One entity throughout: the object at `[0x004004A0]` = 0x01462000 in every row. Position is at frame+0x40/0x44/0x48 (X, Y, Z): (427.15, −0.20, −108.27) at spawn, as in the Switch chain read.
+- **Cinematic:** position is constant from 67 s to 1,669 s, flags 0x00001900 and 0x004025E4 = 1 (set by script opcode 0x147). The first `lup` window (1,500–1,620 s) fell inside the cinematic and had no effect.
+- **Control hand-over at about 1,669 s:** flags 0x1900 → 0x1800 and 0x004025E4 1 → 0, the signature of the paired opcode 0x148. The first HUD frame appears about 40 s later.
+- **Forward windows:** 1,800–1,920 s moves the position about 12.95 units (X 427.15 → 439.69, Z −108.27 → −105.04); 2,100–2,220 s about 7.41 units; 2,400–2,520 s about 0.52 units (blocked; a wall is an inference, collision was not checked). Heading of motion matches the facing yaw (about 75° and about −12° in the first two windows, per the agent's analysis).
+- **Right-stick windows** change the facing yaw (about 0 → 86 → 76 → −2 → −12 → −65 → −73 → −147 degrees at window ends, derived from the +0x30 row, a layout inference) and change the position by at most 0.5 units.
+- **Outside input windows** the position does not change, apart from the 65–67 s spawn settle and a short tail slide after windows.
+- Frames (described, not published): the pulled-back third-person camera with the character walking away from the camera appears at the hand-over and the scenery scrolls during forward windows; frame-to-probe alignment is about ±3 s, some dumps are black, grey or half-drawn, so figure motion was not measured per frame.
+
+What this establishes (host build only): the object registered under the name 'player' at 0x004004A0 is the entity the stick controls, and the title's first gameplay state follows the cinematic. This resolves "cutscene versus control defect" for the host: Eden's static scene at about 0.1 fps is consistent with the cinematic still playing. Not established: that the visible mesh is rendered from this frame (consistent with, not proven), the meaning of flag bits 0x40, 0x8000 and 0x40000, collision as the cause of the blocked move, any Switch or hardware behaviour, and Switch/Eden control hand-over (not observed: Eden has not run long enough). Host wall time to the hand-over was 1,669 s at about 0.23 frames/s; Eden runs about two to three times slower.
+
+## Long Eden run on the Switch build (2026-10-31): cinematic progresses, hand-over not observed
+
+Private `game/build/level-load/long-eden/` (NRO `34ebe1f71ee0752ce3fdd8c0c484da05bc88e2db84b45de1b137076581417c3e`, native backend, SD log `MANHUNT_LOG_FILE`, runner exit 0 after 6,676 s = the 6,600 s bound). 412 frames, a 3.3 MB / 62k-line SD log with no write failures, no HalReturnToFirmware, fault or unresolved call, and 110 `still waiting for fence` lines that all completed. The player-position chain stayed at the spawn value 0x43D5934C in all 369 samples.
+
+- **Test defect found and fixed:** the stick script was 1,086 characters but the Switch config reader had a 512-byte line buffer, so the script was silently cut at 511 bytes: only the first 22 stick steps (to 3,720 s) existed. After that no input was ever sent, so "no position change" says nothing about control after about 3,728 s, and position is static without input on the host too. The reader now accepts 4,095 bytes and rejects longer lines visibly (CHANGELOG_CONFIG, 2026-10-31).
+- **Frames:** the Eden scene progresses through the cinematic (wide shot with a distant figure, then a close-up of the protagonist, then from about 1.5 h a nearly black scene with a small orange light at the lower left and the REC overlay, whose streak band fades in the final frames). No HUD or third-person gameplay appears in 111 minutes; the hand-over (host: about 28 minutes of wall time) was therefore not reached, and was probably not far off in an unknown way. Whether it would have been is UNVERIFIED.
+- **Conclusion:** Eden is too slow to confirm the hand-over on the Switch build in reasonable time; the real-console run (HW-SWITCH-001) is the proportionate way. No further long Eden runs are planned.

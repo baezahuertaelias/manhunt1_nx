@@ -9,12 +9,27 @@
  *      which writes BACK_END_WRITE_SEMAPHORE_RELEASE values there;
  *   2. do what the original does first: kick off the pushbuffer when the
  *      fence is the newest one (== device + 0x2C);
- *   3. wait until the semaphore reaches the fence, bounded at 250 ms.
- * Requires RECOMP_PB_EXEC=1 (the executor); without it the bound always runs
- * out, which is logged.
+ *   3. wait until the semaphore reaches the fence.
+ * With the executor (RECOMP_PB_EXEC set) the wait is unbounded, as in the
+ * original: callers rely on it. D3DResource_BlockUntilNotBusy (0x002926B0)
+ * waits here before the title frees a resource's memory (e.g. the texture
+ * free 0x001EF1E0 -> 0x001F0720), so returning early lets the allocator
+ * reuse memory the executor will still render into. LEVEL-LOAD-001 measured
+ * exactly that: a 64 KB render target freed at semaphore 707 / fence 731
+ * after a 250 ms timeout, its memory reused for vertex blocks, then the
+ * software rasteriser (put_pixel, executor thread) wrote 0xFFFFFFFF texels
+ * over a live allocator header. A long wait is logged every 2 s instead of
+ * being abandoned, so a stuck executor is a visible hang rather than silent
+ * memory corruption. As in the original (0x0029221E), a fence outside the
+ * window (semaphore, newest] returns at once, before the kickoff, so a
+ * stale or invalid fence cannot start an unbounded wait.
+ * Without the executor nothing ever releases the semaphore, so the old
+ * 250 ms bound (logged) is kept for that configuration only.
  * Differences from the original: the device+0x19FC callback and the
- * make-space branch (flags & 8) are not reproduced, a missed fence ends in a
- * logged 250 ms timeout instead of a stall, and eax returns the semaphore.
+ * make-space branch (flags & 8) and the fetch-pointer early return after
+ * sub_00292010 (0x0029223C) are not reproduced, and eax returns the
+ * semaphore (the original returns the newest fence on the window early
+ * return).
  *
  * Addresses: 0x0029DFB8 D3D_pDevice (.XTLID 0x80003); 0x00292200 BlockOnTime
  * (time, flags), stdcall ret 8, 8 callers; 0x00291F20 KickOff(flags), loads
@@ -23,13 +38,15 @@
  */
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 #include "recomp_types.h"
 
 #define D3D_PDEVICE        0x0029DFB8u
 #define KICKOFF_RET_SITE   0x0029222Fu
-#define WAIT_BOUND_NS      250000000ll
+#define WAIT_BOUND_NS      250000000ll  /* no executor only */
+#define WAIT_REPORT_NS     2000000000ll
 
 extern void sub_00291F20(void);                       /* D3D KickOff (lifted) */
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
@@ -46,35 +63,49 @@ void sub_00292200(void)
 {
     static uint32_t s_sem_registered;
     static unsigned s_timeouts;
+    static int s_executor = -1;
     uint32_t fence = MEM32(g_esp + 4);
     uint32_t dev = MEM32(D3D_PDEVICE);
     uint32_t sem = dev ? MEM32(dev + 0x30) : 0;
     long long deadline;
+    int in_window;
 
     if (sem && sem != s_sem_registered) {
         nv2a_pb_set_semaphore_target(sem);
         s_sem_registered = sem;
         printf("[D3D] GPU semaphore at 0x%08X (device 0x%08X)\n", sem, dev);
     }
-    if (dev && fence == MEM32(dev + 0x2C)) {
+    /* Original entry test: (newest - fence) <u (newest - *sem), else return. */
+    in_window = sem && (uint32_t)(MEM32(dev + 0x2C) - fence) < (uint32_t)(MEM32(dev + 0x2C) - MEM32(sem));
+    if (in_window && fence == MEM32(dev + 0x2C)) {
         uint32_t saved_esi = g_esi;
         PUSH32(g_esp, 0);                  /* KickOff(0) */
         PUSH32(g_esp, KICKOFF_RET_SITE);
         sub_00291F20();
         g_esi = saved_esi;
     }
-    if (sem) {
-        deadline = now_ns() + WAIT_BOUND_NS;
+    if (s_executor < 0)
+        s_executor = getenv("RECOMP_PB_EXEC") != NULL;
+    if (in_window) {
+        long long start = now_ns();
+        deadline = start + (s_executor ? WAIT_REPORT_NS : WAIT_BOUND_NS);
         while ((int32_t)(MEM32(sem) - fence) < 0) {
             struct timespec pause = {0, 100000};
             if (now_ns() >= deadline) {
-                if (s_timeouts++ < 16)
-                    fprintf(stderr, "[D3D] BlockOnTime: fence %u not reached in 250 ms (semaphore %u)\n",
-                            fence, MEM32(sem));
-                break;
+                if (!s_executor) {
+                    if (s_timeouts++ < 16)
+                        fprintf(stderr, "[D3D] BlockOnTime: fence %u not reached in 250 ms (semaphore %u)\n",
+                                fence, MEM32(sem));
+                    break;
+                }
+                fprintf(stderr, "[D3D] BlockOnTime: still waiting for fence %u after %lld ms (semaphore %u)\n",
+                        fence, (now_ns() - start) / 1000000ll, MEM32(sem));
+                deadline = now_ns() + WAIT_REPORT_NS;
             }
             nanosleep(&pause, NULL);
         }
+        g_eax = MEM32(sem);
+    } else if (sem) {
         g_eax = MEM32(sem);
     } else {
         g_eax = 0;

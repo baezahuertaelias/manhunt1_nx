@@ -139,3 +139,11 @@ Pinned `scripts/game-build.sh switch` passes with maintained0010transform/combin
 ## 2026-10-30 — LEVEL-LOAD-001 runtime investigation (no new build)
 
 Existing Switch NRO `1f93749d7d7b534da5608ac35f77f957a3f8995ee8de4a81cc926fb44fdf5f48` enters Jury_Turf asset loading after scripted B at the save screen, then logs HalReturnToFirmware(2) at 212.55 seconds. Environment/spawn UNVERIFIED; no milestone pass. Existing host binary independently faults during level loading (guest VA 0xFFFFFFFC); GDB confirms sub_0001A4D0. Private attempt2 manifest retains hashed run config/logs/frames; [investigation](reports/LEVEL_LOAD.md). No production fix or new build is claimed.
+
+## 2026-10-30 — LEVEL-LOAD-001 corrected generation and builds
+
+Reviewed missing-entry correction5C620..5C69C and patch0014 large-local-switch handling relift successfully from maintained patched tools. Full host and Switch builds pass. Host SHA-256 `644bde5f4e58ddcfac8d2549439e5a2a80d69829a31064d1af635db168f5848b`; Switch NRO `28c350a057f837413bcae0d71c667fcccad262130431abf117370aa2367ddcf9`. Scoped synthetic/independent generation review passes (all273 local targets,301executed cases; add-entry4tests; oldtranslator negative control). Corrected420sEdenrun has no logged priorICALL/exit, but corruptframe fails visual acceptance. Host reaches state4 then faults on corrupt allocation metadata. Frozen104artifacts: `game/build/evidence/level-load-28c350a0-20261030/manifest.json`. No gameplay/performance/hardware milestone passes.
+
+## 2026-10-30 — LEVEL-MOVE-001 verification (existing build)
+
+No new game build. Existing Switch NRO `7b3c6f90f2be7e77f24a32eb52d6c17b7fed0cb80eaa787c62628af54ab600c6` was tested in a bounded movement probe. Fence-wait regression and pad-script checks execute successfully in pinned recompiler image with read-only source mount; exact output and source/image hashes are private under `game/build/level-load/movement-20261030/`. An initial host invocation of the fence wrapper failed because it expects `/repo`; the container invocation above is the executed proof. Probe result: capture session143/no wrapper result; recovered Docker container1108.810s/exit0, no OOM event, persistent log228presents and all planned inputs. Player control remains UNVERIFIED; frame artefacts persist. No hardware gate is tested.
