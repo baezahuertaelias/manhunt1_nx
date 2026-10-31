@@ -24,7 +24,7 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | REPO-REMOTE-001 | done | lead | user approval (given 2026-10-28) | Remote created (public on user instruction); `main` protected (no force-push/deletion, PRs) |
 | LEVEL-INPUT-TRACE-001 | in_progress | lead | LEVEL-MOVE-001 | Trace guest XInput axes, downstream object/control gate; original-address evidence and independent review |
 | LEVEL-MOVE-001 | in_progress | lead | LEVEL-LOAD-001 | Sample long stick holds, inspect before/after frames, preserve runner/port distinction and independent evidence review |
-| LEVEL-LOAD-001 | done | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
+| LEVEL-LOAD-001 | in_progress | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
 | X87-CW-001 | in_progress | re | BOOT-HOST-001 | Game's x87 control word(s) known: sites + runtime value; double-based x87 decision revisited |
 | MEM-MIRROR-002 | pending | runtime | LEVEL-LOAD-001 | Mirror/tiled-aperture traps silent through level load, or an address-wrapping design |
 | LGPL-LINK-001 | ready | lead | — | Link maps show whether LGPL objects are linked; THIRD_PARTY.md updated (before any distribution) |
