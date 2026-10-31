@@ -70,6 +70,49 @@ static char s_line[1024];
 static size_t s_len;
 static Mutex s_log_lock;
 
+/* Optional copy of the log on the SD card (MANHUNT_LOG_FILE=sdmc:/<file>,
+ * default off). The debug channel is only visible under an emulator; a
+ * physical console needs the file. Lines logged before the file is opened
+ * (boot and config lines) are kept in a small buffer and written first. All
+ * state is guarded by s_log_lock. The file stops at LOG_FILE_MAX bytes. */
+#define LOG_FILE_MAX (32u << 20)
+static FILE *s_logfp;
+static int s_log_decided;                 /* 0 until log_file_init() has run */
+static char s_early[8192];
+static size_t s_early_len, s_log_bytes;
+static int s_early_dropped;               /* early buffer filled up: later early lines were not kept */
+
+static void log_file_line(const char *line, size_t len)
+{
+    if (s_logfp) {
+        if (s_log_bytes + len + 1 > LOG_FILE_MAX) {
+            fputs("[MH-LOG] size limit reached, file log stopped\n", s_logfp);
+            fclose(s_logfp);
+            s_logfp = NULL;
+            return;
+        }
+        fwrite(line, 1, len, s_logfp);
+        fputc('\n', s_logfp);
+        fflush(s_logfp);
+        if (ferror(s_logfp)) {            /* SD full or removed: say so once, on the debug channel */
+            static const char msg[] = "[MH-LOG] file write failed, file log stopped";
+            fclose(s_logfp);
+            s_logfp = NULL;
+            svcOutputDebugString(msg, sizeof msg - 1);
+            return;
+        }
+        s_log_bytes += len + 1;
+    } else if (!s_log_decided) {
+        if (!s_early_dropped && s_early_len + len + 1 <= sizeof s_early) {
+            memcpy(s_early + s_early_len, line, len);
+            s_early_len += len;
+            s_early[s_early_len++] = '\n';
+        } else {
+            s_early_dropped = 1;          /* keep the buffer gap-free: stop buffering */
+        }
+    }
+}
+
 static ssize_t debug_write(struct _reent *r, void *fd, const char *ptr, size_t len)
 {
     (void)r; (void)fd;
@@ -78,6 +121,7 @@ static ssize_t debug_write(struct _reent *r, void *fd, const char *ptr, size_t l
         char c = ptr[i];
         if (c == '\n' || s_len == sizeof s_line - 1) {
             svcOutputDebugString(s_line, s_len);
+            log_file_line(s_line, s_len);
             s_len = 0;
             if (c == '\n')
                 continue;
@@ -100,6 +144,35 @@ static void log_init(void)
     devoptab_list[STD_ERR] = &s_debug_devoptab;
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+}
+
+/* Called once after config_init(): opens MANHUNT_LOG_FILE if set. The path
+ * must start with sdmc:/. The result is logged after the lock is released
+ * (printf takes it, and it is not recursive). */
+static void log_file_init(void)
+{
+    const char *path = getenv("MANHUNT_LOG_FILE");
+    int want = path && *path;
+
+    mutexLock(&s_log_lock);
+    if (want && strncmp(path, "sdmc:/", 6) == 0 && (s_logfp = fopen(path, "w")) != NULL) {
+        fwrite(s_early, 1, s_early_len, s_logfp);
+        if (s_early_dropped)
+            fputs("[MH-LOG] early lines beyond 8 KiB were not kept\n", s_logfp);
+        fflush(s_logfp);
+        if (ferror(s_logfp)) {
+            fclose(s_logfp);
+            s_logfp = NULL;
+        } else {
+            s_log_bytes = s_early_len;
+        }
+    }
+    s_log_decided = 1;
+    s_early_len = 0;
+    mutexUnlock(&s_log_lock);
+    if (want)
+        printf("[MH-BOOT] log file %s: %s\n", path,
+               s_logfp ? "open" : "FAILED (path must start with sdmc:/ and be writable)");
 }
 
 /* ---- configuration ------------------------------------------------------ */
@@ -234,6 +307,7 @@ int main(void)
     log_init();
     printf("[MH-BOOT] start (Horizon) game_dir=%s\n", GAME_DIR);
     config_init();
+    log_file_init();
 
     xbe.data = load_file(GAME_DIR "/DEFAULT.xbe", &xbe.size);
     if (!xbe.data) {

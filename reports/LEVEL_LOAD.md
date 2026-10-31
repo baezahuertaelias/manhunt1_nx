@@ -167,3 +167,7 @@ Disclosed by the review:
 - Not verified by the review: physical hardware, attempt4 frames, the runtime path of the name compare (static evidence only), the other stores to 0x004004A0 (0x00189BED, 0x0018BB5F).
 
 Next: HW-SWITCH-001 (physical-Switch control and performance test, see `docs/MACOS_SWITCH_SETUP.md`), the M5 control investigation (LEVEL-MOVE-001, LEVEL-INPUT-TRACE-001), and ICALL-NULL-001.
+
+## HW-LOG-001 check (2026-10-31)
+
+Optional `MANHUNT_LOG_FILE=sdmc:/<file>` (default off) mirrors the runtime log to the SD card, because a physical console cannot see `svcOutputDebugString` (`game/src/main_switch.c`; `docs/CONFIGURATION.md`, `docs/CHANGELOG_CONFIG.md`). NRO SHA-256 `34ebe1f71ee0752ce3fdd8c0c484da05bc88e2db84b45de1b137076581417c3e`. Three 70 s Eden runs (private `game/build/level-load/hwlog-test/`): key set creates the file with the `[MH-BOOT] start` and config lines first (1,457 lines); key absent creates no file; `/tmp/x.txt` logs `[MH-BOOT] log file ...: FAILED` and creates no file. Physical-console behaviour is UNVERIFIED; independent review: PASS WITH NITS, no blocking finding (hidden-failure nits fixed, others documented); rerun on the final NRO passes.

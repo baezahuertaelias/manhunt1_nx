@@ -26,7 +26,7 @@ The repository is **public** (AGENTS.md). It contains no game data. Everything i
 | Item | Where it is on the Linux host | Size | Check |
 |---|---|---|---|
 | Your lawful game files | `assets/manhunt1_xbe/` (`DEFAULT.xbe`, `audio/`, `levels/`) | 2.4 GiB, 836 files, largest 535 MB | `DEFAULT.xbe` SHA-256 `af69e803695e29c3f99b38d6a759fac4c9300c9a540a2c244e4e7a07fb96afde`; whole set against `reports/ASSET_MANIFEST.sha256` (tracked) |
-| Prebuilt NRO | `game/build/switch/manhunt.nro` | 21,674,173 bytes | SHA-256 `7b3c6f90f2be7e77f24a32eb52d6c17b7fed0cb80eaa787c62628af54ab600c6`, built from commit `615e640` |
+| Prebuilt NRO | `game/build/switch/manhunt.nro` | about 21 MB | SHA-256 `34ebe1f71ee0752ce3fdd8c0c484da05bc88e2db84b45de1b137076581417c3e`: the source of branch `macos-switch-handoff` with the optional SD-card log (`MANHUNT_LOG_FILE`, section 4). The earlier spawn-proof NRO `7b3c6f90…600c6` is identical except it lacks that log feature |
 | Docker images (path B only) | rebuilt from `infra/`, see section 5 | several GB | see section 5 |
 
 The NRO is a build product that contains code derived from the game. Treat it like game data: do not commit it and do not share it.
@@ -43,7 +43,7 @@ scp <user>@<linux-host>:/Downloads/repos/manhunt1_nx/game/build/switch/manhunt.n
 shasum -a 256 assets/manhunt1_xbe/DEFAULT.xbe game/build/switch/manhunt.nro
 ```
 
-Compare the two hashes with the table above before going further. A USB drive works equally well. macOS ships an old `rsync` (2.6.9); the flags above work with it.
+Compare the two hashes with the table above before going further. The NRO on the Linux host is whatever `scripts/game-build.sh switch` produced last; if its hash differs, rebuild there from this branch first (an incremental build takes seconds). A USB drive works equally well. macOS ships an old `rsync` (2.6.9); the flags above work with it.
 
 Facts checked on the Linux host that matter for the Mac and the SD card: no game file is larger than 4 GiB (FAT32 is fine), there are no non-ASCII file names, no two files differ only by case (so a case-insensitive APFS volume or a FAT/exFAT card is safe for the game data), the longest path is 77 characters, and the tracked repository has no case-colliding names.
 
@@ -79,6 +79,7 @@ The runtime reads game data from `sdmc:/manhunt/` (`DEFAULT.xbe` plus the disc f
 ```
 MANHUNT_DUMP_SECS=5
 MANHUNT_GPU_BACKEND=1
+MANHUNT_LOG_FILE=sdmc:/manhunt-log.txt
 RECOMP_PB_REPORT_MS=10000
 RECOMP_PEEK=0x4004A0
 RECOMP_PEEK_CHAIN=0x4004A0,0x80,4,0x40
@@ -86,7 +87,8 @@ RECOMP_PEEK_CHAIN=0x4004A0,0x80,4,0x40
 
 - **Do not set `MANHUNT_PAD_SCRIPT`.** Without it the runtime reads the real controller (`game/src/pad_switch.c`).
 - `MANHUNT_GPU_BACKEND=1` is the native deko3d path used in every Eden run, so keep it for comparability. If the console shows corruption or stalls, repeat once with that line removed (the CPU software path) and report both.
-- `RECOMP_PEEK*` print the original player object and position; on hardware they are visible only once text logging works (section 4).
+- `MANHUNT_LOG_FILE` writes the runtime log to the SD card (section 4). Without it a console run returns no text log.
+- `RECOMP_PEEK*` print the original player object and position into that log.
 
 ### 3.4 Real-controller mapping
 
@@ -122,17 +124,19 @@ Write down the wall-clock time of each step (a phone stopwatch is enough).
 Copy these from the SD card into `game/build/hw-test/<date>/` in the Mac clone (that path is gitignored):
 
 - `sdmc:/manhunt-frames/` (the `fb*.bmp` frame dumps, every 5 s),
-- `sdmc:/manhunt-log.txt` once text logging exists (section 4),
+- `sdmc:/manhunt-log.txt` (the text log, section 4),
 - Atmosphère crash reports, if the application crashed (typically `sdmc:/atmosphere/crash_reports/`),
 - your step-by-step notes and the firmware/Atmosphère versions.
 
 Hardware results enter the repository only as reviewed text reports (reports/ and BETA_STATUS.md). Frames, logs, saves and the NRO stay private.
 
-## 4. Known gap: no text log on real hardware
+## 4. Text log on real hardware
 
-On the Switch the runtime sends all `printf`/`stderr` output only to `svcOutputDebugString` (`game/src/main_switch.c`, `debug_write`). Eden captures that channel; a real console does not, so a hardware run currently returns **frame dumps only**. The player-state peeks and every `[D3D]`, `[MH-INPUT]`, `[ICALL]` line would be lost.
+By default the runtime sends all `printf`/`stderr` output only to `svcOutputDebugString` (`game/src/main_switch.c`). Eden captures that channel; a real console does not. Task **HW-LOG-001** adds the optional key `MANHUNT_LOG_FILE=sdmc:/<file>` (default unset, behaviour unchanged): every log line is also written to that file on the SD card, flushed per line, starting with the boot and config lines, capped at 32 MiB. A path that does not start with `sdmc:/` or cannot be opened logs `[MH-BOOT] log file ...: FAILED` and nothing else changes.
 
-Tracked as **HW-LOG-001**: an optional `MANHUNT_LOG_FILE` setting that also writes the log to the SD card, default off. If this branch's `NEXT_ACTION.md` and `docs/CONFIGURATION.md` mention `MANHUNT_LOG_FILE`, it has been implemented and tested in Eden. If they do not, the hardware run can still use the frames, and the first engineering task on the Mac is HW-LOG-001.
+Executed in Eden only (three 70 s runs): with the key set the file is created with the boot lines first and 1,457 lines in 70 s; with the key absent no file is created; with `/tmp/x.txt` the failure line appears and no file is created. **Behaviour on a physical console is UNVERIFIED.** The file is truncated at every start, so copy the previous log off the card first. Lines are flushed but not fsync'ed, so a hard power loss or crash may lose the last lines. A failed write (SD full or removed) stops the file log with a note on the debug channel only. Expect one SD write per log line while it is enabled, all threads sharing one lock, so a heavy logging moment may slow the game slightly; turn the key off if pacing is what you are measuring (step 6 of the test).
+
+Check on the console after the first run: `sdmc:/manhunt-log.txt` exists and its first lines are `[MH-BOOT] start (Horizon) game_dir=sdmc:/manhunt` and the `config` lines. If it is missing, the key was not read: check the file name `sdmc:/manhunt.env` and that it has `KEY=VALUE` lines.
 
 ## 5. Path B: full development host on macOS (UNVERIFIED)
 
@@ -197,7 +201,7 @@ Read in this order: `AGENTS.md` (the rules), `NEXT_ACTION.md` (the single next a
 
 | Open item | Why it matters |
 |---|---|
-| HW-LOG-001 (text log to SD) | Without it a hardware run returns frames only (section 4). |
+| HW-LOG-001 verified on the console | Implemented and checked in Eden only; confirm the log file appears on hardware (section 4). |
 | Mac chip, RAM, disk, macOS minor version | Decides path B feasibility and the image platform. |
 | Switch firmware and Atmosphère versions | Needed for any hardware evidence. |
 | Applet vs title-takeover memory | The port's memory use on hardware is unmeasured. |

@@ -88,4 +88,4 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | LEVEL-SPAWN-PROOF-001 | done | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Switch scene plus original player-class/render-frame spawn proof; read-only diagnostics, expected watchdog stop separate from crash; independent review |
 | ICALL-NULL-001 | ready | re | LEVEL-LOAD-001 | Explain the skipped null indirect call (call #109186 at about 10 s); faithful fix or documented harmless behaviour | Revert game/ change |
 | HW-SWITCH-001 | ready | user | LEVEL-LOAD-001 | Physical-Switch run: menu, first level, real-controller control test, real FPS; evidence returned from the SD card | n/a (measurement) |
-| HW-LOG-001 | ready | runtime | LEVEL-LOAD-001 | Optional MANHUNT_LOG_FILE so hardware runs return text logs (stdout/stderr are debug-channel only today); default off | Revert main_switch.c |
+| HW-LOG-001 | done | runtime | LEVEL-LOAD-001 | Optional MANHUNT_LOG_FILE so hardware runs return text logs (stdout/stderr are debug-channel only today); default off | Revert main_switch.c |
