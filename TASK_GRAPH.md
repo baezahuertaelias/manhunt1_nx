@@ -22,7 +22,9 @@ Machine-readable ledger: [tasks/tasks.jsonl](tasks/tasks.jsonl).
 | EMU-IMAGE-001 | in_progress | provenance_audit | — | Eden/Ryujinx image built from pinned source in this repo passes `scripts/toolchain-proof.sh` |
 | GPU-PROOF-001 | done | runner_analysis | — | Container renders via `/dev/dri`; renderer is not a software fallback |
 | REPO-REMOTE-001 | done | lead | user approval (given 2026-10-28) | Remote created (public on user instruction); `main` protected (no force-push/deletion, PRs) |
-| LEVEL-LOAD-001 | in_progress | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
+| LEVEL-INPUT-TRACE-001 | in_progress | lead | LEVEL-MOVE-001 | Trace guest XInput axes, downstream object/control gate; original-address evidence and independent review |
+| LEVEL-MOVE-001 | in_progress | lead | LEVEL-LOAD-001 | Sample long stick holds, inspect before/after frames, preserve runner/port distinction and independent evidence review |
+| LEVEL-LOAD-001 | done | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Milestone 4: first level loads in Eden, environment shown, player spawned |
 | X87-CW-001 | in_progress | re | BOOT-HOST-001 | Game's x87 control word(s) known: sites + runtime value; double-based x87 decision revisited |
 | MEM-MIRROR-002 | pending | runtime | LEVEL-LOAD-001 | Mirror/tiled-aperture traps silent through level load, or an address-wrapping design |
 | LGPL-LINK-001 | ready | lead | — | Link maps show whether LGPL objects are linked; THIRD_PARTY.md updated (before any distribution) |
@@ -79,6 +81,11 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 
 | ID | State | Owner | Scope / acceptance | Rollback |
 |---|---|---|---|---|
-| LEVEL-LOAD-CONTROL-001 | in_progress | load_control | Private game/build/level-load/control/; Trace actual original loading control flow and exit trigger; identify state transition and precise evidence-backed probe | Remove isolated diagnostics |
-| LEVEL-LOAD-FAULT-001 | in_progress | host_fault | Private game/build/level-load/fault/; Determine original caller/target semantics causing loading failure and host invalid pointer, with assembly and runtime evidence | Remove isolated diagnostics |
-| LEVEL-LOAD-REVIEW-001 | in_progress | evidence_review | Private game/build/level-load/review/; Independently inspect actual frames/logs/source/provenance and review eventual critical fix and acceptance evidence | Remove isolated diagnostics |
+| LEVEL-LOAD-CONTROL-001 | done | load_control | Private game/build/level-load/control/; Trace actual original loading control flow and exit trigger; identify state transition and precise evidence-backed probe | Remove isolated diagnostics |
+| LEVEL-LOAD-FAULT-001 | done | host_fault | Private game/build/level-load/fault/; Determine original caller/target semantics causing loading failure and host invalid pointer, with assembly and runtime evidence | Remove isolated diagnostics |
+| LEVEL-LOAD-REVIEW-001 | done | evidence_review | Private game/build/level-load/review/; Independently inspect actual frames/logs/source/provenance and review eventual critical fix and acceptance evidence | Remove isolated diagnostics |
+
+| LEVEL-SPAWN-PROOF-001 | done | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Switch scene plus original player-class/render-frame spawn proof; read-only diagnostics, expected watchdog stop separate from crash; independent review |
+| ICALL-NULL-001 | ready | re | LEVEL-LOAD-001 | Explain the skipped null indirect call (call #109186 at about 10 s); faithful fix or documented harmless behaviour | Revert game/ change |
+| HW-SWITCH-001 | ready | user | LEVEL-LOAD-001 | Physical-Switch run: menu, first level, real-controller control test, real FPS; evidence returned from the SD card | n/a (measurement) |
+| HW-LOG-001 | ready | runtime | LEVEL-LOAD-001 | Optional MANHUNT_LOG_FILE so hardware runs return text logs (stdout/stderr are debug-channel only today); default off | Revert main_switch.c |

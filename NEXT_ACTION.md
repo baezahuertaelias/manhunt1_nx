@@ -1,7 +1,10 @@
 # Next action
 
-**LEVEL-LOAD-001** (P0): find the writer that turns a live physical-allocator block header into FFFFFFFF/FFFFFFFF during Jury_Turf loading (step 1 of the measured chain in [reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Allocator corruption chain"). Steps 2–3 (free copies the bad header into a node, a later allocation faults at guest 0xFFFFFFFF) are consequences and must not be patched.
+**HW-SWITCH-001** (P1, owner: user): run the in-level build on a physical homebrew-capable Switch with your own game files and a real controller, following [docs/MACOS_SWITCH_SETUP.md](docs/MACOS_SWITCH_SETUP.md), and return the SD-card logs and frames. In Eden the in-level game runs at about 0.1 fps, so a cutscene, slowness and a control defect cannot be told apart there.
 
-Proposed bounded probe (one host run): in the ignored diagnostic build, track each 0x3800-byte allocation from caller 0x001F0FE8 and hardware-watch only the header that follows the most recent such block, on both the 0x8xxxxxxx and low aliases, so the corrupted candidate cannot be evicted as it was before. Also record whether native NV2A clear/surface/DMA writes touch that range. Then confirm on the Switch build with movement input after loading, to tell a controllable spawn from a cutscene.
+Without hardware, the next engineering work is, in order:
+1. **ICALL-NULL-001** (P1): explain the skipped null indirect call at about 10 s (call #109186).
+2. **LEVEL-INPUT-TRACE-001 / LEVEL-MOVE-001** (M5): follow the title's input gate (word 0x002ECA30, mode word 0x004025E4, player+0x844 bit 0x100, script opcodes 0x147/0x148) on the host to learn what ends the scripted mode; do not force-skip it without evidence.
+3. Graphics fidelity (dark scene, streaks) and performance, BLOCKERS #1.
 
-Attempt3 on Switch reaches in-level 3D rendering with no guest exit in 420 s; frames are intermittently corrupted and spawn is UNVERIFIED. Gameplay graphics, audio, x87/protection/mirror fidelity, playable performance and physical Switch validation remain open. Emulator rates are diagnostic only.
+Milestone 4 is recorded at a minimal bar only, UNVERIFIED on hardware: [reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Milestone 4 acceptance". Audio, x87/protection/mirror fidelity, playable performance and physical Switch validation remain open. Emulator rates are diagnostic only.
