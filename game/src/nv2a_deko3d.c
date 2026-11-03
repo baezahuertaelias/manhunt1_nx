@@ -175,61 +175,99 @@ static void fail_closed(void)
 {
     const char *message = "[MH-DEKO] FAIL accepted GPU operation did not complete; stopping before guest fence release\n";
     svcOutputDebugString(message, strlen(message));
+    printf("%s", message);
+    fflush(stdout);
     abort();
+}
+
+/* Stage 1 of the adapter's speed-up (HW-PERF-001). Measured on the console, every
+ * draw cost about 44 ms: it created and destroyed 6 to 8 GPU memory blocks,
+ * re-read the shader files, uploaded the whole 640x480 surface through uncached
+ * memory and read the whole surface back one uncached 4-byte load at a time.
+ * The output must stay pixel-identical, so only the cost changes:
+ *   - memory blocks and shaders live for the process lifetime (grow only; every
+ *     execute() ends with dkQueueWaitIdle, so nothing is in flight when one grows);
+ *   - the transfer buffer is CPU-cached; the CPU cache is flushed (clean and
+ *     invalidate) after the CPU writes and again after the GPU wrote;
+ *   - textures are decoded into ordinary memory and copied in bulk;
+ *   - only the rectangle a draw touches is uploaded, drawn (scissor) and read back.
+ * Guest RAM still holds the authoritative pixels after every call. */
+static DkMemBlock s_image_mem, s_read_mem, s_cmd_mem, s_code_mem, s_data_mem;
+static DkMemBlock s_tex_mem, s_tex_up, s_desc_mem;
+static uint32_t s_image_cap, s_read_cap, s_cmd_cap, s_code_cap, s_data_cap, s_tex_cap, s_up_cap, s_desc_cap;
+static DkShader s_vs, s_fs_diffuse, s_fs_texture;
+static int s_shaders_ready;
+static uint32_t *s_scratch;
+static size_t s_scratch_cap;
+static int s_read_cached = 1;
+
+static int ensure(DkMemBlock *blk, uint32_t *cap, uint32_t need, uint32_t flags)
+{
+    if (*blk && *cap >= need) return 1;
+    if (*blk) { dkMemBlockDestroy(*blk); *blk = NULL; *cap = 0; }
+    *blk = memory(need, flags);
+    if (!*blk) return 0;
+    *cap = aligned(need, DK_MEMBLOCK_ALIGNMENT);
+    return 1;
+}
+
+/* The transfer buffer: CPU-cached for fast loops; if the device refuses that
+ * combination, fall back to the old uncached buffer (slow, still correct). */
+static int ensure_read(uint32_t need)
+{
+    if (s_read_mem && s_read_cap >= need) return 1;
+    if (s_read_mem) { dkMemBlockDestroy(s_read_mem); s_read_mem = NULL; s_read_cap = 0; }
+    s_read_mem = memory(need, DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuUncached);
+    s_read_cached = s_read_mem != NULL;
+    if (!s_read_mem) {
+        printf("[MH-DEKO] cached transfer buffer unavailable: using the uncached one (slow)\n");
+        s_read_mem = memory(need, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
+    }
+    if (!s_read_mem) return 0;
+    s_read_cap = aligned(need, DK_MEMBLOCK_ALIGNMENT);
+    return 1;
+}
+
+static int ensure_shaders(void)
+{
+    if (s_shaders_ready) return 1;
+    uint32_t offset = 0;
+    if (!ensure(&s_code_mem, &s_code_cap, CODE_SIZE,
+                DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code)) return 0;
+    if (!shader(&s_vs, s_code_mem, &offset, "romfs:/shaders/nv2a_attribute_vsh.dksh")
+        || !shader(&s_fs_diffuse, s_code_mem, &offset, "romfs:/shaders/nv2a_diffuse_fsh.dksh")
+        || !shader(&s_fs_texture, s_code_mem, &offset, "romfs:/shaders/nv2a_texture_fsh.dksh")) return 0;
+    s_shaders_ready = 1;
+    printf("[MH-DEKO] persistent resources, cached transfer buffer and rectangle transfers active\n");
+    return 1;
+}
+
+static void release_resources(void)
+{
+    DkMemBlock *all[] = {&s_image_mem, &s_read_mem, &s_cmd_mem, &s_code_mem, &s_data_mem,
+                         &s_tex_mem, &s_tex_up, &s_desc_mem};
+    for (unsigned i = 0; i < sizeof all / sizeof all[0]; i++)
+        if (*all[i]) { dkMemBlockDestroy(*all[i]); *all[i] = NULL; }
+    s_image_cap = s_read_cap = s_cmd_cap = s_code_cap = s_data_cap = s_tex_cap = s_up_cap = s_desc_cap = 0;
+    s_shaders_ready = 0;
+    free(s_scratch);
+    s_scratch = NULL;
+    s_scratch_cap = 0;
 }
 
 static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_argb)
 {
-    DkMemBlock image_mem = NULL, code_mem = NULL, read_mem = NULL, cmd_mem = NULL;
-    DkMemBlock data_mem = NULL, tex_mem = NULL, tex_upload = NULL, descriptors = NULL;
     DkCmdBuf cmd = NULL;
     int ok = 0;
-    uint32_t w = s->width, h = s->height, pixel_bytes = w * h * 4;
+    uint32_t w = s->width, h = s->height;
     uint8_t *guest = (uint8_t *)xbox_GetMemoryOffset();
-    DkImageLayoutMaker lm;
-    dkImageLayoutMakerDefaults(&lm, s_device);
-    lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
-    lm.format = DkImageFormat_RGBA8_Unorm;
-    lm.dimensions[0] = w; lm.dimensions[1] = h;
-    DkImageLayout layout;
-    dkImageLayoutInitialize(&layout, &lm);
-    image_mem = memory(aligned(dkImageLayoutGetSize(&layout), dkImageLayoutGetAlignment(&layout)),
-                       DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image);
-    read_mem = memory(pixel_bytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
-    cmd_mem = memory(CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
-    if (!image_mem || !read_mem || !cmd_mem) goto done;
-    DkImage image;
-    dkImageInitialize(&image, &layout, image_mem, 0);
-    DkImageView view;
-    dkImageViewDefaults(&view, &image);
-    uint32_t *pixels = dkMemBlockGetCpuAddr(read_mem);
-    for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) {
-        uint32_t argb;
-        memcpy(&argb, guest + s->color_va + (size_t)y * s->pitch + x * 4, 4);
-        pixels[y * w + x] = swap_rb(argb);
-    }
-    DkCmdBufMaker cm;
-    dkCmdBufMakerDefaults(&cm, s_device);
-    cmd = dkCmdBufCreate(&cm);
-    if (!cmd) goto done;
-    dkCmdBufAddMemory(cmd, cmd_mem, 0, CMD_SIZE);
-    DkImageRect rect = {0, 0, 0, w, h, 1};
-    DkCopyBuf transfer = {dkMemBlockGetGpuAddr(read_mem), 0, 0};
-    dkCmdBufCopyBufferToImage(cmd, &transfer, &view, &rect, 0);
-    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
-    dkCmdBufBindRenderTarget(cmd, &view, NULL);
-    DkViewport viewport = {0, 0, w, h, 0, 1};
-    DkScissor scissor = {0, 0, w, h};
-    dkCmdBufSetViewports(cmd, 0, &viewport, 1);
-    dkCmdBufSetScissors(cmd, 0, &scissor, 1);
-    if (!b) {
-        dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA,
-            ((clear_argb >> 16) & 255) / 255.f, ((clear_argb >> 8) & 255) / 255.f,
-            (clear_argb & 255) / 255.f, (clear_argb >> 24) / 255.f);
-    } else {
+    uint32_t x0 = 0, y0 = 0, x1 = w, y1 = h;       /* the rectangle uploaded, drawn and read back */
+
+    if (b) {
         if (!b->count || b->count > MAX_VERTICES || b->count % 3 || !b->diffuse_float
             || (b->shading != NV2A_SHADE_DIFFUSE && b->shading != NV2A_SHADE_MODULATE)
             || (b->shading == NV2A_SHADE_MODULATE && !b->texture)) goto done;
+        float minx = 1e30f, miny = 1e30f, maxx = -1e30f, maxy = -1e30f;
         for (uint32_t i = 0; i < b->count; i++) {
             const Nv2aVertex *v = &b->vertices[i];
             if (!isfinite(v->x) || !isfinite(v->y) || !isfinite(v->z)
@@ -237,32 +275,86 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
                 || (b->shading == NV2A_SHADE_MODULATE
                     && (!isfinite(v->u) || !isfinite(v->v)))) goto done;
             for (unsigned k = 0; k < 4; k++) if (!isfinite(b->diffuse_float[i][k])) goto done;
+            if (v->x < minx) minx = v->x;
+            if (v->x > maxx) maxx = v->x;
+            if (v->y < miny) miny = v->y;
+            if (v->y > maxy) maxy = v->y;
         }
+        float fx0 = fmaxf(0.f, floorf(minx) - 2.f), fy0 = fmaxf(0.f, floorf(miny) - 2.f);
+        float fx1 = fminf((float)w, ceilf(maxx) + 2.f), fy1 = fminf((float)h, ceilf(maxy) + 2.f);
+        if (fx1 <= fx0 || fy1 <= fy0) { ok = 1; goto done; }   /* nothing inside the surface */
+        x0 = (uint32_t)fx0; y0 = (uint32_t)fy0; x1 = (uint32_t)fx1; y1 = (uint32_t)fy1;
+    }
+    const uint32_t rw = x1 - x0, rh = y1 - y0, rbytes = rw * rh * 4;
+
+    DkImageLayoutMaker lm;
+    dkImageLayoutMakerDefaults(&lm, s_device);
+    lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+    lm.format = DkImageFormat_RGBA8_Unorm;
+    lm.dimensions[0] = w; lm.dimensions[1] = h;
+    DkImageLayout layout;
+    dkImageLayoutInitialize(&layout, &lm);
+    if (!ensure(&s_image_mem, &s_image_cap,
+                aligned(dkImageLayoutGetSize(&layout), dkImageLayoutGetAlignment(&layout)),
+                DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
+        || !ensure_read(rbytes)
+        || !ensure(&s_cmd_mem, &s_cmd_cap, CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) goto done;
+    DkImage image;
+    dkImageInitialize(&image, &layout, s_image_mem, 0);
+    DkImageView view;
+    dkImageViewDefaults(&view, &image);
+
+    /* Upload the rectangle: guest RAM is authoritative, so the GPU starts from it. */
+    uint32_t *pixels = dkMemBlockGetCpuAddr(s_read_mem);
+    for (uint32_t y = y0; y < y1; y++) {
+        const uint8_t *src = guest + s->color_va + (size_t)y * s->pitch + (size_t)x0 * 4;
+        uint32_t *dst = pixels + (size_t)(y - y0) * rw;
+        for (uint32_t x = 0; x < rw; x++) {
+            uint32_t argb;
+            memcpy(&argb, src + (size_t)x * 4, 4);
+            dst[x] = swap_rb(argb);
+        }
+    }
+    dkMemBlockFlushCpuCache(s_read_mem, 0, rbytes);     /* the CPU's writes must reach memory before the GPU reads */
+
+    DkCmdBufMaker cm;
+    dkCmdBufMakerDefaults(&cm, s_device);
+    cmd = dkCmdBufCreate(&cm);
+    if (!cmd) goto done;
+    dkCmdBufAddMemory(cmd, s_cmd_mem, 0, CMD_SIZE);
+    DkImageRect rect = {x0, y0, 0, rw, rh, 1};
+    DkCopyBuf transfer = {dkMemBlockGetGpuAddr(s_read_mem), 0, 0};
+    dkCmdBufCopyBufferToImage(cmd, &transfer, &view, &rect, 0);
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+    dkCmdBufBindRenderTarget(cmd, &view, NULL);
+    DkViewport viewport = {0, 0, w, h, 0, 1};
+    DkScissor scissor = {x0, y0, rw, rh};
+    dkCmdBufSetViewports(cmd, 0, &viewport, 1);
+    dkCmdBufSetScissors(cmd, 0, &scissor, 1);
+    if (!b) {
+        dkCmdBufClearColorFloat(cmd, 0, DkColorMask_RGBA,
+            ((clear_argb >> 16) & 255) / 255.f, ((clear_argb >> 8) & 255) / 255.f,
+            (clear_argb & 255) / 255.f, (clear_argb >> 24) / 255.f);
+    } else {
         uint32_t vertex_bytes = b->count * sizeof(Nv2aVertex);
         uint32_t colour_at = aligned(vertex_bytes, 16), colour_bytes = b->count * 4 * sizeof(float);
         uint32_t uniform_at = aligned(colour_at + colour_bytes, 256);
-        code_mem = memory(CODE_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code);
-        data_mem = memory(uniform_at + 256, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
-        if (!code_mem || !data_mem) goto done;
-        memcpy(dkMemBlockGetCpuAddr(data_mem), b->vertices, vertex_bytes);
+        if (!ensure_shaders()
+            || !ensure(&s_data_mem, &s_data_cap, uniform_at + 256,
+                       DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) goto done;
+        memcpy(dkMemBlockGetCpuAddr(s_data_mem), b->vertices, vertex_bytes);
         if (b->shading == NV2A_SHADE_DIFFUSE) {
-            Nv2aVertex *vertices = dkMemBlockGetCpuAddr(data_mem);
+            Nv2aVertex *vertices = dkMemBlockGetCpuAddr(s_data_mem);
             for (uint32_t i = 0; i < b->count; i++) vertices[i].u = vertices[i].v = 0;
         }
-        if (!b->diffuse_float) goto done;
-        memcpy((uint8_t *)dkMemBlockGetCpuAddr(data_mem) + colour_at, b->diffuse_float, colour_bytes);
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(s_data_mem) + colour_at, b->diffuse_float, colour_bytes);
         const Nv2aTexture *t = b->shading == NV2A_SHADE_MODULATE ? b->texture : NULL;
         if (t && !texture_ok(t)) goto done;
         float settings[12] = {w, h, 0, 0, t ? t->width : 1, t ? t->height : 1,
                              b->state->alpha_test_enable, b->state->alpha_ref, t ? 1 : 2,
                              t && t->filter == MENU_FILTER};
-        memcpy((uint8_t *)dkMemBlockGetCpuAddr(data_mem) + uniform_at, settings, sizeof settings);
-        DkShader vs, fs;
-        uint32_t offset = 0;
-        if (!shader(&vs, code_mem, &offset, "romfs:/shaders/nv2a_attribute_vsh.dksh")
-            || !shader(&fs, code_mem, &offset, t ? "romfs:/shaders/nv2a_texture_fsh.dksh"
-                                                : "romfs:/shaders/nv2a_diffuse_fsh.dksh")) goto done;
-        DkShader const *shaders[] = {&vs, &fs};
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(s_data_mem) + uniform_at, settings, sizeof settings);
+        DkShader const *shaders[] = {&s_vs, t ? &s_fs_texture : &s_fs_diffuse};
         dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Shader);
         dkCmdBufBindShaders(cmd, DkStageFlag_GraphicsMask, shaders, 2);
         if (t) {
@@ -272,30 +364,37 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
             tm.dimensions[0] = t->width; tm.dimensions[1] = t->height;
             DkImageLayout tl;
             dkImageLayoutInitialize(&tl, &tm);
-            tex_mem = memory(aligned(dkImageLayoutGetSize(&tl), dkImageLayoutGetAlignment(&tl)),
-                             DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image);
-            tex_upload = memory(t->width * t->height * 4, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
-            descriptors = memory(4096, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached);
-            if (!tex_mem || !tex_upload || !descriptors) goto done;
+            const uint32_t tex_bytes = t->width * t->height * 4;
+            if (!ensure(&s_tex_mem, &s_tex_cap, aligned(dkImageLayoutGetSize(&tl), dkImageLayoutGetAlignment(&tl)),
+                        DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
+                || !ensure(&s_tex_up, &s_up_cap, tex_bytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached)
+                || !ensure(&s_desc_mem, &s_desc_cap, 4096, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) goto done;
+            if (s_scratch_cap < tex_bytes) {
+                uint32_t *grown = realloc(s_scratch, tex_bytes);
+                if (!grown) goto done;
+                s_scratch = grown;
+                s_scratch_cap = tex_bytes;
+            }
             DkImage ti;
-            dkImageInitialize(&ti, &tl, tex_mem, 0);
+            dkImageInitialize(&ti, &tl, s_tex_mem, 0);
             DkImageView tv;
             dkImageViewDefaults(&tv, &ti);
-            uint32_t *upload = dkMemBlockGetCpuAddr(tex_upload);
-            if (!nv2a_backend_decode_texture(t, upload)) goto done;
-            for (uint32_t i = 0; i < t->width * t->height; i++) upload[i] = swap_rb(upload[i]);
-            DkCopyBuf source = {dkMemBlockGetGpuAddr(tex_upload), 0, 0};
+            /* Decode and swap in ordinary memory; the uncached upload buffer is only written, in bulk. */
+            if (!nv2a_backend_decode_texture(t, s_scratch)) goto done;
+            for (uint32_t i = 0; i < t->width * t->height; i++) s_scratch[i] = swap_rb(s_scratch[i]);
+            memcpy(dkMemBlockGetCpuAddr(s_tex_up), s_scratch, tex_bytes);
+            DkCopyBuf source = {dkMemBlockGetGpuAddr(s_tex_up), 0, 0};
             DkImageRect tr = {0, 0, 0, t->width, t->height, 1};
             dkCmdBufCopyBufferToImage(cmd, &source, &tv, &tr, 0);
             DkSampler sampler;
             dkSamplerDefaults(&sampler);
             sampler.wrapMode[0] = sampler.wrapMode[1] = DkWrapMode_ClampToEdge;
             if (t->filter == MENU_FILTER) sampler.minFilter = sampler.magFilter = DkFilter_Linear;
-            dkImageDescriptorInitialize(dkMemBlockGetCpuAddr(descriptors), &tv, false, false);
-            dkSamplerDescriptorInitialize((DkSamplerDescriptor *)((uint8_t *)dkMemBlockGetCpuAddr(descriptors) + 256), &sampler);
+            dkImageDescriptorInitialize(dkMemBlockGetCpuAddr(s_desc_mem), &tv, false, false);
+            dkSamplerDescriptorInitialize((DkSamplerDescriptor *)((uint8_t *)dkMemBlockGetCpuAddr(s_desc_mem) + 256), &sampler);
             dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors);
-            dkCmdBufBindImageDescriptorSet(cmd, dkMemBlockGetGpuAddr(descriptors), 1);
-            dkCmdBufBindSamplerDescriptorSet(cmd, dkMemBlockGetGpuAddr(descriptors) + 256, 1);
+            dkCmdBufBindImageDescriptorSet(cmd, dkMemBlockGetGpuAddr(s_desc_mem), 1);
+            dkCmdBufBindSamplerDescriptorSet(cmd, dkMemBlockGetGpuAddr(s_desc_mem) + 256, 1);
             DkResHandle handle = dkMakeTextureHandle(0, 0);
             dkCmdBufBindTextures(cmd, DkStage_Fragment, 0, &handle, 1);
         }
@@ -331,9 +430,9 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
             {.bufferId=1, .offset=0, .size=DkVtxAttribSize_4x32, .type=DkVtxAttribType_Float},
             {.bufferId=0, .offset=offsetof(Nv2aVertex,u), .size=DkVtxAttribSize_2x32, .type=DkVtxAttribType_Float}};
         DkVtxBufferState vbs[] = {{sizeof(Nv2aVertex), 0}, {4 * sizeof(float), 0}};
-        DkBufExtents vb[] = {{dkMemBlockGetGpuAddr(data_mem), vertex_bytes},
-            {dkMemBlockGetGpuAddr(data_mem) + colour_at, colour_bytes}};
-        DkBufExtents ub = {dkMemBlockGetGpuAddr(data_mem) + uniform_at, 256};
+        DkBufExtents vb[] = {{dkMemBlockGetGpuAddr(s_data_mem), vertex_bytes},
+            {dkMemBlockGetGpuAddr(s_data_mem) + colour_at, colour_bytes}};
+        DkBufExtents ub = {dkMemBlockGetGpuAddr(s_data_mem) + uniform_at, 256};
         dkCmdBufBindVtxAttribState(cmd, attrs, 3);
         dkCmdBufBindVtxBufferState(cmd, vbs, 2);
         dkCmdBufBindVtxBuffers(cmd, 0, vb, 2);
@@ -346,21 +445,18 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
     DkCmdList list = dkCmdBufFinishList(cmd);
     dkQueueSubmitCommands(s_queue, list); dkQueueFlush(s_queue); dkQueueWaitIdle(s_queue);
     if (dkQueueIsInErrorState(s_queue)) goto done;
-    for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) {
-        uint32_t argb = swap_rb(pixels[y * w + x]);
-        memcpy(guest + s->color_va + (size_t)y * s->pitch + x * 4, &argb, 4);
+    dkMemBlockFlushCpuCache(s_read_mem, 0, rbytes);     /* drop stale cache lines: the GPU wrote this memory */
+    for (uint32_t y = y0; y < y1; y++) {
+        const uint32_t *src = pixels + (size_t)(y - y0) * rw;
+        uint8_t *dst = guest + s->color_va + (size_t)y * s->pitch + (size_t)x0 * 4;
+        for (uint32_t x = 0; x < rw; x++) {
+            uint32_t argb = swap_rb(src[x]);
+            memcpy(dst + (size_t)x * 4, &argb, 4);
+        }
     }
     ok = 1;
 done:
     if (cmd) dkCmdBufDestroy(cmd);
-    if (descriptors) dkMemBlockDestroy(descriptors);
-    if (tex_upload) dkMemBlockDestroy(tex_upload);
-    if (tex_mem) dkMemBlockDestroy(tex_mem);
-    if (data_mem) dkMemBlockDestroy(data_mem);
-    if (cmd_mem) dkMemBlockDestroy(cmd_mem);
-    if (read_mem) dkMemBlockDestroy(read_mem);
-    if (code_mem) dkMemBlockDestroy(code_mem);
-    if (image_mem) dkMemBlockDestroy(image_mem);
     if (!ok) fail_closed();
 }
 
@@ -415,7 +511,9 @@ const Nv2aBackend *manhunt_nv2a_deko3d_backend(void) { return &s_backend; }
 void manhunt_nv2a_deko3d_stats(ManhuntNv2aDeko3dStats *out) { if (out) *out = s_stats; }
 void manhunt_nv2a_deko3d_shutdown(void)
 {
-    if (s_queue) { dkQueueWaitIdle(s_queue); dkQueueDestroy(s_queue); s_queue = NULL; }
+    if (s_queue) dkQueueWaitIdle(s_queue);
+    release_resources();
+    if (s_queue) { dkQueueDestroy(s_queue); s_queue = NULL; }
     if (s_device) dkDeviceDestroy(s_device);
     s_device = NULL;
 }
