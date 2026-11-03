@@ -30,3 +30,7 @@ reports/ghidra*/
 .env
 .codex/*.local.*
 __pycache__/
+
+# Local NRO icon (game cover art: never commit, repo is public)
+/game/icon.jpg
+/game/icon*.jpg

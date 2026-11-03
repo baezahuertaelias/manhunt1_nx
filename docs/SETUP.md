@@ -1,6 +1,6 @@
 # Setup
 
-Headless, SSH-only host with Docker. No host packages are installed by this project. Preparing a new host: [HOST_SETUP.md](HOST_SETUP.md).
+Headless, SSH-only host with Docker (on a Mac without Docker see [MACOS_SWITCH_SETUP.md](MACOS_SWITCH_SETUP.md), section 5a). No host packages are installed by this project. Preparing a new host: [HOST_SETUP.md](HOST_SETUP.md).
 
 ## Inputs
 

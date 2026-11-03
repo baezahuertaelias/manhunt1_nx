@@ -181,6 +181,24 @@ Do not put this in your global profile: it changes `sed`, `stat` and others syst
 
 Not required for the game data (no case collisions, section 2). If you want exact parity with the Linux host anyway, create a case-sensitive APFS volume or sparse image (`hdiutil create -type SPARSE -fs "Case-sensitive APFS" ...`) and clone the repo into it. Bind mounts from it into containers are untested.
 
+## 5a. Native build without Docker (verified on a Mac, 2026-11-02)
+
+Path B above assumes Docker Desktop. A native path exists and was **executed** on a Mac (Darwin 23.6.0 / macOS Sonoma, devkitPro in `/opt/devkitpro`, MacPorts `cmake`/`ninja`/`git`, Python 3.14): `scripts/game-build-native.sh` builds the Switch NRO without Docker or containers and produced `game/build/switch/manhunt.nro` (about 21 MB; the NRO contains game-derived code: never commit or share it).
+
+What it does (the same steps as `scripts/game-build.sh switch`):
+
+1. fetches the pinned `xboxrecomp` commit `f0f8a46` into `game/build/xboxrecomp-src` and checks the SHA;
+2. creates a Python venv in `game/build/venv` with `capstone==5.0.9` and `unicorn==2.1.4`;
+3. applies `game/patches/xboxrecomp/*.patch` to a copy in `game/build/xboxrecomp`;
+4. analyses the XBE (cached; measured about 12 min on this Mac) and lifts it (cached by the same key as the Docker script);
+5. builds with devkitA64 (`$DEVKITPRO/cmake/Switch.cmake`) and `make`.
+
+Needs: devkitPro (`switch-dev`, `deko3d`, `uam`, `switch-tools`), `cmake`, `make`, `git`, `patch`, `python3`. `DEVKITPRO` defaults to `/opt/devkitpro`. Optional icon: put your own image at `game/icon.jpg` (gitignored); on macOS the script scales it to the 256x256 JPEG an NRO needs with `sips`. Do not commit game art.
+
+Not verified: the script on Apple silicon, on Linux, or with other Python versions.
+
+Sending the NRO and data over the network (Sphaira, UNVERIFIED beyond this one console): FTP on port 5000 works for uploads. `nxlink` from the Mac stalled or was reset by the receiver in every attempt here, so a TCP log listener (`MANHUNT_LOG_TCP`, see CONFIGURATION.md) and an FTP-uploaded NRO were used instead.
+
 ## 6. First session on the Mac
 
 Clone and check out this branch, restore the private files (section 2), then start Claude Code in the clone with a prompt like:
