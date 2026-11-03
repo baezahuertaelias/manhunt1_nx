@@ -39,3 +39,22 @@ It is a conservative, synchronous design. It logs `[MH-DEKO] flip=... draws=... 
 ## Not known
 
 The real speed of the adapter on the console, how much of the menu it accepts, which draws the first level needs (vertex programs and combiners are the likely blockers), and the clocks and thermals in handheld mode.
+
+## Implemented on branch `deko-adapter-perf` (not built, not run)
+
+After the adapter's own profile (about 44 ms per draw: full-surface round trip through uncached memory, 6 to 8 memory blocks and the shader files recreated per draw, a per-texel texture decode) the following was written, each piece behind a config switch (default on, `=0` off):
+
+| Piece | What it removes | Hazard and how it is handled |
+|---|---|---|
+| persistent memory blocks and shaders | the per-draw allocations and file reads | the queue is idle when a block grows (every call ends with `dkQueueWaitIdle`) |
+| CPU-cached transfer buffer + `dkMemBlockFlushCpuCache` | the uncached per-pixel reads | libnx defines the flush as clean + invalidate; flushed after the CPU writes and again after the GPU wrote |
+| rectangle transfers | whole-surface copies for small draws | scissor and copy limited to the vertex bounding box plus 2 px |
+| texture cache | decoding the same texture for every draw | keyed by address and format; a 64-bit hash of every byte the decode reads (texels, and the palette for P8) is checked every draw |
+| resident render target | the per-draw upload and readback (one upload and one readback per frame instead) | guest RAM is synced before the present reads it (the runtime presents before it calls the backend's flip, so the hook is in our present function), before any draw or clear the CPU renderer takes, before a texture overlapping the surface is decoded, and when the surface changes. NOT covered: the guest CPU reading the surface mid-frame |
+| faster present | a division per pixel (8 ms) | column table and row copies; same pixels |
+| `KeQuerySystemTime` yield (patch 0017) | a core at 100% in the guest's wait loop | sleeps about 20 us every 64th call; reported time unchanged; `RECOMP_TIME_YIELD=0` |
+
+**Verification without guessing:** `MANHUNT_DEKO_VERIFY=1` runs every call also through the conservative path (whole surface, uncached buffer, no texture cache, nothing resident) on a host shadow and compares the two results exactly (after each call, or at each sync for the resident target). A frame-to-frame comparison is not usable: the menu background animates (measured: 96% of pixels differ between consecutive frames of an unchanged menu). A mismatch is then bisected by turning single pieces off by config, without a rebuild.
+
+**Expected, not measured:** per frame about one upload, one readback and about 27 small GPU submits, which should be tens of milliseconds, against 1.2 s now. If the numbers say otherwise, the `[MH-DEKO-T]` log shows where the time goes.
+

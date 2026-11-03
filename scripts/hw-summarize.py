@@ -192,6 +192,32 @@ def main(run):
             if scope in last and scope != "scan_excluding_methods_ns":
                 p("- Derived: %s took %.2f s in total (%.1f ms per call)." % (scope, last[scope][1] / 1e9, last[scope][1] / 1e6 / max(last[scope][0], 1)))
 
+    # ---- GPU adapter (only when MANHUNT_GPU_BACKEND=1)
+    dk = re.findall(r"\[MH-DEKO\] flip=(\d+) draws=(\d+) clears=(\d+) reject_draw=(\d+) reject_clear=(\d+) reject_transforms=(\d+)", log)
+    if dk or "[MH-GPU] enabled" in log:
+        p("")
+        p("## GPU adapter")
+        act = first(r"\[MH-DEKO\] fast path active:.*", log)
+        if act:
+            p("- %s" % act)
+        if dk:
+            f, d, c, rd, rc, rt = dk[-1]
+            p("- Last flip logged: %s; GPU draws %s, GPU clears %s; rejected (fell back to the CPU renderer): draws %s, clears %s, transforms %s" % (f, d, c, rd, rc, rt))
+        tl = re.findall(r"\[MH-DEKO-T\].*", log)
+        for line in tl[-2:]:
+            p("- `%s`" % line.strip())
+        vl = re.findall(r"\[MH-DEKO-V\] compared (\d+): (\d+) differ, (\d+) pixels differ in total, largest channel difference (\d+)", log)
+        if vl:
+            n, bad, px, worst = vl[-1]
+            if int(bad) == 0:
+                p("- **Verify: %s comparisons, none differ (fast path vs conservative path, exact).**" % n)
+            else:
+                p("- **Verify: %s of %s comparisons differ (%s pixels, largest channel difference %s): the fast path is NOT pixel-identical; bisect with MANHUNT_DEKO_RECT/CACHED/TCACHE/RESIDENT=0.**" % (bad, n, px, worst))
+        elif "VERIFY mode" in log:
+            p("- Verify mode was on but no comparison was logged yet (run too short?).")
+        if "[MH-DEKO] FAIL" in log:
+            p("- **An accepted GPU operation failed: `[MH-DEKO] FAIL ...` (the adapter stops the process by design).**")
+
     # ---- controller
     p("")
     p("## Controller")

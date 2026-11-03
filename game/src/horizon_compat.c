@@ -57,9 +57,13 @@ void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars) { (void)name; (void)max_chars; }
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
 
+extern void manhunt_nv2a_deko3d_sync(void);
+
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
     uint32_t w, h, x, y, out_w, x0;
+    /* The GPU renderer (when on) keeps the target resident: guest RAM must be current before it is read. */
+    manhunt_nv2a_deko3d_sync();
     s_last_va = fb_va;
     s_last_pitch = pitch;
     s_presents++;
@@ -121,15 +125,33 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     x0 = (SCREEN_W - out_w) / 2;
     u32 stride;
     uint32_t *dst = framebufferBegin(&s_fb, &stride);
+    /* Column table (one division per output column, not per pixel) and repeated source rows copied:
+     * measured 8 ms per present with a division per pixel. Same pixels as before. */
+    static uint16_t xmap[SCREEN_W];
+    static uint32_t xmap_w, xmap_out;
+    if (xmap_w != w || xmap_out != out_w) {
+        for (x = 0; x < out_w && x < SCREEN_W; x++) xmap[x] = (uint16_t)((x * w / out_w) * 4);
+        xmap_w = w;
+        xmap_out = out_w;
+    }
+    uint32_t prev_sy = 0xFFFFFFFFu;
+    uint32_t *prev_row = NULL;
     for (y = 0; y < SCREEN_H; y++) {
-        const uint8_t *src = guest_ptr(fb_va + (y * h / SCREEN_H) * pitch);
+        const uint32_t sy = y * h / SCREEN_H;
         uint32_t *row = (uint32_t *)((uint8_t *)dst + y * stride);
-        memset(row, 0, x0 * 4);
-        for (x = 0; x < out_w; x++) {
-            const uint8_t *p = src + (x * w / out_w) * 4;
-            row[x0 + x] = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+        if (sy == prev_sy && prev_row) {
+            memcpy(row, prev_row, SCREEN_W * 4);
+        } else {
+            const uint8_t *src = guest_ptr(fb_va + sy * pitch);
+            memset(row, 0, x0 * 4);
+            for (x = 0; x < out_w; x++) {
+                const uint8_t *p = src + xmap[x];
+                row[x0 + x] = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+            }
+            memset(row + x0 + out_w, 0, (SCREEN_W - x0 - out_w) * 4);
         }
-        memset(row + x0 + out_w, 0, (SCREEN_W - x0 - out_w) * 4);
+        prev_sy = sy;
+        prev_row = row;
     }
     framebufferEnd(&s_fb);
 }

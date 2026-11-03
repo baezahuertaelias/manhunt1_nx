@@ -14,6 +14,7 @@
 #define MAX_DIMENSION 2048u
 #define MAX_VERTICES (65536u * 9u)
 
+static void resident_invalidate(void);
 static DkDevice s_device;
 static DkQueue s_queue;
 static ManhuntNv2aDeko3dStats s_stats;
@@ -45,6 +46,17 @@ static int surface_ok(const Nv2aSurface *s)
         && s->aa_sx == 1 && s->aa_sy == 1 && !s->clip_x && !s->clip_y
         && (s->format_raw == 8 || s->format_raw == 0x124)
         && s->pitch >= (uint64_t)s->width * 4 && nv2a_backend_surface_writable(s);
+}
+
+/* Bytes of texel data a texture of an accepted format occupies (the span nv2a_backend_decode_texture reads;
+ * a P8 texture's palette is separate). Must agree with texture_ok below. */
+static uint64_t texture_bytes(const Nv2aTexture *t)
+{
+    if (t->color == 0x12) return (uint64_t)(t->height - 1) * t->pitch + (uint64_t)t->width * 4;
+    if (t->color == 0x06) return (uint64_t)t->width * t->height * 4;
+    if (t->color == 0x0B) return (uint64_t)t->width * t->height;
+    if (t->color == 0x0E) return (uint64_t)(t->width / 4) * (t->height / 4) * 16;
+    return 0;
 }
 
 static int texture_ok(const Nv2aTexture *t)
@@ -112,7 +124,7 @@ static int can_draw(const Nv2aSurface *s, const Nv2aRenderState *r,
         && info->primitive >= 5 && info->primitive <= 10
         && (info->shading != NV2A_SHADE_MODULATE
             || ((info->path == NV2A_DRAW_PROGRAM || info->has_texcoords) && texture_ok(info->texture)));
-    if (!ok) s_stats.rejected_draws++;
+    if (!ok) { s_stats.rejected_draws++; resident_invalidate(); }
     return ok;
 }
 
@@ -128,7 +140,7 @@ static int can_draw_transformed(const Nv2aSurface *s, const Nv2aDrawInfo *info,
         && (info->shading != NV2A_SHADE_MODULATE || (texture && t->texture_q_one
             && isfinite(t->tex_u_abs_max) && isfinite(t->tex_v_abs_max)
             && t->tex_u_abs_max * su <= 1e6 && t->tex_v_abs_max * sv <= 1e6));
-    if (!ok) s_stats.rejected_transforms++;
+    if (!ok) { s_stats.rejected_transforms++; resident_invalidate(); }
     return ok;
 }
 
@@ -137,7 +149,7 @@ static int can_clear(const Nv2aSurface *s, const Nv2aRenderState *r,
 {
     (void)r; (void)argb; (void)zstencil;
     int ok = s_device && surface_ok(s) && flags == 0xF0 && !s->clear_rect_set;
-    if (!ok) s_stats.rejected_clears++;
+    if (!ok) { s_stats.rejected_clears++; resident_invalidate(); }
     return ok;
 }
 
@@ -180,18 +192,27 @@ static void fail_closed(void)
     abort();
 }
 
-/* Stage 1 of the adapter's speed-up (HW-PERF-001). Measured on the console, every
- * draw cost about 44 ms: it created and destroyed 6 to 8 GPU memory blocks,
- * re-read the shader files, uploaded the whole 640x480 surface through uncached
- * memory and read the whole surface back one uncached 4-byte load at a time.
- * The output must stay pixel-identical, so only the cost changes:
- *   - memory blocks and shaders live for the process lifetime (grow only; every
- *     execute() ends with dkQueueWaitIdle, so nothing is in flight when one grows);
- *   - the transfer buffer is CPU-cached; the CPU cache is flushed (clean and
- *     invalidate) after the CPU writes and again after the GPU wrote;
- *   - textures are decoded into ordinary memory and copied in bulk;
- *   - only the rectangle a draw touches is uploaded, drawn (scissor) and read back.
- * Guest RAM still holds the authoritative pixels after every call. */
+/* ---------------------------------------------------------------------------------------------
+ * GPU execution (HW-PERF-001). Measured on the console, the first version cost about 44 ms per
+ * accepted draw: 6 to 8 GPU memory blocks created and destroyed, shaders re-read, the whole
+ * 640x480 surface uploaded through uncached memory and read back one uncached load at a time,
+ * and every texture decoded texel by texel. Output must stay pixel-identical. Pieces, each with
+ * its own config switch (default on; "=0" turns it off, no rebuild):
+ *   persistent memory blocks and shaders (always);
+ *   MANHUNT_DEKO_CACHED   CPU-cached transfer buffer, flushed with dkMemBlockFlushCpuCache
+ *                         (libnx: clean + invalidate) after the CPU writes and after the GPU wrote;
+ *   MANHUNT_DEKO_RECT     only the rectangle a draw touches is transferred;
+ *   MANHUNT_DEKO_TCACHE   decoded textures are kept on the GPU, keyed by address, format and a
+ *                         64-bit hash of every byte the decode reads (texels and palette);
+ *   MANHUNT_DEKO_RESIDENT the render target stays on the GPU across calls. Guest RAM is brought up
+ *                         to date (a "sync") before anything else can read or overwrite the surface:
+ *                         the present (horizon_compat.c calls manhunt_nv2a_deko3d_sync first), a
+ *                         draw or clear the CPU renderer takes (the can_* callbacks), a texture that
+ *                         overlaps the surface (render-to-texture), a change of surface.
+ *   MANHUNT_DEKO_VERIFY=1 diagnostic: every call also runs through the conservative path on a host
+ *                         shadow of the surface, and the two results are compared exactly.
+ * Not covered by any hook: the guest's own CPU reading the surface mid-frame (it would see the
+ * pre-sync pixels). */
 static DkMemBlock s_image_mem, s_read_mem, s_cmd_mem, s_code_mem, s_data_mem;
 static DkMemBlock s_tex_mem, s_tex_up, s_desc_mem;
 static uint32_t s_image_cap, s_read_cap, s_cmd_cap, s_code_cap, s_data_cap, s_tex_cap, s_up_cap, s_desc_cap;
@@ -200,28 +221,48 @@ static int s_shaders_ready;
 static uint32_t *s_scratch;
 static size_t s_scratch_cap;
 static int s_read_cached = 1;
-/* Bisect switches (config only, no rebuild): MANHUNT_DEKO_RECT=0 transfers the whole
- * surface for every draw (rectangle logic off); MANHUNT_DEKO_CACHED=0 uses the old
- * uncached transfer buffer (cache logic off). Both default on. */
-static int s_use_rect = 1, s_want_cached = 1;
-/* Phase timing (armGetSystemTick, 19.2 MHz): accumulated per execute() call and
- * printed with the flip statistics, so one run shows what dominates after the fix. */
-typedef struct { uint64_t prep, build, gpu, readback, tex; uint32_t draws, clears, pixels; } DekoTime;
+static int s_use_rect = 1, s_want_cached = 1, s_use_tcache = 1, s_use_resident = 1, s_verify;
+
+typedef struct { uint64_t prep, build, gpu, readback, tex; uint32_t draws, clears, pixels, tex_hits, tex_misses, syncs; } DekoTime;
 static DekoTime s_time;
 static uint64_t ticks_to_us(uint64_t t) { return t * 1000000ull / 19200000ull; }
+
+typedef struct { int use_rect, want_cached, use_tcache, resident; uint8_t *pix0; } GpuOpts;
+
+/* Resident render target. valid: the GPU image holds the surface; dirty: it is newer than guest RAM
+ * inside [dx0,dx1) x [dy0,dy1). */
+static struct { int valid, dirty, cached; uint32_t va, pitch, w, h; uint8_t *pix0;
+                uint32_t dx0, dy0, dx1, dy1; } R;
+
+/* Verify mode: host shadow of the surface, driven through the conservative path. */
+static uint8_t *s_shadow;
+static size_t s_shadow_cap;
+static struct { uint64_t calls, bad_calls, bad_pixels; uint32_t worst; } s_vstat;
+
+/* Texture cache. */
+#define TCACHE_N 24
+typedef struct {
+    int used;
+    uint32_t offset, width, height, pitch, color, palette_va, palette_entries;
+    uint64_t hash, last_use;
+    DkMemBlock mem;
+    uint32_t cap;
+} TexEntry;
+static TexEntry s_texc[TCACHE_N];
+static uint64_t s_tex_clock;
 
 static int ensure(DkMemBlock *blk, uint32_t *cap, uint32_t need, uint32_t flags)
 {
     if (*blk && *cap >= need) return 1;
-    if (*blk) { dkMemBlockDestroy(*blk); *blk = NULL; *cap = 0; }
+    if (*blk) { dkMemBlockDestroy(*blk); *blk = NULL; *cap = 0; }   /* the queue is idle: every call ends with dkQueueWaitIdle */
     *blk = memory(need, flags);
     if (!*blk) return 0;
     *cap = aligned(need, DK_MEMBLOCK_ALIGNMENT);
     return 1;
 }
 
-/* The transfer buffer: CPU-cached for fast loops; if the device refuses that
- * combination, fall back to the old uncached buffer (slow, still correct). */
+/* The transfer buffer: CPU-cached for fast loops; if the device refuses that combination, fall back
+ * to the old uncached buffer (slow, still correct). Recreated when the wanted mode changes. */
 static int ensure_read(uint32_t need, int want_cached)
 {
     if (s_read_mem && s_read_cap >= need && s_read_cached == want_cached) return 1;
@@ -247,7 +288,8 @@ static int ensure_shaders(void)
         || !shader(&s_fs_diffuse, s_code_mem, &offset, "romfs:/shaders/nv2a_diffuse_fsh.dksh")
         || !shader(&s_fs_texture, s_code_mem, &offset, "romfs:/shaders/nv2a_texture_fsh.dksh")) return 0;
     s_shaders_ready = 1;
-    printf("[MH-DEKO] persistent resources, cached transfer buffer and rectangle transfers active\n");
+    printf("[MH-DEKO] fast path active: cached=%d rect=%d tcache=%d resident=%d verify=%d\n",
+           s_want_cached, s_use_rect, s_use_tcache, s_use_resident, s_verify);
     return 1;
 }
 
@@ -257,23 +299,186 @@ static void release_resources(void)
                          &s_tex_mem, &s_tex_up, &s_desc_mem};
     for (unsigned i = 0; i < sizeof all / sizeof all[0]; i++)
         if (*all[i]) { dkMemBlockDestroy(*all[i]); *all[i] = NULL; }
+    for (unsigned i = 0; i < TCACHE_N; i++)
+        if (s_texc[i].mem) dkMemBlockDestroy(s_texc[i].mem);
+    memset(s_texc, 0, sizeof s_texc);
     s_image_cap = s_read_cap = s_cmd_cap = s_code_cap = s_data_cap = s_tex_cap = s_up_cap = s_desc_cap = 0;
     s_shaders_ready = 0;
-    free(s_scratch);
-    s_scratch = NULL;
-    s_scratch_cap = 0;
+    memset(&R, 0, sizeof R);
+    free(s_scratch); s_scratch = NULL; s_scratch_cap = 0;
+    free(s_shadow); s_shadow = NULL; s_shadow_cap = 0;
 }
 
-static void execute_with(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_argb,
-                         int use_rect, int want_cached)
+static uint64_t hash_bytes(uint64_t h, const uint8_t *p, size_t n)
+{
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        h ^= v;
+        h *= 0x100000001b3ull;
+        h ^= h >> 29;
+    }
+    for (; i < n; i++) { h ^= p[i]; h *= 0x100000001b3ull; }
+    return h;
+}
+
+/* Every byte nv2a_backend_decode_texture reads: the texels (for linear 0x12 only width*4 of each pitch
+ * row) and, for P8 (0x0B), the palette. Formats are those texture_ok accepts. */
+static uint64_t texture_hash(const Nv2aTexture *t, const uint8_t *guest)
+{
+    uint64_t h = 0xcbf29ce484222325ull ^ ((uint64_t)t->width << 32) ^ t->height ^ ((uint64_t)t->color << 48);
+    if (t->color == 0x12) {
+        for (uint32_t y = 0; y < t->height; y++)
+            h = hash_bytes(h, guest + t->offset + (size_t)y * t->pitch, (size_t)t->width * 4);
+    } else {
+        h = hash_bytes(h, guest + t->offset, (size_t)texture_bytes(t));
+    }
+    if (t->color == 0x0B) h = hash_bytes(h, guest + t->palette_va, (size_t)t->palette_entries * 4);
+    return h;
+}
+
+static TexEntry *tex_lookup(const Nv2aTexture *t)
+{
+    TexEntry *victim = NULL;
+    for (unsigned i = 0; i < TCACHE_N; i++) {
+        TexEntry *e = &s_texc[i];
+        if (e->used && e->offset == t->offset && e->width == t->width && e->height == t->height
+            && e->pitch == t->pitch && e->color == t->color && e->palette_va == t->palette_va
+            && e->palette_entries == t->palette_entries) return e;
+        if (!victim || (!e->used && victim->used) || (e->used == victim->used && e->last_use < victim->last_use))
+            victim = e;
+    }
+    victim->used = 1;
+    victim->offset = t->offset; victim->width = t->width; victim->height = t->height;
+    victim->pitch = t->pitch; victim->color = t->color;
+    victim->palette_va = t->palette_va; victim->palette_entries = t->palette_entries;
+    victim->hash = 0;                    /* contents unknown: force a decode and upload */
+    return victim;
+}
+
+static void rows_to_buffer(const uint8_t *pix0, uint32_t pitch, uint32_t x0, uint32_t y0,
+                           uint32_t x1, uint32_t y1, uint32_t *dst)
+{
+    const uint32_t rw = x1 - x0;
+    for (uint32_t y = y0; y < y1; y++) {
+        const uint8_t *src = pix0 + (size_t)y * pitch + (size_t)x0 * 4;
+        uint32_t *d = dst + (size_t)(y - y0) * rw;
+        for (uint32_t x = 0; x < rw; x++) {
+            uint32_t argb;
+            memcpy(&argb, src + (size_t)x * 4, 4);
+            d[x] = swap_rb(argb);
+        }
+    }
+}
+
+static void buffer_to_rows(const uint32_t *src, uint8_t *pix0, uint32_t pitch, uint32_t x0, uint32_t y0,
+                           uint32_t x1, uint32_t y1)
+{
+    const uint32_t rw = x1 - x0;
+    for (uint32_t y = y0; y < y1; y++) {
+        const uint32_t *s = src + (size_t)(y - y0) * rw;
+        uint8_t *dst = pix0 + (size_t)y * pitch + (size_t)x0 * 4;
+        for (uint32_t x = 0; x < rw; x++) {
+            uint32_t argb = swap_rb(s[x]);
+            memcpy(dst + (size_t)x * 4, &argb, 4);
+        }
+    }
+}
+
+static void target_layout(uint32_t w, uint32_t h, DkImageLayout *layout)
+{
+    DkImageLayoutMaker lm;
+    dkImageLayoutMakerDefaults(&lm, s_device);
+    lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
+    lm.format = DkImageFormat_RGBA8_Unorm;
+    lm.dimensions[0] = w; lm.dimensions[1] = h;
+    dkImageLayoutInitialize(layout, &lm);
+}
+
+/* Bring guest RAM up to date with the resident GPU image (the dirty rectangle only). */
+static void resident_flush_dirty(void)
+{
+    if (!R.valid || !R.dirty) return;
+    const uint64_t t0 = armGetSystemTick();
+    const uint32_t rw = R.dx1 - R.dx0, rh = R.dy1 - R.dy0, rbytes = rw * rh * 4;
+    DkImageLayout layout;
+    target_layout(R.w, R.h, &layout);
+    if (!ensure(&s_image_mem, &s_image_cap, aligned(dkImageLayoutGetSize(&layout), dkImageLayoutGetAlignment(&layout)),
+                DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
+        || !ensure_read(rbytes, R.cached)
+        || !ensure(&s_cmd_mem, &s_cmd_cap, CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) fail_closed();
+    DkImage image;
+    dkImageInitialize(&image, &layout, s_image_mem, 0);
+    DkImageView view;
+    dkImageViewDefaults(&view, &image);
+    DkCmdBufMaker cm;
+    dkCmdBufMakerDefaults(&cm, s_device);
+    DkCmdBuf cmd = dkCmdBufCreate(&cm);
+    if (!cmd) fail_closed();
+    dkCmdBufAddMemory(cmd, s_cmd_mem, 0, CMD_SIZE);
+    DkImageRect rect = {R.dx0, R.dy0, 0, rw, rh, 1};
+    DkCopyBuf transfer = {dkMemBlockGetGpuAddr(s_read_mem), 0, 0};
+    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+    dkCmdBufCopyImageToBuffer(cmd, &view, &rect, &transfer, 0);
+    DkCmdList list = dkCmdBufFinishList(cmd);
+    dkQueueSubmitCommands(s_queue, list); dkQueueFlush(s_queue); dkQueueWaitIdle(s_queue);
+    dkCmdBufDestroy(cmd);
+    if (dkQueueIsInErrorState(s_queue)) fail_closed();
+    dkMemBlockFlushCpuCache(s_read_mem, 0, rbytes);      /* drop stale cache lines: the GPU wrote this memory */
+    buffer_to_rows(dkMemBlockGetCpuAddr(s_read_mem), R.pix0, R.pitch, R.dx0, R.dy0, R.dx1, R.dy1);
+    if (s_verify && s_shadow && s_shadow_cap >= (size_t)R.pitch * R.h) {
+        uint64_t bad = 0;
+        uint32_t worst = 0;
+        for (uint32_t y = R.dy0; y < R.dy1; y++)
+            for (uint32_t x = R.dx0; x < R.dx1; x++) {
+                uint32_t a, c;
+                memcpy(&a, R.pix0 + (size_t)y * R.pitch + (size_t)x * 4, 4);
+                memcpy(&c, s_shadow + (size_t)y * R.pitch + (size_t)x * 4, 4);
+                if (a != c) {
+                    bad++;
+                    for (int k = 0; k < 4; k++) {
+                        int d = (int)((a >> (8 * k)) & 255) - (int)((c >> (8 * k)) & 255);
+                        if (d < 0) d = -d;
+                        if ((uint32_t)d > worst) worst = (uint32_t)d;
+                    }
+                }
+            }
+        s_vstat.calls++;
+        if (bad) { s_vstat.bad_calls++; s_vstat.bad_pixels += bad; if (worst > s_vstat.worst) s_vstat.worst = worst; }
+    }
+    R.dirty = 0;
+    s_time.syncs++;
+    s_time.readback += armGetSystemTick() - t0;
+}
+
+/* The CPU renderer is about to read or write the surface, or the surface identity changes. */
+static void resident_invalidate(void)
+{
+    resident_flush_dirty();
+    R.valid = 0;
+}
+
+/* Called by the present (horizon_compat.c) before it reads guest RAM. */
+void manhunt_nv2a_deko3d_sync(void)
+{
+    if (s_device) resident_flush_dirty();
+}
+
+static int spans_overlap(uint64_t a, uint64_t alen, uint64_t b, uint64_t blen)
+{
+    return a < b + blen && b < a + alen;
+}
+
+static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_argb, const GpuOpts *o)
 {
     DkCmdBuf cmd = NULL;
     int ok = 0;
-    uint32_t w = s->width, h = s->height;
-    uint8_t *guest = (uint8_t *)xbox_GetMemoryOffset();
-    uint32_t x0 = 0, y0 = 0, x1 = w, y1 = h;       /* the rectangle uploaded, drawn and read back */
+    const uint32_t w = s->width, h = s->height;
+    const uint8_t *guest = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t x0 = 0, y0 = 0, x1 = w, y1 = h;       /* the rectangle this call draws into */
     const uint64_t t_start = armGetSystemTick();
-    uint64_t t_after_prep = t_start, t_after_gpu = t_start;
+    uint64_t t_after_prep = t_start, t_submit = t_start, t_after_gpu = t_start;
 
     if (b) {
         if (!b->count || b->count > MAX_VERTICES || b->count % 3 || !b->diffuse_float
@@ -295,39 +500,44 @@ static void execute_with(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clea
         float fx0 = fmaxf(0.f, floorf(minx) - 2.f), fy0 = fmaxf(0.f, floorf(miny) - 2.f);
         float fx1 = fminf((float)w, ceilf(maxx) + 2.f), fy1 = fminf((float)h, ceilf(maxy) + 2.f);
         if (fx1 <= fx0 || fy1 <= fy0) { ok = 1; goto done; }   /* nothing inside the surface */
-        if (use_rect) { x0 = (uint32_t)fx0; y0 = (uint32_t)fy0; x1 = (uint32_t)fx1; y1 = (uint32_t)fy1; }
+        if (o->use_rect) { x0 = (uint32_t)fx0; y0 = (uint32_t)fy0; x1 = (uint32_t)fx1; y1 = (uint32_t)fy1; }
     }
-    const uint32_t rw = x1 - x0, rh = y1 - y0, rbytes = rw * rh * 4;
+    const uint32_t rw = x1 - x0, rh = y1 - y0;
 
-    DkImageLayoutMaker lm;
-    dkImageLayoutMakerDefaults(&lm, s_device);
-    lm.flags = DkImageFlags_UsageRender | DkImageFlags_Usage2DEngine;
-    lm.format = DkImageFormat_RGBA8_Unorm;
-    lm.dimensions[0] = w; lm.dimensions[1] = h;
+    /* Resident target: a different surface (or none yet) first flushes the old one, then uploads this one. */
+    int upload_full = 0;
+    if (o->resident) {
+        int same = R.valid && R.va == s->color_va && R.pitch == s->pitch && R.w == w && R.h == h && R.pix0 == o->pix0;
+        if (!same) { resident_invalidate(); upload_full = 1; }
+        else if (b && b->shading == NV2A_SHADE_MODULATE && b->texture && R.dirty) {
+            /* render-to-texture: the texture decode reads guest RAM, which may overlap the dirty surface */
+            if (spans_overlap(b->texture->offset, texture_bytes(b->texture), s->color_va, (uint64_t)s->pitch * h))
+                resident_flush_dirty();
+        }
+    }
+    const int upload = !o->resident || upload_full;
+    const uint32_t ux0 = o->resident ? 0 : x0, uy0 = o->resident ? 0 : y0;
+    const uint32_t ux1 = o->resident ? w : x1, uy1 = o->resident ? h : y1;
+    const uint32_t xfer_bytes = (o->resident ? w * h : rw * rh) * 4;
+
     DkImageLayout layout;
-    dkImageLayoutInitialize(&layout, &lm);
+    target_layout(w, h, &layout);
     if (!ensure(&s_image_mem, &s_image_cap,
                 aligned(dkImageLayoutGetSize(&layout), dkImageLayoutGetAlignment(&layout)),
                 DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
-        || !ensure_read(rbytes, want_cached)
+        || !ensure_read(xfer_bytes, o->want_cached)
         || !ensure(&s_cmd_mem, &s_cmd_cap, CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) goto done;
     DkImage image;
     dkImageInitialize(&image, &layout, s_image_mem, 0);
     DkImageView view;
     dkImageViewDefaults(&view, &image);
 
-    /* Upload the rectangle: guest RAM is authoritative, so the GPU starts from it. */
     uint32_t *pixels = dkMemBlockGetCpuAddr(s_read_mem);
-    for (uint32_t y = y0; y < y1; y++) {
-        const uint8_t *src = guest + s->color_va + (size_t)y * s->pitch + (size_t)x0 * 4;
-        uint32_t *dst = pixels + (size_t)(y - y0) * rw;
-        for (uint32_t x = 0; x < rw; x++) {
-            uint32_t argb;
-            memcpy(&argb, src + (size_t)x * 4, 4);
-            dst[x] = swap_rb(argb);
-        }
+    if (upload) {
+        /* Guest RAM is authoritative: the GPU starts from it. */
+        rows_to_buffer(o->pix0, s->pitch, ux0, uy0, ux1, uy1, pixels);
+        dkMemBlockFlushCpuCache(s_read_mem, 0, (ux1 - ux0) * (uy1 - uy0) * 4);   /* CPU writes must reach memory before the GPU reads */
     }
-    dkMemBlockFlushCpuCache(s_read_mem, 0, rbytes);     /* the CPU's writes must reach memory before the GPU reads */
     t_after_prep = armGetSystemTick();
 
     DkCmdBufMaker cm;
@@ -335,10 +545,12 @@ static void execute_with(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clea
     cmd = dkCmdBufCreate(&cm);
     if (!cmd) goto done;
     dkCmdBufAddMemory(cmd, s_cmd_mem, 0, CMD_SIZE);
-    DkImageRect rect = {x0, y0, 0, rw, rh, 1};
     DkCopyBuf transfer = {dkMemBlockGetGpuAddr(s_read_mem), 0, 0};
-    dkCmdBufCopyBufferToImage(cmd, &transfer, &view, &rect, 0);
-    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+    DkImageRect up_rect = {ux0, uy0, 0, ux1 - ux0, uy1 - uy0, 1};
+    if (upload) {
+        dkCmdBufCopyBufferToImage(cmd, &transfer, &view, &up_rect, 0);
+        dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image);
+    }
     dkCmdBufBindRenderTarget(cmd, &view, NULL);
     DkViewport viewport = {0, 0, w, h, 0, 1};
     DkScissor scissor = {x0, y0, rw, rh};
@@ -378,29 +590,49 @@ static void execute_with(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clea
             DkImageLayout tl;
             dkImageLayoutInitialize(&tl, &tm);
             const uint32_t tex_bytes = t->width * t->height * 4;
-            if (!ensure(&s_tex_mem, &s_tex_cap, aligned(dkImageLayoutGetSize(&tl), dkImageLayoutGetAlignment(&tl)),
-                        DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
-                || !ensure(&s_tex_up, &s_up_cap, tex_bytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached)
-                || !ensure(&s_desc_mem, &s_desc_cap, 4096, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) goto done;
-            if (s_scratch_cap < tex_bytes) {
-                uint32_t *grown = realloc(s_scratch, tex_bytes);
-                if (!grown) goto done;
-                s_scratch = grown;
-                s_scratch_cap = tex_bytes;
+            const uint32_t tex_mem_bytes = aligned(dkImageLayoutGetSize(&tl), dkImageLayoutGetAlignment(&tl));
+            TexEntry *e = NULL;
+            uint64_t hsh = 0;
+            int hit = 0;
+            DkMemBlock timg = NULL;
+            if (o->use_tcache) {
+                hsh = texture_hash(t, guest);
+                e = tex_lookup(t);
+                const DkMemBlock before = e->mem;
+                if (!ensure(&e->mem, &e->cap, tex_mem_bytes, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)) goto done;
+                if (e->mem != before) e->hash = 0;              /* new memory: nothing uploaded yet */
+                hit = e->hash == hsh && e->hash != 0;
+                e->last_use = ++s_tex_clock;
+                timg = e->mem;
+                if (hit) s_time.tex_hits++; else s_time.tex_misses++;
+            } else {
+                if (!ensure(&s_tex_mem, &s_tex_cap, tex_mem_bytes, DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)) goto done;
+                timg = s_tex_mem;
             }
+            if (!ensure(&s_desc_mem, &s_desc_cap, 4096, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) goto done;
             DkImage ti;
-            dkImageInitialize(&ti, &tl, s_tex_mem, 0);
+            dkImageInitialize(&ti, &tl, timg, 0);
             DkImageView tv;
             dkImageViewDefaults(&tv, &ti);
-            /* Decode and swap in ordinary memory; the uncached upload buffer is only written, in bulk. */
-            const uint64_t t_tex = armGetSystemTick();
-            if (!nv2a_backend_decode_texture(t, s_scratch)) goto done;
-            for (uint32_t i = 0; i < t->width * t->height; i++) s_scratch[i] = swap_rb(s_scratch[i]);
-            memcpy(dkMemBlockGetCpuAddr(s_tex_up), s_scratch, tex_bytes);
-            s_time.tex += armGetSystemTick() - t_tex;
-            DkCopyBuf source = {dkMemBlockGetGpuAddr(s_tex_up), 0, 0};
-            DkImageRect tr = {0, 0, 0, t->width, t->height, 1};
-            dkCmdBufCopyBufferToImage(cmd, &source, &tv, &tr, 0);
+            if (!hit) {
+                if (!ensure(&s_tex_up, &s_up_cap, tex_bytes, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached)) goto done;
+                if (s_scratch_cap < tex_bytes) {
+                    uint32_t *grown = realloc(s_scratch, tex_bytes);
+                    if (!grown) goto done;
+                    s_scratch = grown;
+                    s_scratch_cap = tex_bytes;
+                }
+                const uint64_t t_tex = armGetSystemTick();
+                /* Decode and swap in ordinary memory; the uncached upload buffer is only written, in bulk. */
+                if (!nv2a_backend_decode_texture(t, s_scratch)) goto done;
+                for (uint32_t i = 0; i < t->width * t->height; i++) s_scratch[i] = swap_rb(s_scratch[i]);
+                memcpy(dkMemBlockGetCpuAddr(s_tex_up), s_scratch, tex_bytes);
+                s_time.tex += armGetSystemTick() - t_tex;
+                DkCopyBuf source = {dkMemBlockGetGpuAddr(s_tex_up), 0, 0};
+                DkImageRect tr = {0, 0, 0, t->width, t->height, 1};
+                dkCmdBufCopyBufferToImage(cmd, &source, &tv, &tr, 0);
+                if (e) e->hash = hsh;
+            }
             DkSampler sampler;
             dkSamplerDefaults(&sampler);
             sampler.wrapMode[0] = sampler.wrapMode[1] = DkWrapMode_ClampToEdge;
@@ -455,21 +687,30 @@ static void execute_with(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clea
         dkCmdBufBindUniformBuffers(cmd, DkStage_Fragment, 0, &ub, 1);
         dkCmdBufDraw(cmd, DkPrimitive_Triangles, b->count, 1, 0, 0);
     }
-    dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
-    dkCmdBufCopyImageToBuffer(cmd, &view, &rect, &transfer, 0);
+    if (!o->resident) {
+        dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
+        DkImageRect rb_rect = {x0, y0, 0, rw, rh, 1};
+        dkCmdBufCopyImageToBuffer(cmd, &view, &rb_rect, &transfer, 0);
+    }
     DkCmdList list = dkCmdBufFinishList(cmd);
-    const uint64_t t_submit = armGetSystemTick();
+    t_submit = armGetSystemTick();
     dkQueueSubmitCommands(s_queue, list); dkQueueFlush(s_queue); dkQueueWaitIdle(s_queue);
     t_after_gpu = armGetSystemTick();
     if (dkQueueIsInErrorState(s_queue)) goto done;
-    dkMemBlockFlushCpuCache(s_read_mem, 0, rbytes);     /* drop stale cache lines: the GPU wrote this memory */
-    for (uint32_t y = y0; y < y1; y++) {
-        const uint32_t *src = pixels + (size_t)(y - y0) * rw;
-        uint8_t *dst = guest + s->color_va + (size_t)y * s->pitch + (size_t)x0 * 4;
-        for (uint32_t x = 0; x < rw; x++) {
-            uint32_t argb = swap_rb(src[x]);
-            memcpy(dst + (size_t)x * 4, &argb, 4);
+    if (o->resident) {
+        /* The GPU image is now newer than guest RAM inside the touched rectangle. */
+        if (upload_full) { R.valid = 1; R.va = s->color_va; R.pitch = s->pitch; R.w = w; R.h = h; R.pix0 = o->pix0; R.dirty = 0; }
+        R.cached = o->want_cached;
+        if (!R.dirty) { R.dx0 = x0; R.dy0 = y0; R.dx1 = x1; R.dy1 = y1; R.dirty = 1; }
+        else {
+            if (x0 < R.dx0) R.dx0 = x0;
+            if (y0 < R.dy0) R.dy0 = y0;
+            if (x1 > R.dx1) R.dx1 = x1;
+            if (y1 > R.dy1) R.dy1 = y1;
         }
+    } else {
+        dkMemBlockFlushCpuCache(s_read_mem, 0, rw * rh * 4);   /* drop stale cache lines: the GPU wrote this memory */
+        buffer_to_rows(pixels, o->pix0, s->pitch, x0, y0, x1, y1);
     }
     ok = 1;
     {
@@ -477,7 +718,7 @@ static void execute_with(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clea
         s_time.prep += t_after_prep - t_start;
         s_time.build += t_submit - t_after_prep;
         s_time.gpu += t_after_gpu - t_submit;
-        s_time.readback += t_end - t_after_gpu;
+        if (!o->resident) s_time.readback += t_end - t_after_gpu;
         s_time.pixels += rw * rh;
         if (b) s_time.draws++; else s_time.clears++;
     }
@@ -486,51 +727,55 @@ done:
     if (!ok) fail_closed();
 }
 
-/* MANHUNT_DEKO_VERIFY=1: run every call twice from the same starting pixels, once with the
- * optimised settings and once with the conservative ones (whole surface, uncached buffer), and
- * compare the two results exactly. Slow (diagnostic): it proves the optimisation does not change
- * the pixels, independent of any animation. The conservative result is what stays in guest RAM. */
-static int s_verify;
-static uint8_t *s_vsave, *s_vresult;
-static size_t s_vcap;
-static struct { uint64_t calls, bad_calls, bad_pixels; uint32_t worst; } s_vstat;
-
+/* MANHUNT_DEKO_VERIFY=1: every call also runs through the conservative path (whole surface, uncached
+ * buffer, no texture cache, nothing resident) on a host shadow of the surface; the two results are
+ * compared exactly. Non-resident: after every call, over the whole surface. Resident: at every sync,
+ * over the dirty rectangle (resident_flush_dirty). Slow; timings are not representative. */
 static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_argb)
 {
-    if (!s_verify) { execute_with(s, b, clear_argb, s_use_rect, s_want_cached); return; }
     uint8_t *guest = (uint8_t *)xbox_GetMemoryOffset();
-    size_t row = (size_t)s->width * 4, bytes = row * s->height;
-    if (s_vcap < bytes) {
-        free(s_vsave); free(s_vresult);
-        s_vsave = malloc(bytes); s_vresult = malloc(bytes);
-        s_vcap = (s_vsave && s_vresult) ? bytes : 0;
+    GpuOpts opt = {s_use_rect, s_want_cached, s_use_tcache, s_use_resident, guest + s->color_va};
+    if (!s_verify) { gpu_call(s, b, clear_argb, &opt); return; }
+    const size_t bytes = (size_t)s->pitch * s->height;
+    if (s_shadow_cap < bytes) {
+        free(s_shadow);
+        s_shadow = malloc(bytes);
+        s_shadow_cap = s_shadow ? bytes : 0;
     }
-    if (!s_vcap) { execute_with(s, b, clear_argb, s_use_rect, s_want_cached); return; }
-    for (uint32_t y = 0; y < s->height; y++) memcpy(s_vsave + y * row, guest + s->color_va + (size_t)y * s->pitch, row);
-    execute_with(s, b, clear_argb, 1, 1);                                  /* optimised */
-    for (uint32_t y = 0; y < s->height; y++) memcpy(s_vresult + y * row, guest + s->color_va + (size_t)y * s->pitch, row);
-    for (uint32_t y = 0; y < s->height; y++) memcpy(guest + s->color_va + (size_t)y * s->pitch, s_vsave + y * row, row);
-    execute_with(s, b, clear_argb, 0, 0);                                  /* conservative */
-    uint64_t bad = 0;
-    uint32_t worst = 0;
-    for (uint32_t y = 0; y < s->height; y++) {
-        const uint8_t *a = s_vresult + y * row, *c = guest + s->color_va + (size_t)y * s->pitch;
-        for (uint32_t x = 0; x < s->width; x++) {
-            uint32_t pa, pc;
-            memcpy(&pa, a + (size_t)x * 4, 4);
-            memcpy(&pc, c + (size_t)x * 4, 4);
-            if (pa != pc) {
-                bad++;
-                for (int k = 0; k < 4; k++) {
-                    int d = (int)((pa >> (8 * k)) & 255) - (int)((pc >> (8 * k)) & 255);
-                    if (d < 0) d = -d;
-                    if ((uint32_t)d > worst) worst = (uint32_t)d;
+    if (!s_shadow_cap) { gpu_call(s, b, clear_argb, &opt); return; }
+    GpuOpts cons = {0, 0, 0, 0, s_shadow};
+    if (!opt.resident) {
+        memcpy(s_shadow, opt.pix0, bytes);                     /* same starting pixels */
+        gpu_call(s, b, clear_argb, &opt);
+        gpu_call(s, b, clear_argb, &cons);
+        uint64_t bad = 0;
+        uint32_t worst = 0;
+        for (uint32_t y = 0; y < s->height; y++)
+            for (uint32_t x = 0; x < s->width; x++) {
+                uint32_t a, c;
+                memcpy(&a, opt.pix0 + (size_t)y * s->pitch + (size_t)x * 4, 4);
+                memcpy(&c, s_shadow + (size_t)y * s->pitch + (size_t)x * 4, 4);
+                if (a != c) {
+                    bad++;
+                    for (int k = 0; k < 4; k++) {
+                        int d = (int)((a >> (8 * k)) & 255) - (int)((c >> (8 * k)) & 255);
+                        if (d < 0) d = -d;
+                        if ((uint32_t)d > worst) worst = (uint32_t)d;
+                    }
                 }
             }
+        s_vstat.calls++;
+        if (bad) { s_vstat.bad_calls++; s_vstat.bad_pixels += bad; if (worst > s_vstat.worst) s_vstat.worst = worst; }
+    } else {
+        const int same = R.valid && R.va == s->color_va && R.pitch == s->pitch && R.w == s->width
+                         && R.h == s->height && R.pix0 == opt.pix0;
+        if (!same) {
+            resident_invalidate();                              /* compare and flush the old surface first */
+            memcpy(s_shadow, opt.pix0, bytes);                 /* the shadow starts from what the GPU will upload */
         }
+        gpu_call(s, b, clear_argb, &opt);
+        gpu_call(s, b, clear_argb, &cons);
     }
-    s_vstat.calls++;
-    if (bad) { s_vstat.bad_calls++; s_vstat.bad_pixels += bad; if (worst > s_vstat.worst) s_vstat.worst = worst; }
 }
 
 static void draw(const Nv2aSurface *s, const Nv2aBatch *b)
@@ -552,16 +797,17 @@ static void flip(void)
 {
     s_flips++;
     if (s_verify && s_flips % 30 == 0)
-        printf("[MH-DEKO-V] verified %llu calls: %llu differ, %llu pixels differ in total, largest channel difference %u (optimised vs conservative path)\n",
+        printf("[MH-DEKO-V] compared %llu: %llu differ, %llu pixels differ in total, largest channel difference %u (fast path vs conservative path)\n",
             (unsigned long long)s_vstat.calls, (unsigned long long)s_vstat.bad_calls,
             (unsigned long long)s_vstat.bad_pixels, s_vstat.worst);
     if (s_flips % 30 == 0 && (s_time.draws + s_time.clears)) {
         uint32_t n = s_time.draws + s_time.clears;
-        printf("[MH-DEKO-T] last 30 flips: %u draws %u clears; per call us: upload %llu build %llu gpu %llu readback %llu; textures total ms %llu; avg pixels %u (cached=%d rect=%d)\n",
-            s_time.draws, s_time.clears,
+        printf("[MH-DEKO-T] last 30 flips: %u draws %u clears %u syncs; per call us: upload %llu build %llu gpu %llu; readback total ms %llu; textures: decode total ms %llu hits %u misses %u; avg pixels %u (cached=%d rect=%d tcache=%d resident=%d)\n",
+            s_time.draws, s_time.clears, s_time.syncs,
             (unsigned long long)(ticks_to_us(s_time.prep) / n), (unsigned long long)(ticks_to_us(s_time.build) / n),
-            (unsigned long long)(ticks_to_us(s_time.gpu) / n), (unsigned long long)(ticks_to_us(s_time.readback) / n),
-            (unsigned long long)(ticks_to_us(s_time.tex) / 1000), s_time.pixels / n, s_read_cached, s_use_rect);
+            (unsigned long long)(ticks_to_us(s_time.gpu) / n), (unsigned long long)(ticks_to_us(s_time.readback) / 1000),
+            (unsigned long long)(ticks_to_us(s_time.tex) / 1000), s_time.tex_hits, s_time.tex_misses,
+            s_time.pixels / n, s_read_cached, s_use_rect, s_use_tcache, s_use_resident);
         memset(&s_time, 0, sizeof s_time);
     }
     if (s_flips <= 10 || s_flips % 60 == 0)
@@ -595,6 +841,10 @@ int manhunt_nv2a_deko3d_init(void)
         s_use_rect = !(e && *e == '0');
         e = getenv("MANHUNT_DEKO_CACHED");
         s_want_cached = !(e && *e == '0');
+        e = getenv("MANHUNT_DEKO_TCACHE");
+        s_use_tcache = !(e && *e == '0');
+        e = getenv("MANHUNT_DEKO_RESIDENT");
+        s_use_resident = !(e && *e == '0');
         e = getenv("MANHUNT_DEKO_VERIFY");
         s_verify = e && *e == '1';
         if (s_verify) printf("[MH-DEKO] VERIFY mode: every call runs twice and is compared (slow; timings are not representative)\n");
