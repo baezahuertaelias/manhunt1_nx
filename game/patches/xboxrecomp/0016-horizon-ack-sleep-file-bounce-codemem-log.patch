@@ -1,0 +1,164 @@
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -1649,7 +1649,15 @@
+         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
+                                + g_memory_offset) = GetTickCount();
+ 
++#if defined(__SWITCH__)
++        /* Horizon: Sleep(0) is svcSleepThread(-1), a yield with core migration
++         * that takes the kernel's global scheduler lock; in this never-sleeping
++         * loop it is a busy loop on the real kernel (Eden treats it as a no-op).
++         * A short real sleep instead (patch 0016). */
++        usleep(200);
++#else
+         Sleep(0);  /* yield; the waiter is spinning on another core */
++#endif
+     }
+     return 0;
+ }
+--- a/src/kernel/kernel_file.c
++++ b/src/kernel/kernel_file.c
+@@ -1261,7 +1261,73 @@
+     }
+     XBOX_TRACE(XBOX_LOG_FILE, "NtCreateFile: %s -> handle=%p", host_path, *FileHandle);
+     return STATUS_SUCCESS;
++}
++
++#if defined(__SWITCH__)
++/* Horizon (patch 0016): guest RAM is a code-memory view. File-system IPC
++ * buffers there are untested on a real console (they work in Eden), so file
++ * data goes through a plain heap buffer in 64 KiB pieces and is copied. */
++static ssize_t nx_read_bounce(int fd, void *dst, size_t len)
++{
++    enum { CHUNK = 65536 };
++    size_t done = 0;
++    size_t cap = len < CHUNK ? len : CHUNK;
++    char *tmp = cap ? (char *)malloc(cap) : NULL;
++    if (!tmp)
++        return len ? -1 : 0;
++    while (done < len) {
++        size_t want = len - done < cap ? len - done : cap;
++        ssize_t r = read(fd, tmp, want);
++        if (r < 0) {
++            if (done)
++                break;
++            free(tmp);
++            return -1;
++        }
++        if (r == 0)
++            break;
++        memcpy((char *)dst + done, tmp, (size_t)r);
++        done += (size_t)r;
++        if ((size_t)r < want)
++            break;
++    }
++    free(tmp);
++    return (ssize_t)done;
++}
++
++static ssize_t nx_write_bounce(int fd, const void *src, size_t len)
++{
++    enum { CHUNK = 65536 };
++    size_t done = 0;
++    size_t cap = len < CHUNK ? len : CHUNK;
++    char *tmp = cap ? (char *)malloc(cap) : NULL;
++    if (!tmp)
++        return len ? -1 : 0;
++    while (done < len) {
++        size_t want = len - done < cap ? len - done : cap;
++        memcpy(tmp, (const char *)src + done, want);
++        ssize_t w = write(fd, tmp, want);
++        if (w < 0) {
++            if (done)
++                break;
++            free(tmp);
++            return -1;
++        }
++        if (w == 0)
++            break;
++        done += (size_t)w;
++        if ((size_t)w < want)
++            break;
++    }
++    free(tmp);
++    return (ssize_t)done;
+ }
++#define NX_READ(fd, buf, len)  nx_read_bounce((fd), (buf), (len))
++#define NX_WRITE(fd, buf, len) nx_write_bounce((fd), (buf), (len))
++#else
++#define NX_READ(fd, buf, len)  read((fd), (buf), (len))
++#define NX_WRITE(fd, buf, len) write((fd), (buf), (len))
++#endif
+ 
+ NTSTATUS __stdcall xbox_NtReadFile(
+     HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext,
+@@ -1282,7 +1348,7 @@
+     if (ByteOffset && ByteOffset->QuadPart >= 0)
+         lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
+ 
+-    ssize_t n = read(fd, Buffer, Length);
++    ssize_t n = NX_READ(fd, Buffer, Length);
+     if (n < 0) {
+         XBOX_TRACE(XBOX_LOG_FILE, "NtReadFile(handle=%p) errno=%d", FileHandle, errno);
+         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
+@@ -1319,7 +1385,7 @@
+     if (ByteOffset && ByteOffset->QuadPart >= 0)
+         lseek(fd, (off_t)ByteOffset->QuadPart, SEEK_SET);
+ 
+-    ssize_t n = write(fd, Buffer, Length);
++    ssize_t n = NX_WRITE(fd, Buffer, Length);
+     if (n < 0) {
+         XBOX_TRACE(XBOX_LOG_FILE, "NtWriteFile(handle=%p) errno=%d", FileHandle, errno);
+         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
+--- a/src/platform/win32_compat_horizon.inc
++++ b/src/platform/win32_compat_horizon.inc
+@@ -16,6 +16,19 @@
+ static hz_mapping s_mapping[HZ_MAX_MAP];
+ static uint64_t s_res_id;
+ static pthread_mutex_t s_hz_lock = PTHREAD_MUTEX_INITIALIZER;
++
++/* Patch 0016: every code-memory create/map result is logged (the kernel has
++ * only 10 KCodeMemory slab entries for the whole console; Eden has no limit),
++ * with the number of live objects. The first 48 are always shown, failures always. */
++static int s_hz_live, s_hz_logged;
++static void hz_log_result(const char *what, size_t size, Result r)
++{
++    if (R_FAILED(r) || s_hz_logged < 48) {
++        s_hz_logged++;
++        fprintf(stderr, "  [HZ] %s %zu KB -> 0x%08x (live code-memory objects %d)\n",
++                what, size >> 10, (unsigned)r, s_hz_live);
++    }
++}
+ 
+ static void hz_broken(const char *why)
+ {
+@@ -109,13 +122,19 @@
+     b->src = aligned_alloc(HZ_PAGE, size);
+     if (!b->src) { free(b); return NULL; }
+     memset(b->src, 0, size);
+-    if (R_FAILED(svcCreateCodeMemory(&b->h, b->src, size))) { free(b->src); free(b); return NULL; }
++    Result cr = svcCreateCodeMemory(&b->h, b->src, size);
++    if (R_FAILED(cr)) { hz_log_result("create FAILED", size, cr); free(b->src); free(b); return NULL; }
++    s_hz_live++;
++    hz_log_result("create", size, cr);
+     return b;
+ }
+ 
+ static int hz_map(hz_backing *b, uintptr_t a)
+ {
+-    if (b->mapped || R_FAILED(svcControlCodeMemory(b->h, CodeMapOperation_MapOwner, (void *)a, b->size, Perm_Rw))) return 0;
++    if (b->mapped) return 0;
++    Result mr = svcControlCodeMemory(b->h, CodeMapOperation_MapOwner, (void *)a, b->size, Perm_Rw);
++    hz_log_result(R_FAILED(mr) ? "map FAILED" : "map", b->size, mr);
++    if (R_FAILED(mr)) return 0;
+     b->mapped = a;
+     return 1;
+ }
+@@ -132,6 +151,7 @@
+     if (!b) return;
+     if (b->mapped) hz_broken("free of a live owner view");
+     if (R_FAILED(svcCloseHandle(b->h))) hz_broken("close backing handle");
++    s_hz_live--;
+     free(b->src); free(b);
+ }
+ 

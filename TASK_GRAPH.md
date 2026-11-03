@@ -87,7 +87,9 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 
 | LEVEL-SPAWN-PROOF-001 | done | lead | INPUT-NAV-001, RENDER-MENU-BACKEND-001, HZ-TIME-001 | Switch scene plus original player-class/render-frame spawn proof; read-only diagnostics, expected watchdog stop separate from crash; independent review |
 | ICALL-NULL-001 | done | re | LEVEL-LOAD-001 | Explain the skipped null indirect call (call #109186 at about 10 s); faithful fix or documented harmless behaviour | Revert game/ change |
-| HW-SWITCH-001 | ready | user | LEVEL-LOAD-001 | Physical-Switch run: menu, first level, real-controller control test, real FPS; evidence returned from the SD card | n/a (measurement) |
+| HW-SWITCH-001 | in_progress | user | LEVEL-LOAD-001 | Physical-Switch run: menu, first level, real-controller control test, real FPS; evidence returned from the SD card. 2026-11-02: boots and draws the legal screen (reports/HW_SWITCH_FIRST_RUN.md) | n/a (measurement) |
+| HW-NATIVE-001 | done | runtime | HW-SWITCH-001 | Native (no Docker) macOS NRO build script | Delete the script |
+| HW-FREEZE-001 | in_progress | runtime | HW-SWITCH-001 | Console freeze ~2 s after the first file open: isolate which of patch 0016's changes mattered | Revert branch; delete patches 0015/0016 |
 | HW-LOG-001 | done | runtime | LEVEL-LOAD-001 | Optional MANHUNT_LOG_FILE so hardware runs return text logs (stdout/stderr are debug-channel only today); default off | Revert main_switch.c |
 | ICALL-NULL-002 | ready | re | ICALL-NULL-001 | Explain the second null indirect call at guest 0x00222AF1 (late in host runs); faithful fix or documented harmless behaviour | Revert game/ change |
 | CFG-LINE-001 | done | runtime | HW-LOG-001 | Switch config reader: 4095-byte lines, over-long lines rejected visibly instead of silently truncated | Revert config_init |

@@ -18,7 +18,7 @@ Rerun with `scripts/switch-boot-proof.sh`. Details: [reports/FEASIBILITY.md](rep
 | No crash/exit during the run | PASS (240 s): no crash/exit line in the guest log, no fault reported by Eden, presents still increasing at the end | `scripts/switch-boot-proof.sh` |
 | Audio | NOT IMPLEMENTED: DirectSound reports "no driver" by design | `game/src/dsound_hle.c` |
 | Input-driven menu navigation | PASS in Eden: PLAY → BONUS FEATURES after scripted UP; independently viewed | [INPUT_NAVIGATION.md](reports/INPUT_NAVIGATION.md) |
-| Real Switch hardware | UNVERIFIED — no hardware | — |
+| Real Switch hardware | PARTIAL (2026-11-02, one console): boots, loads data files and draws the original legal/title screen; the run was ended at about 5 s by a diagnostic watchdog. Menu, level load, control, frame rate, audio, stability: UNVERIFIED | [reports/HW_SWITCH_FIRST_RUN.md](reports/HW_SWITCH_FIRST_RUN.md) |
 
 ## Milestone 1 gates (toolchain proof)
 
