@@ -6,6 +6,8 @@ Purpose: continue the port on a **Mac running macOS Sonoma** with a **modded (cu
 
 ## 0. Verified workflow (executed 2026-11-02, one Mac and one console)
 
+One command does steps 4 to 8: `SWITCH_IP=<console ip> scripts/hw-run.sh [--profile] [--extra KEY=VALUE]` (see its header; `--dry-run` shows the plan and refuses configs that would waste a run). It uploads at a slow rate because Sphaira's FTP drops fast transfers, under a temporary name that is renamed only after a SHA-256 read-back, then waits for you to launch and close the game and writes a `summary.md` (facts only) in `game/build/hw-test/<date>/run-<time>/`. The manual steps follow.
+
 1. **Prerequisites on the Mac:** devkitPro in `/opt/devkitpro` (`switch-dev`, `deko3d`, `uam`, `switch-tools`), `cmake`, `make`, `git`, `patch`, `python3`. No Docker.
 2. **Game files:** copy your lawful files to `assets/manhunt1_xbe/` (gitignored). `DEFAULT.xbe` SHA-256 must be `af69e803695e29c3f99b38d6a759fac4c9300c9a540a2c244e4e7a07fb96afde`.
 3. **Build the NRO:** `scripts/game-build-native.sh` (section 5a). Output: `game/build/switch/manhunt.nro` (game-derived: never commit or share).

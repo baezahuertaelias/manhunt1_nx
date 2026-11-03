@@ -79,6 +79,23 @@ void sub_002A01D2(void)
         return;
     }
     manhunt_pad_sample(&pad);
+    {
+        /* Evidence for hardware runs: how often the title polls and what it is
+         * handed. First polls, every change, and a heartbeat every 50th poll. */
+        static uint32_t polls, logged;
+        static uint16_t last_btn;
+        static unsigned last_an;
+        unsigned an = 0;
+        for (i = 0; i < 8; i++)
+            if (pad.analog[i]) an |= 1u << i;
+        polls++;
+        if (logged < 400 && (polls <= 5 || pad.buttons != last_btn || an != last_an || polls % 50 == 0)) {
+            logged++;
+            printf("[MH-INPUT] poll #%u delivered buttons=0x%04x analog=0x%02x\n", polls, pad.buttons, an);
+        }
+        last_btn = pad.buttons;
+        last_an = an;
+    }
     MEM32(state + 0) = ++s_packet;
     MEM16(state + 4) = pad.buttons;
     for (i = 0; i < 8; i++)

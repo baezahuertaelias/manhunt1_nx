@@ -90,6 +90,9 @@ Reference analysis: [reports/MODDING_REFERENCES.md](reports/MODDING_REFERENCES.m
 | HW-SWITCH-001 | in_progress | user | LEVEL-LOAD-001 | Physical-Switch run: menu, first level, real-controller control test, real FPS; evidence returned from the SD card. 2026-11-02: boots and draws the legal screen (reports/HW_SWITCH_FIRST_RUN.md) | n/a (measurement) |
 | HW-NATIVE-001 | done | runtime | HW-SWITCH-001 | Native (no Docker) macOS NRO build script | Delete the script |
 | HW-FREEZE-001 | in_progress | runtime | HW-SWITCH-001 | Console freeze ~2 s after the first file open: isolate which of patch 0016's changes mattered | Revert branch; delete patches 0015/0016 |
+| HW-INPUT-001 | done | runtime | HW-SWITCH-001 | Controller drives the main menu on the console (pad latch, hold polls, poll logging) | `MANHUNT_PAD_LATCH=0` / revert |
+| HW-TOOLS-001 | done | runtime | HW-NATIVE-001 | `scripts/hw-run.sh` and `scripts/hw-summarize.py`: one command per hardware cycle | Delete the scripts |
+| HW-PERF-001 | ready | runtime | HW-INPUT-001 | Rendering speed on the console: audit then try the deko3d backend; profile the CPU rasteriser | Keep the CPU renderer |
 | HW-LOG-001 | done | runtime | LEVEL-LOAD-001 | Optional MANHUNT_LOG_FILE so hardware runs return text logs (stdout/stderr are debug-channel only today); default off | Revert main_switch.c |
 | ICALL-NULL-002 | ready | re | ICALL-NULL-001 | Explain the second null indirect call at guest 0x00222AF1 (late in host runs); faithful fix or documented harmless behaviour | Revert game/ change |
 | CFG-LINE-001 | done | runtime | HW-LOG-001 | Switch config reader: 4095-byte lines, over-long lines rejected visibly instead of silently truncated | Revert config_init |

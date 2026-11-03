@@ -27,6 +27,18 @@ static int s_fb_state;                 /* 0 untried, 1 ready, -1 unavailable */
 static volatile uint32_t s_last_va, s_last_pitch;
 static volatile uint64_t s_presents;
 
+/* Complete-frame snapshot for the periodic BMP dump (MANHUNT_DUMP_SECS > 0).
+ * The CPU rasteriser draws into the very surface that is presented, so reading it
+ * from the dump thread captures half-drawn frames (a black band where the menu
+ * entries should be). Each present therefore copies the finished surface into one
+ * of two buffers; the dump reads the last complete one. Off unless dumps are on. */
+static uint8_t *s_snap[2];
+static size_t s_snap_cap;
+static uint32_t s_snap_pitch, s_snap_va_h;
+static int s_snap_idx = -1;            /* last complete buffer, guarded by s_snap_lock for readers/flip */
+static int s_snap_enabled = -1;
+static Mutex s_snap_lock;
+
 static const uint8_t *guest_ptr(uint32_t va)
 {
     return (const uint8_t *)((uintptr_t)g_xbox_mem_offset + va);
@@ -54,6 +66,34 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     if (s_presents == 1 || s_presents % 60 == 0)
         printf("[MH-FRAME] present %llu surface=0x%08X pitch=%u\n",
                (unsigned long long)s_presents, fb_va, pitch);
+
+    if (s_snap_enabled < 0) {
+        const char *e = getenv("MANHUNT_DUMP_SECS");
+        mutexInit(&s_snap_lock);
+        s_snap_enabled = (e && atoi(e) > 0) ? 1 : 0;
+    }
+    if (s_snap_enabled && pitch) {
+        uint32_t sw, sh;
+        surface_dims(pitch, &sw, &sh);
+        size_t sz = (size_t)pitch * sh;
+        if (sz > s_snap_cap) {
+            free(s_snap[0]);
+            free(s_snap[1]);
+            s_snap[0] = malloc(sz);
+            s_snap[1] = malloc(sz);
+            s_snap_cap = (s_snap[0] && s_snap[1]) ? sz : 0;
+            s_snap_idx = -1;
+        }
+        if (s_snap_cap >= sz) {
+            int next = s_snap_idx < 0 ? 0 : s_snap_idx ^ 1;
+            memcpy(s_snap[next], guest_ptr(fb_va), sz);
+            mutexLock(&s_snap_lock);
+            s_snap_pitch = pitch;
+            s_snap_va_h = sh;
+            s_snap_idx = next;
+            mutexUnlock(&s_snap_lock);
+        }
+    }
 
     if (s_fb_state == 0) {
         s_fb_state = R_SUCCEEDED(framebufferCreate(&s_fb, nwindowGetDefault(), SCREEN_W, SCREEN_H,
@@ -88,8 +128,22 @@ int xbox_FramebufferDumpBmp(const char *prefix)
     uint32_t va = s_last_va, pitch = s_last_pitch, w, h, y;
     char path[256];
     FILE *f;
+    uint8_t *snap = NULL;
+    int complete = 0;
     if (!va || !pitch)
         return 0;
+    /* Prefer the last complete presented frame (see s_snap above). */
+    if (s_snap_enabled > 0) {
+        mutexLock(&s_snap_lock);
+        if (s_snap_idx >= 0 && s_snap_pitch) {
+            size_t sz = (size_t)s_snap_pitch * s_snap_va_h;
+            snap = malloc(sz);
+            if (snap)
+                memcpy(snap, s_snap[s_snap_idx], sz);
+            pitch = s_snap_pitch;
+        }
+        mutexUnlock(&s_snap_lock);
+    }
     surface_dims(pitch, &w, &h);
     snprintf(path, sizeof path, "%s%05d.bmp", prefix, seq++);
     f = fopen(path, "wb");
@@ -106,14 +160,16 @@ int xbox_FramebufferDumpBmp(const char *prefix)
     uint8_t *line = malloc(row + pad);
     memset(line, 0, row + pad);
     for (y = 0; y < h; y++) {                       /* bottom-up */
-        const uint8_t *src = guest_ptr(va + (h - 1 - y) * pitch);
+        const uint8_t *src = snap ? snap + (size_t)(h - 1 - y) * pitch : guest_ptr(va + (h - 1 - y) * pitch);
         for (uint32_t x = 0; x < w; x++)
             memcpy(line + x * 3, src + x * 4, 3);   /* B,G,R */
         fwrite(line, 1, row + pad, f);
     }
     free(line);
+    complete = snap != NULL;
+    free(snap);
     fclose(f);
-    printf("[MH-FRAME] dump %s (presents=%llu)\n", path, (unsigned long long)s_presents);
+    printf("[MH-FRAME] dump %s (presents=%llu%s)\n", path, (unsigned long long)s_presents, complete ? ", complete frame" : ", live surface");
     return 1;
 }
 
