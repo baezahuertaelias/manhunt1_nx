@@ -794,8 +794,11 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
     GpuOpts cons = {0, 0, 0, 0, s_shadow, 1};   /* its own GPU resources: it must never touch the resident image */
     if (!opt.resident) {
         memcpy(s_shadow, opt.pix0, bytes);                     /* same starting pixels */
-        gpu_call(s, b, clear_argb, &opt);
+        /* The conservative pass runs first: the optimised one writes guest RAM, and a texture that lies
+         * inside the surface being drawn (render-to-texture feedback) must be decoded from the same
+         * pre-draw RAM by both. */
         gpu_call(s, b, clear_argb, &cons);
+        gpu_call(s, b, clear_argb, &opt);
         uint64_t bad = 0;
         uint32_t worst = 0;
         for (uint32_t y = 0; y < s->height; y++)

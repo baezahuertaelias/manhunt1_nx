@@ -79,3 +79,9 @@ Procedure: [MACOS_SWITCH_SETUP.md](MACOS_SWITCH_SETUP.md) section 0. A hardware 
 - `scripts/check-false-entries.py` flags detected function starts that fall inside an instruction.
 - `MANHUNT_MIRROR_TRAP=1` / `MANHUNT_TILED_TRAP=1` make the aliasing ranges inaccessible, to prove a code path does not use them.
 
+
+## Deko adapter host differential and mutation test (`tests/deko-adapter/run.sh`)
+
+Runs the real `game/src/nv2a_deko3d.c` against a software deko3d stand-in on the host and compares guest memory with a conservative reference (all optimisations off) over random seeds. Covers RECT/CACHED/TCACHE/RESIDENT on and off, the in-adapter verify mode, a negative control (sync withheld, must differ), and 8 planted bugs (M1-M8) that must each be caught.
+Result 2026-11-02, 12 seeds: all configurations pass, all 8 mutants killed. A verify-mode false positive was a test-harness ordering flaw (optimised pass wrote guest RAM before the conservative pass read the same texture); the conservative pass now runs first.
+Limits: the stand-in is not the real GPU, so this does not prove Switch behaviour. Hardware pixel identity stays UNVERIFIED until the `MANHUNT_DEKO_VERIFY=1` run on the console.
