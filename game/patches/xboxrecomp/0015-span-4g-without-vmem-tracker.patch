@@ -1,0 +1,28 @@
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -271,6 +271,16 @@
+     if (!getenv("RECOMP_EXT_VMA") || mirror_top >= GUEST_VMEM_TOP)
+         return 0;
+     return GUEST_VMEM_TOP - mirror_top;
++}
++
++/* RECOMP_SPAN_4G: hold the whole 4 GB guest window as the span, like
++ * RECOMP_EXT_VMA does, but leave the guest_vmem page tracker off. On Horizon
++ * the window's top (NV2A/MCPX/flash apertures at 0xFD000000 and up) otherwise
++ * lands in the libnx heap; RECOMP_EXT_VMA fixes that but also routes every
++ * title allocation through the per-page tracker. */
++static int span_4g(uint64_t mirror_top)
++{
++    return getenv("RECOMP_SPAN_4G") && mirror_top < GUEST_VMEM_TOP;
+ }
+ 
+ /* Map a view of `mapping` at a fixed host address. On Windows, inside the
+@@ -2631,7 +2641,7 @@
+          * instead. Each fixed window is carved out of the span as it is
+          * mapped, and guest_vmem's range is handed over just before
+          * guest_vmem_init. Off by default; the stock span is unchanged. */
+-        if (ext_vma_span(g_span_size)) {
++        if (ext_vma_span(g_span_size) || span_4g(g_span_size)) {
+             g_span_size = (size_t)1 << 32;
+             g_span_whole_window = 1;
+         }

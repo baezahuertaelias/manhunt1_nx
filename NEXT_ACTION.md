@@ -1,6 +1,6 @@
 # Next action
 
-**HW-SWITCH-001** (P1, owner: user): run the in-level build on a physical homebrew-capable Switch with your own game files and a real controller, following [docs/MACOS_SWITCH_SETUP.md](docs/MACOS_SWITCH_SETUP.md), and return the SD-card log (`MANHUNT_LOG_FILE`) and frames. Eden is too slow to confirm the Switch build's cinematic-to-gameplay hand-over: a 111-minute Eden run was still in the cinematic ([reports/LEVEL_LOAD.md](reports/LEVEL_LOAD.md), "Long Eden run"), while the host build hands control to the player after about 28 minutes of wall time and then responds to the stick ("Host probe"). No further long Eden runs are planned.
+**HW-FREEZE-001 / HW-SWITCH-001** (P0, owner: user + runtime): rerun the current NRO on the physical Switch **without** `RECOMP_WATCHDOG_SECS` in `sdmc:/switch/manhunt1_nx/manhunt.env` and see whether the game leaves the legal screen (first run: it drew that screen on hardware, then a diagnostic watchdog ended it at about 5 s; [reports/HW_SWITCH_FIRST_RUN.md](reports/HW_SWITCH_FIRST_RUN.md)). Then isolate which of patch 0016's three changes removed the earlier console freeze. Menu, level load, controller and FPS on hardware remain UNVERIFIED; setup is in [docs/MACOS_SWITCH_SETUP.md](docs/MACOS_SWITCH_SETUP.md).
 
 Without hardware, the next engineering work is, in order:
 1. **ICALL-NULL-002** (P2): the second null indirect call (guest 0x00222AF1) late in host runs.

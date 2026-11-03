@@ -63,23 +63,24 @@ Mount the card (called `SDCARD` below), then:
 ```sh
 SD=/Volumes/SDCARD
 mkdir -p "$SD/switch/manhunt" "$SD/manhunt"
-cp game/build/switch/manhunt.nro "$SD/switch/manhunt/manhunt.nro"
-cp -R assets/manhunt1_xbe/. "$SD/manhunt/"          # becomes sdmc:/manhunt/DEFAULT.xbe etc.
-cp docs/hardware/manhunt.env.example "$SD/manhunt.env"   # see 3.3 (created by this branch)
+mkdir -p "$SD/switch/manhunt1_nx"
+cp game/build/switch/manhunt.nro "$SD/switch/manhunt1_nx/manhunt.nro"
+cp -R assets/manhunt1_xbe/. "$SD/switch/manhunt1_nx/"   # becomes sdmc:/switch/manhunt1_nx/DEFAULT.xbe etc.
+cp docs/hardware/manhunt.env.example "$SD/switch/manhunt1_nx/manhunt.env"   # see 3.3
 dot_clean -m "$SD"                                   # remove macOS ._* sidecar files
 diskutil eject "$SD"
 ```
 
-The runtime reads game data from `sdmc:/manhunt/` (`DEFAULT.xbe` plus the disc folders, `game/src/main_switch.c`). Saves go to `sdmc:/manhunt-save/` and frame dumps to `sdmc:/manhunt-frames/`. The Linux `switch-boot-proof.sh` stages data the same way for Eden.
+The runtime reads game data from `sdmc:/switch/manhunt1_nx/` (`DEFAULT.xbe` plus the disc folders, `game/src/main_switch.c`). Saves go to its `save/` subfolder and frame dumps to `frames/`. Older notes and the Eden scripts used `sdmc:/manhunt/`; build with `-DMANHUNT_SD_BASE=...` for another base.
 
-### 3.3 Config file `sdmc:/manhunt.env`
+### 3.3 Config file `sdmc:/switch/manhunt1_nx/manhunt.env`
 
 `docs/hardware/manhunt.env.example` is a copy-ready file. Its keys, all of which were used in the Eden runs:
 
 ```
 MANHUNT_DUMP_SECS=5
 MANHUNT_GPU_BACKEND=1
-MANHUNT_LOG_FILE=sdmc:/manhunt-log.txt
+MANHUNT_LOG_FILE=sdmc:/switch/manhunt1_nx/log.txt
 RECOMP_PB_REPORT_MS=10000
 RECOMP_PEEK=0x4004A0
 RECOMP_PEEK_CHAIN=0x4004A0,0x80,4,0x40
@@ -123,8 +124,8 @@ Write down the wall-clock time of each step (a phone stopwatch is enough).
 
 Copy these from the SD card into `game/build/hw-test/<date>/` in the Mac clone (that path is gitignored):
 
-- `sdmc:/manhunt-frames/` (the `fb*.bmp` frame dumps, every 5 s),
-- `sdmc:/manhunt-log.txt` (the text log, section 4),
+- `sdmc:/switch/manhunt1_nx/frames/` (the `fb*.bmp` frame dumps, every 5 s),
+- `sdmc:/switch/manhunt1_nx/log.txt` (the text log, section 4),
 - Atmosphère crash reports, if the application crashed (typically `sdmc:/atmosphere/crash_reports/`),
 - your step-by-step notes and the firmware/Atmosphère versions.
 
@@ -136,7 +137,7 @@ By default the runtime sends all `printf`/`stderr` output only to `svcOutputDebu
 
 Executed in Eden only (three 70 s runs): with the key set the file is created with the boot lines first and 1,457 lines in 70 s; with the key absent no file is created; with `/tmp/x.txt` the failure line appears and no file is created. **Behaviour on a physical console is UNVERIFIED.** The file is truncated at every start, so copy the previous log off the card first. Lines are flushed but not fsync'ed, so a hard power loss or crash may lose the last lines. A failed write (SD full or removed) stops the file log with a note on the debug channel only. Expect one SD write per log line while it is enabled, all threads sharing one lock, so a heavy logging moment may slow the game slightly; turn the key off if pacing is what you are measuring (step 6 of the test).
 
-Check on the console after the first run: `sdmc:/manhunt-log.txt` exists and its first lines are `[MH-BOOT] start (Horizon) game_dir=sdmc:/manhunt` and the `config` lines. If it is missing, the key was not read: check the file name `sdmc:/manhunt.env` and that it has `KEY=VALUE` lines.
+Check on the console after the first run: `sdmc:/switch/manhunt1_nx/log.txt` exists and its first lines are `[MH-BOOT] start (Horizon) game_dir=sdmc:/switch/manhunt1_nx` and the `config` lines. If it is missing, the key was not read: check the file name `sdmc:/manhunt.env` and that it has `KEY=VALUE` lines.
 
 ## 5. Path B: full development host on macOS (UNVERIFIED)
 
