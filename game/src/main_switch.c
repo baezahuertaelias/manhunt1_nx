@@ -19,6 +19,8 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <sys/select.h>
+#include <sys/time.h>
 #include <stdarg.h>
 #include <stdalign.h>
 #include <netinet/in.h>
@@ -140,10 +142,16 @@ static volatile uint32_t s_log_lines;     /* log lines written so far (watchdog 
 
 static void nx_send(const char *line, size_t len)
 {
-    if (s_nx_sock >= 0) {
-        if (write(s_nx_sock, line, len) < 0 || write(s_nx_sock, "\n", 1) < 0)
-            s_nx_sock = -1;               /* PC gone: stop trying */
-    }
+    int fd = s_nx_sock;
+    char b[1024];
+    if (fd < 0)
+        return;
+    if (len > sizeof b - 1)
+        len = sizeof b - 1;
+    memcpy(b, line, len);                 /* one write per line: lines do not interleave */
+    b[len++] = '\n';
+    if (write(fd, b, len) < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+        s_nx_sock = -1;                   /* PC gone: stop trying. A full buffer (EAGAIN) drops the line. */
 }
 
 /* MANHUNT_LOG_TCP=<ip>:<port>: stream every log line (and the watchdog ticks)
@@ -163,10 +171,31 @@ static void tcp_log_connect(void)
     a.sin_port = htons((unsigned short)atoi(colon + 1));
     if (inet_pton(AF_INET, ip, &a.sin_addr) != 1)
         return;
+    if (R_FAILED(socketInitializeDefault()))
+        return;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
         return;
-    if (connect(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+    /* Non-blocking connect with a 2 s limit so an unreachable listener cannot
+     * stall boot, and non-blocking sends so a stalled listener cannot stall the
+     * game (a diagnostic must not be able to cause a freeze). */
+    int fl = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    int rc = connect(fd, (struct sockaddr *)&a, sizeof a);
+    if (rc != 0 && errno == EINPROGRESS) {
+        fd_set w;
+        struct timeval tv = {2, 0};
+        FD_ZERO(&w);
+        FD_SET(fd, &w);
+        if (select(fd + 1, NULL, &w, NULL, &tv) == 1) {
+            int err = 0;
+            socklen_t el = sizeof err;
+            rc = (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0) ? 0 : -1;
+        } else {
+            rc = -1;
+        }
+    }
+    if (rc != 0) {
         close(fd);
         return;
     }
@@ -202,10 +231,8 @@ static const devoptab_t s_debug_devoptab = {
 static void log_init(void)
 {
     mutexInit(&s_log_lock);
-    socketInitializeDefault();
-    if (__nxlink_host.s_addr)             /* started by nxlink: keep its stream */
-        s_nx_sock = nxlinkStdio();
-    /* tcp_log_connect() runs in config phase: the env file is not read yet */
+    /* Sockets are initialised only when needed (nxlink or MANHUNT_LOG_TCP), in
+     * main() after the env file is read. */
     devoptab_list[STD_OUT] = &s_debug_devoptab;
     devoptab_list[STD_ERR] = &s_debug_devoptab;
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -318,7 +345,7 @@ static void wd_dump(void)
     }
 }
 
-static void *wd_main(void *unused)
+static void wd_main(void *unused)
 {
     uint32_t last = s_log_lines;
     int stale = 0, ticks = 0;
@@ -348,7 +375,6 @@ static void *wd_main(void *unused)
         }
         last = now;
     }
-    return NULL;
 }
 
 static void wd_start(void)
@@ -369,7 +395,7 @@ static void wd_start(void)
     static Thread wd_thread;
     static const int prios[] = {0x10, 0x18, 0x20, 0x2B};
     for (unsigned i = 0; i < sizeof prios / sizeof prios[0]; i++) {
-        if (R_SUCCEEDED(threadCreate(&wd_thread, (ThreadFunc)wd_main, NULL, NULL, 0x10000, prios[i], -2))
+        if (R_SUCCEEDED(threadCreate(&wd_thread, wd_main, NULL, NULL, 0x10000, prios[i], -2))
             && R_SUCCEEDED(threadStart(&wd_thread))) {
             wd_line("[MH-WD] thread priority 0x%x", prios[i]);
             return;
@@ -412,7 +438,8 @@ static void on_sigabrt(int sig)
  * was (offsets are relative to the NRO's load address: use
  * aarch64-none-elf-addr2line -e game/build/switch/manhunt.elf) to every log
  * channel without taking s_log_lock (the faulting thread may hold it), then
- * ends the process. Compare Atmosphere's crash_reports in sdmc:/atmosphere. */
+ * ends the process. Because the handler ends the process itself, libnx's default
+ * path (and with it an Atmosphere crash report for this process) does not run. */
 alignas(16) u8 __nx_exception_stack[0x8000];
 u64 __nx_exception_stack_size = sizeof __nx_exception_stack;
 u32 __nx_exception_ignoredebug = 1;
@@ -422,9 +449,17 @@ static void crash_line(const char *line, size_t len)
     svcOutputDebugString(line, len);
     nx_send(line, len);
     if (s_logfp) {
-        fwrite(line, 1, len, s_logfp);
-        fputc('\n', s_logfp);
-        fflush(s_logfp);
+        /* Raw write on the descriptor: fwrite/fflush would take the FILE lock,
+         * which the faulting thread may hold. Lines are already flushed per
+         * line by log_file_line(), so the descriptor is current. */
+        char b[256];
+        if (len > sizeof b - 1)
+            len = sizeof b - 1;
+        memcpy(b, line, len);
+        b[len++] = '\n';
+        int fd = fileno(s_logfp);
+        if (fd >= 0)
+            write(fd, b, len);
     }
 }
 
@@ -469,7 +504,7 @@ void __libnx_exception_handler(ThreadExceptionDump *d)
     }
     if (s_logfp)
         fsync(fileno(s_logfp));
-    svcExitProcess();
+    svcExitProcess();                     /* replaces libnx's default; no Atmosphere crash report is made for this process */
 }
 
 /* ---- configuration ------------------------------------------------------ */
@@ -617,6 +652,8 @@ int main(void)
     log_init();
     printf("[MH-BOOT] start (Horizon) game_dir=%s\n", GAME_DIR);
     config_init();
+    if (__nxlink_host.s_addr && R_SUCCEEDED(socketInitializeDefault()))
+        s_nx_sock = nxlinkStdio();        /* started by "nxlink -s": keep its stream */
     tcp_log_connect();
     log_file_init();
     wd_register("main");
