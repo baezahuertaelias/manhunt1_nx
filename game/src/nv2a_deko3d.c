@@ -200,6 +200,15 @@ static int s_shaders_ready;
 static uint32_t *s_scratch;
 static size_t s_scratch_cap;
 static int s_read_cached = 1;
+/* Bisect switches (config only, no rebuild): MANHUNT_DEKO_RECT=0 transfers the whole
+ * surface for every draw (rectangle logic off); MANHUNT_DEKO_CACHED=0 uses the old
+ * uncached transfer buffer (cache logic off). Both default on. */
+static int s_use_rect = 1, s_want_cached = 1;
+/* Phase timing (armGetSystemTick, 19.2 MHz): accumulated per execute() call and
+ * printed with the flip statistics, so one run shows what dominates after the fix. */
+typedef struct { uint64_t prep, build, gpu, readback, tex; uint32_t draws, clears, pixels; } DekoTime;
+static DekoTime s_time;
+static uint64_t ticks_to_us(uint64_t t) { return t * 1000000ull / 19200000ull; }
 
 static int ensure(DkMemBlock *blk, uint32_t *cap, uint32_t need, uint32_t flags)
 {
@@ -213,14 +222,14 @@ static int ensure(DkMemBlock *blk, uint32_t *cap, uint32_t need, uint32_t flags)
 
 /* The transfer buffer: CPU-cached for fast loops; if the device refuses that
  * combination, fall back to the old uncached buffer (slow, still correct). */
-static int ensure_read(uint32_t need)
+static int ensure_read(uint32_t need, int want_cached)
 {
-    if (s_read_mem && s_read_cap >= need) return 1;
+    if (s_read_mem && s_read_cap >= need && s_read_cached == want_cached) return 1;
     if (s_read_mem) { dkMemBlockDestroy(s_read_mem); s_read_mem = NULL; s_read_cap = 0; }
-    s_read_mem = memory(need, DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuUncached);
+    s_read_mem = want_cached ? memory(need, DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuUncached) : NULL;
     s_read_cached = s_read_mem != NULL;
     if (!s_read_mem) {
-        printf("[MH-DEKO] cached transfer buffer unavailable: using the uncached one (slow)\n");
+        if (want_cached) printf("[MH-DEKO] cached transfer buffer unavailable: using the uncached one (slow)\n");
         s_read_mem = memory(need, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached);
     }
     if (!s_read_mem) return 0;
@@ -255,13 +264,16 @@ static void release_resources(void)
     s_scratch_cap = 0;
 }
 
-static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_argb)
+static void execute_with(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_argb,
+                         int use_rect, int want_cached)
 {
     DkCmdBuf cmd = NULL;
     int ok = 0;
     uint32_t w = s->width, h = s->height;
     uint8_t *guest = (uint8_t *)xbox_GetMemoryOffset();
     uint32_t x0 = 0, y0 = 0, x1 = w, y1 = h;       /* the rectangle uploaded, drawn and read back */
+    const uint64_t t_start = armGetSystemTick();
+    uint64_t t_after_prep = t_start, t_after_gpu = t_start;
 
     if (b) {
         if (!b->count || b->count > MAX_VERTICES || b->count % 3 || !b->diffuse_float
@@ -283,7 +295,7 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
         float fx0 = fmaxf(0.f, floorf(minx) - 2.f), fy0 = fmaxf(0.f, floorf(miny) - 2.f);
         float fx1 = fminf((float)w, ceilf(maxx) + 2.f), fy1 = fminf((float)h, ceilf(maxy) + 2.f);
         if (fx1 <= fx0 || fy1 <= fy0) { ok = 1; goto done; }   /* nothing inside the surface */
-        x0 = (uint32_t)fx0; y0 = (uint32_t)fy0; x1 = (uint32_t)fx1; y1 = (uint32_t)fy1;
+        if (use_rect) { x0 = (uint32_t)fx0; y0 = (uint32_t)fy0; x1 = (uint32_t)fx1; y1 = (uint32_t)fy1; }
     }
     const uint32_t rw = x1 - x0, rh = y1 - y0, rbytes = rw * rh * 4;
 
@@ -297,7 +309,7 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
     if (!ensure(&s_image_mem, &s_image_cap,
                 aligned(dkImageLayoutGetSize(&layout), dkImageLayoutGetAlignment(&layout)),
                 DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image)
-        || !ensure_read(rbytes)
+        || !ensure_read(rbytes, want_cached)
         || !ensure(&s_cmd_mem, &s_cmd_cap, CMD_SIZE, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached)) goto done;
     DkImage image;
     dkImageInitialize(&image, &layout, s_image_mem, 0);
@@ -316,6 +328,7 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
         }
     }
     dkMemBlockFlushCpuCache(s_read_mem, 0, rbytes);     /* the CPU's writes must reach memory before the GPU reads */
+    t_after_prep = armGetSystemTick();
 
     DkCmdBufMaker cm;
     dkCmdBufMakerDefaults(&cm, s_device);
@@ -380,9 +393,11 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
             DkImageView tv;
             dkImageViewDefaults(&tv, &ti);
             /* Decode and swap in ordinary memory; the uncached upload buffer is only written, in bulk. */
+            const uint64_t t_tex = armGetSystemTick();
             if (!nv2a_backend_decode_texture(t, s_scratch)) goto done;
             for (uint32_t i = 0; i < t->width * t->height; i++) s_scratch[i] = swap_rb(s_scratch[i]);
             memcpy(dkMemBlockGetCpuAddr(s_tex_up), s_scratch, tex_bytes);
+            s_time.tex += armGetSystemTick() - t_tex;
             DkCopyBuf source = {dkMemBlockGetGpuAddr(s_tex_up), 0, 0};
             DkImageRect tr = {0, 0, 0, t->width, t->height, 1};
             dkCmdBufCopyBufferToImage(cmd, &source, &tv, &tr, 0);
@@ -443,7 +458,9 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
     dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_L2Cache);
     dkCmdBufCopyImageToBuffer(cmd, &view, &rect, &transfer, 0);
     DkCmdList list = dkCmdBufFinishList(cmd);
+    const uint64_t t_submit = armGetSystemTick();
     dkQueueSubmitCommands(s_queue, list); dkQueueFlush(s_queue); dkQueueWaitIdle(s_queue);
+    t_after_gpu = armGetSystemTick();
     if (dkQueueIsInErrorState(s_queue)) goto done;
     dkMemBlockFlushCpuCache(s_read_mem, 0, rbytes);     /* drop stale cache lines: the GPU wrote this memory */
     for (uint32_t y = y0; y < y1; y++) {
@@ -455,9 +472,65 @@ static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_arg
         }
     }
     ok = 1;
+    {
+        const uint64_t t_end = armGetSystemTick();
+        s_time.prep += t_after_prep - t_start;
+        s_time.build += t_submit - t_after_prep;
+        s_time.gpu += t_after_gpu - t_submit;
+        s_time.readback += t_end - t_after_gpu;
+        s_time.pixels += rw * rh;
+        if (b) s_time.draws++; else s_time.clears++;
+    }
 done:
     if (cmd) dkCmdBufDestroy(cmd);
     if (!ok) fail_closed();
+}
+
+/* MANHUNT_DEKO_VERIFY=1: run every call twice from the same starting pixels, once with the
+ * optimised settings and once with the conservative ones (whole surface, uncached buffer), and
+ * compare the two results exactly. Slow (diagnostic): it proves the optimisation does not change
+ * the pixels, independent of any animation. The conservative result is what stays in guest RAM. */
+static int s_verify;
+static uint8_t *s_vsave, *s_vresult;
+static size_t s_vcap;
+static struct { uint64_t calls, bad_calls, bad_pixels; uint32_t worst; } s_vstat;
+
+static void execute(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_argb)
+{
+    if (!s_verify) { execute_with(s, b, clear_argb, s_use_rect, s_want_cached); return; }
+    uint8_t *guest = (uint8_t *)xbox_GetMemoryOffset();
+    size_t row = (size_t)s->width * 4, bytes = row * s->height;
+    if (s_vcap < bytes) {
+        free(s_vsave); free(s_vresult);
+        s_vsave = malloc(bytes); s_vresult = malloc(bytes);
+        s_vcap = (s_vsave && s_vresult) ? bytes : 0;
+    }
+    if (!s_vcap) { execute_with(s, b, clear_argb, s_use_rect, s_want_cached); return; }
+    for (uint32_t y = 0; y < s->height; y++) memcpy(s_vsave + y * row, guest + s->color_va + (size_t)y * s->pitch, row);
+    execute_with(s, b, clear_argb, 1, 1);                                  /* optimised */
+    for (uint32_t y = 0; y < s->height; y++) memcpy(s_vresult + y * row, guest + s->color_va + (size_t)y * s->pitch, row);
+    for (uint32_t y = 0; y < s->height; y++) memcpy(guest + s->color_va + (size_t)y * s->pitch, s_vsave + y * row, row);
+    execute_with(s, b, clear_argb, 0, 0);                                  /* conservative */
+    uint64_t bad = 0;
+    uint32_t worst = 0;
+    for (uint32_t y = 0; y < s->height; y++) {
+        const uint8_t *a = s_vresult + y * row, *c = guest + s->color_va + (size_t)y * s->pitch;
+        for (uint32_t x = 0; x < s->width; x++) {
+            uint32_t pa, pc;
+            memcpy(&pa, a + (size_t)x * 4, 4);
+            memcpy(&pc, c + (size_t)x * 4, 4);
+            if (pa != pc) {
+                bad++;
+                for (int k = 0; k < 4; k++) {
+                    int d = (int)((pa >> (8 * k)) & 255) - (int)((pc >> (8 * k)) & 255);
+                    if (d < 0) d = -d;
+                    if ((uint32_t)d > worst) worst = (uint32_t)d;
+                }
+            }
+        }
+    }
+    s_vstat.calls++;
+    if (bad) { s_vstat.bad_calls++; s_vstat.bad_pixels += bad; if (worst > s_vstat.worst) s_vstat.worst = worst; }
 }
 
 static void draw(const Nv2aSurface *s, const Nv2aBatch *b)
@@ -478,6 +551,19 @@ static void clear(const Nv2aSurface *s, const Nv2aRenderState *r,
 static void flip(void)
 {
     s_flips++;
+    if (s_verify && s_flips % 30 == 0)
+        printf("[MH-DEKO-V] verified %llu calls: %llu differ, %llu pixels differ in total, largest channel difference %u (optimised vs conservative path)\n",
+            (unsigned long long)s_vstat.calls, (unsigned long long)s_vstat.bad_calls,
+            (unsigned long long)s_vstat.bad_pixels, s_vstat.worst);
+    if (s_flips % 30 == 0 && (s_time.draws + s_time.clears)) {
+        uint32_t n = s_time.draws + s_time.clears;
+        printf("[MH-DEKO-T] last 30 flips: %u draws %u clears; per call us: upload %llu build %llu gpu %llu readback %llu; textures total ms %llu; avg pixels %u (cached=%d rect=%d)\n",
+            s_time.draws, s_time.clears,
+            (unsigned long long)(ticks_to_us(s_time.prep) / n), (unsigned long long)(ticks_to_us(s_time.build) / n),
+            (unsigned long long)(ticks_to_us(s_time.gpu) / n), (unsigned long long)(ticks_to_us(s_time.readback) / n),
+            (unsigned long long)(ticks_to_us(s_time.tex) / 1000), s_time.pixels / n, s_read_cached, s_use_rect);
+        memset(&s_time, 0, sizeof s_time);
+    }
     if (s_flips <= 10 || s_flips % 60 == 0)
         printf("[MH-DEKO] flip=%llu draws=%llu clears=%llu reject_draw=%llu reject_clear=%llu reject_transforms=%llu\n",
             (unsigned long long)s_flips, (unsigned long long)s_stats.draws,
@@ -504,6 +590,15 @@ int manhunt_nv2a_deko3d_init(void)
     if (!s_queue) { dkDeviceDestroy(s_device); s_device = NULL; return 0; }
     memset(&s_stats, 0, sizeof s_stats);
     s_flips = 0;
+    {
+        const char *e = getenv("MANHUNT_DEKO_RECT");
+        s_use_rect = !(e && *e == '0');
+        e = getenv("MANHUNT_DEKO_CACHED");
+        s_want_cached = !(e && *e == '0');
+        e = getenv("MANHUNT_DEKO_VERIFY");
+        s_verify = e && *e == '1';
+        if (s_verify) printf("[MH-DEKO] VERIFY mode: every call runs twice and is compared (slow; timings are not representative)\n");
+    }
     return s_device != NULL;
 }
 
