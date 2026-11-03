@@ -1,6 +1,6 @@
 --- a/src/kernel/kernel_bridge.c
 +++ b/src/kernel/kernel_bridge.c
-@@ -1939,11 +1939,31 @@
+@@ -1939,9 +1939,29 @@
  }
  
  /* ── KeQuerySystemTime (ordinal 128) ─────────────────────── */
@@ -10,14 +10,12 @@
  static void bridge_KeQuerySystemTime(void)
  {
      uint32_t time_ptr = STACK_ARG(0);
-     xbox_KeQuerySystemTime(XBOX_TO_NATIVE(time_ptr));
-     g_eax = 0;
 +#if defined(__SWITCH__)
 +    /* Patch 0017. A title waiting on the clock polls this call millions of times a second (measured on
-+     * the console: about 3.8 million per second, one core at 100%). Every 64th call sleeps briefly so the
-+     * wait loop stops burning a core (heat, battery); the time it reports is unchanged and a wait on
-+     * the clock still ends within about a tenth of a millisecond of its deadline. RECOMP_TIME_YIELD=0
-+     * turns this off. */
++     * the console: about 3.8 million per second, one core at 100%). Every 64th call sleeps briefly, BEFORE
++     * the time is read, so the value returned is current and the wait loop stops burning a core (heat,
++     * battery). How close to its deadline a wait now ends depends on the sleep granularity: NOT measured.
++     * RECOMP_TIME_YIELD=0 turns this off. */
 +    static int yield_on = -1;
 +    static unsigned long calls;
 +    if (yield_on < 0) {
@@ -29,6 +27,6 @@
 +        nanosleep(&ts, NULL);
 +    }
 +#endif
+     xbox_KeQuerySystemTime(XBOX_TO_NATIVE(time_ptr));
+     g_eax = 0;
  }
- 
- /* ── MmQueryStatistics (ordinal 181) ─────────────────────── */

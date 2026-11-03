@@ -159,7 +159,12 @@ static void run(const char *name,unsigned format,int filtered,int textured,int b
     texture(format,filtered);combiner(textured);state(blend,additive,alpha,mask);
     nv2a_backend_register(NULL);surface(CPU_SURF);background(CPU_SURF);draw();
     ManhuntNv2aDeko3dStats before,after;manhunt_nv2a_deko3d_stats(&before);
-    nv2a_backend_register(manhunt_nv2a_deko3d_backend());surface(GPU_SURF);background(GPU_SURF);draw();
+    nv2a_backend_register(manhunt_nv2a_deko3d_backend());surface(GPU_SURF);background(GPU_SURF);
+    /* background() writes guest RAM behind the adapter's back (the runtime's own CPU clear would go through
+     * the reject hook): tell the adapter its resident copy is stale, then bring RAM up to date after the
+     * draw, before the comparison reads it. Added with the resident render target; this proof has NOT been
+     * rebuilt or rerun since (UNVERIFIED). */
+    nv2a_backend_sync(1);draw();manhunt_nv2a_deko3d_sync();
     manhunt_nv2a_deko3d_stats(&after);CHECK(after.draws==before.draws+s_expect_gpu);compare(name);
 }
 
