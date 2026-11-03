@@ -72,3 +72,15 @@ The user asked for a real 16:9 view (no stretching), the Rockstar developer menu
 - **Every feature is opt-in** (`MANHUNT_WIDESCREEN`, `MANHUNT_DEVMENU`, `MANHUNT_MODMENU`, default off). Cheat features set the game's own cheats flag. With the switches off, behaviour is the original.
 
 Also added from the docs review: LEVEL-LOAD-001 (milestone 4 gate), X87-CW-001 (BLOCKERS #3), MEM-MIRROR-002 (BLOCKERS #6), LGPL-LINK-001 (THIRD_PARTY.md).
+
+## 2026-11-02 — Real Switch from a Mac; Eden dropped from current work
+
+The user now has a physical modded Switch and a Mac host, and asked to stop using Eden.
+
+- **Native build on the Mac** (`scripts/game-build-native.sh`), no Docker. The Docker scripts stay the Linux path. Rejected: keeping Docker Desktop on the Mac (not needed once devkitPro is installed natively).
+- **One SD folder** `sdmc:/switch/manhunt1_nx/` for the NRO, data, saves, frames, `manhunt.env` and logs (`-DMANHUNT_SD_BASE` overrides). The Eden scripts keep the old layout and are marked stale and UNVERIFIED.
+- **Diagnostics are opt-in** (`MANHUNT_LOG_SYNC`, `MANHUNT_LOG_TCP`, `MANHUNT_WD`, `MANHUNT_WD_DUMP`, `MANHUNT_FOCUS`, `RECOMP_SPAN_4G`) because a diagnostic must not be able to stall the game. Always on: the crash handler and the exit/applet log lines.
+- **Transfer by FTP, logs by TCP.** `nxlink` from the Mac was reset or stalled in every attempt.
+- **Evidence before changes.** After several guesses failed, three read-only investigations (public sources and Atmosphère code, a code audit, a comparison with a console-proven sibling port) ranked the suspects; a combined fix was tried because each failed run can reset the console. The cost: it is not known which part of patch 0016 mattered (HW-FREEZE-001).
+- **Branches:** work merged to `main` by pull request; only `main` and `level-load-001` are kept, and `level-load-001` was fast-forwarded to `main`.
+

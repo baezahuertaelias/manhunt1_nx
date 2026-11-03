@@ -44,6 +44,14 @@ Emulator FPS is diagnostic only and never counts as hardware FPS. Emulator runne
 - Download, build and configure the best legally obtainable, compatible emulator **inside Docker**. Choose by measured capability: headless Linux support, NRO loading, GPU requirements, logging, debugger and automation. If one emulator doesn't work, try the other.
 - Test generated NROs at every major milestone. Keep emulator tests from blocking unrelated builds.
 
+### Real Switch (primary since 2026-11-02)
+
+Procedure: [MACOS_SWITCH_SETUP.md](MACOS_SWITCH_SETUP.md) section 0. A hardware result counts only with captured evidence (SD log or TCP stream, frame dump, ping/FTP timeline, Atmosphère reports) written up as text in `reports/`; frames, logs and the NRO stay private. Rules for this environment:
+
+- Each failing run can reset the console: state what a run will show before asking for it, and change one thing at a time when the cost of a reset is acceptable (HW-FREEZE-001 still needs that isolation).
+- Never run with `RECOMP_WATCHDOG_SECS` set (it exits the process); the result of such a run says nothing about stability.
+- Emulator speeds are not hardware speeds; hardware frame rate is UNVERIFIED until measured on the console. The Eden scripts (`scripts/emu-run.sh`, `scripts/switch-boot-proof.sh`) are stale with the current SD layout.
+
 ### Automation adapters
 
 - Prefer documented emulator APIs, GDB, CLI flags, IPC and scripts. Don't assume an MCP server exists. Patching or forking an emulator for automation is allowed in an isolated fork with minimal patches, after checking the license.
