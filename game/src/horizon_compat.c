@@ -36,7 +36,7 @@ static uint8_t *s_snap[2];
 static size_t s_snap_cap;
 static uint32_t s_snap_pitch, s_snap_va_h;
 static int s_snap_idx = -1;            /* last complete buffer, guarded by s_snap_lock for readers/flip */
-static int s_snap_enabled = -1;
+static volatile int s_snap_enabled = -1;
 static Mutex s_snap_lock;
 
 static const uint8_t *guest_ptr(uint32_t va)
@@ -77,12 +77,25 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
         surface_dims(pitch, &sw, &sh);
         size_t sz = (size_t)pitch * sh;
         if (sz > s_snap_cap) {
-            free(s_snap[0]);
-            free(s_snap[1]);
-            s_snap[0] = malloc(sz);
-            s_snap[1] = malloc(sz);
-            s_snap_cap = (s_snap[0] && s_snap[1]) ? sz : 0;
-            s_snap_idx = -1;
+            /* Grow: allocate first, swap the pointers under the lock (the dump
+             * thread copies under the same lock), free the old buffers after. */
+            uint8_t *a = malloc(sz), *b = malloc(sz);
+            if (a && b) {
+                uint8_t *old0, *old1;
+                mutexLock(&s_snap_lock);
+                old0 = s_snap[0];
+                old1 = s_snap[1];
+                s_snap[0] = a;
+                s_snap[1] = b;
+                s_snap_cap = sz;
+                s_snap_idx = -1;
+                mutexUnlock(&s_snap_lock);
+                free(old0);
+                free(old1);
+            } else {
+                free(a);
+                free(b);
+            }
         }
         if (s_snap_cap >= sz) {
             int next = s_snap_idx < 0 ? 0 : s_snap_idx ^ 1;
@@ -138,9 +151,10 @@ int xbox_FramebufferDumpBmp(const char *prefix)
         if (s_snap_idx >= 0 && s_snap_pitch) {
             size_t sz = (size_t)s_snap_pitch * s_snap_va_h;
             snap = malloc(sz);
-            if (snap)
+            if (snap) {
                 memcpy(snap, s_snap[s_snap_idx], sz);
-            pitch = s_snap_pitch;
+                pitch = s_snap_pitch;           /* keep the live pitch when the copy failed */
+            }
         }
         mutexUnlock(&s_snap_lock);
     }

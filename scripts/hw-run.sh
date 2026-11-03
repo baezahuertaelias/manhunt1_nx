@@ -119,7 +119,7 @@ fi
 if grep -q '^MANHUNT_PAD_SCRIPT' "$RUN/manhunt.env.sent"; then
   die "MANHUNT_PAD_SCRIPT in the env: the real controller would be ignored."
 fi
-if grep -q '^MANHUNT_GPU_BACKEND=1' "$RUN/manhunt.env.sent" && [ "$ALLOW_GPU" != 1 ]; then
+if grep -q '^MANHUNT_GPU_BACKEND=' "$RUN/manhunt.env.sent" && ! grep -q '^MANHUNT_GPU_BACKEND=0' "$RUN/manhunt.env.sent" && [ "$ALLOW_GPU" != 1 ]; then
   die "MANHUNT_GPU_BACKEND=1 (deko3d) is UNVERIFIED on the console and earlier runs with it froze the console. Pass --allow-gpu-backend to accept that risk."
 fi
 if grep -q '^MANHUNT_LOG_TCP' "$RUN/manhunt.env.sent" && ! grep -q "^MANHUNT_LOG_TCP=$MAC_IP:" "$RUN/manhunt.env.sent"; then
@@ -173,7 +173,7 @@ if [ "$UPLOAD" = 1 ]; then
     done
     [ "$sent" = 1 ] || die "could not upload the NRO and verify it (the card's manhunt.nro was not touched)"
     curl -s --max-time 30 -Q "-DELE /$REMOTE/manhunt.nro" "ftp://$IP:$FTP_PORT/" -o /dev/null 2>/dev/null || true
-    curl -s --max-time 30 -Q "-RNFR /$REMOTE/manhunt.nro.part" -Q "-RNTO /$REMOTE/manhunt.nro" "ftp://$IP:$FTP_PORT/" -o /dev/null || die "could not rename the verified upload into place"
+    curl -s --max-time 30 -Q "-RNFR /$REMOTE/manhunt.nro.part" -Q "-RNTO /$REMOTE/manhunt.nro" "ftp://$IP:$FTP_PORT/" -o /dev/null || die "could not rename the verified upload into place: the verified NRO is on the card as manhunt.nro.part and manhunt.nro is MISSING; fix or rerun"
     curl -s --max-time 300 -o "$tmp" "$(ftp_url manhunt.nro)" || true
     [ "$(shasum -a 256 "$tmp" 2>/dev/null | cut -d' ' -f1)" = "$NRO_SHA" ] || die "manhunt.nro on the card does not match after the rename"
     say "NRO on the card verified by SHA-256 read-back"
@@ -203,6 +203,8 @@ list_remote "sdmc:/atmosphere/fatal_errors" > "$RUN/.fatal.before"
 # ---- 3. listener and monitor
 nc -l "$LOG_PORT" > "$RUN/tcp.log" 2>/dev/null &
 LISTENER=$!
+sleep 1
+kill -0 "$LISTENER" 2>/dev/null || { LISTENER=""; die "the log listener could not start (is port $LOG_PORT already in use? set HW_LOG_PORT)"; }
 (
   while true; do
     t="$(date +%H:%M:%S)"

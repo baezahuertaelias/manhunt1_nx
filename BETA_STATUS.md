@@ -18,7 +18,7 @@ Rerun with `scripts/switch-boot-proof.sh`. Details: [reports/FEASIBILITY.md](rep
 | No crash/exit during the run | PASS (240 s): no crash/exit line in the guest log, no fault reported by Eden, presents still increasing at the end | `scripts/switch-boot-proof.sh` |
 | Audio | NOT IMPLEMENTED: DirectSound reports "no driver" by design | `game/src/dsound_hle.c` |
 | Input-driven menu navigation | PASS in Eden: PLAY → BONUS FEATURES after scripted UP; independently viewed | [INPUT_NAVIGATION.md](reports/INPUT_NAVIGATION.md) |
-| Real Switch hardware | PARTIAL (2026-11-02, one console): boots, loads the data files, shows the original main menu and **responds to the controller** (highlight moved through four entries after about 60 s; needs the pad latch). Level load, gameplay, audio and stability UNVERIFIED; about 0.35 to 0.65 frames per second (CPU software rasteriser, 98% of frame time) | [reports/HW_SWITCH_FIRST_RUN.md](reports/HW_SWITCH_FIRST_RUN.md), [reports/HW_PERFORMANCE_FIRST_LOOK.md](reports/HW_PERFORMANCE_FIRST_LOOK.md) |
+| Real Switch hardware | PARTIAL (2026-11-02, one console): boots, loads the data files, shows the original main menu and **responded to the controller in one long run** (highlight moved through four entries from about 60 s, observed with the pad latch and a hold of 3 polls; short runs and the unlatched pad showed no reaction, and hold 1 on a long run was not tried). Level load, gameplay, audio and stability UNVERIFIED; about 0.35 to 0.65 frames per second (CPU software rasteriser, 98% of frame time) | [reports/HW_SWITCH_FIRST_RUN.md](reports/HW_SWITCH_FIRST_RUN.md), [reports/HW_PERFORMANCE_FIRST_LOOK.md](reports/HW_PERFORMANCE_FIRST_LOOK.md) |
 
 ## Milestone 1 gates (toolchain proof)
 

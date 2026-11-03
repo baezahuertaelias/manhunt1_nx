@@ -213,7 +213,7 @@ def main(run):
         if len(ch) and not nz:
             p("- **The console recorded presses but every poll the game made returned an idle pad: the presses never reached a game poll.**")
         elif nz:
-            p("- Presses did reach the game (first non-zero poll: #%s, buttons=0x%s analog=0x%s). If the menu did not move, the cause is in how the title interprets the input, not in delivery." % (nz[0][0], nz[0][1], nz[0][2]))
+            p("- Polls logged (the log is sampled, not every poll) show presses handed to the game (first non-zero poll: #%s, buttons=0x%s analog=0x%s). If the menu did not move, the cause is more likely in how the title interprets the input than in delivery (UNVERIFIED)." % (nz[0][0], nz[0][1], nz[0][2]))
     elif up:
         p("- No `[MH-INPUT] poll` lines: the game never called XInputGetState, or the build has no poll logging.")
 
@@ -279,7 +279,7 @@ def main(run):
             if longest >= 5:
                 p("- **Ping was down for %d consecutive samples (about %d s) inside the game window: the console stopped answering for a long time (a freeze or reset), not just the process.**" % (longest, 2 * longest))
             elif down_in:
-                p("- Ping dropped for %d sample(s) inside the game window, at most %d in a row (about %d s). Comparable to the short Wi-Fi drops seen with the console idle in Sphaira; not a freeze." % (down_in, longest, 2 * longest))
+                p("- Ping dropped for %d sample(s) inside the game window, at most %d in a row (about %d s). Comparable to the short Wi-Fi drops seen with the console idle in Sphaira, so not consistent with a freeze (cause UNVERIFIED)." % (down_in, longest, 2 * longest))
             else:
                 p("- Ping stayed up for the whole game window: the console itself kept running.")
             if down_out:
@@ -303,7 +303,7 @@ def main(run):
             p("- Highlighted main-menu entry per frame, in order (heuristic pixel check, UNVERIFIED; `?` = not recognised): %s" % " > ".join(seq))
             known = [r for _, r in rows if r is not None]
             if len(set(known)) > 1:
-                p("- **The highlight moved between frames: the menu reacted to input.**")
+                p("- **The highlight moved between frames (heuristic, UNVERIFIED: an animation could also move it); if you pressed buttons at those times, the menu most likely reacted to input.**")
             else:
                 p("- The highlighted entry never changed across the recognised frames.")
 
