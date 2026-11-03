@@ -22,7 +22,7 @@
 #   --extra KEY=VALUE     add a key to the generated env (repeatable)
 #   --profile             render-timing run: RECOMP_RENDER_PROFILE=1, no frame dumps, no fsync log
 #   --tag NAME            label for the run directory
-#   --allow-gpu-backend   permit MANHUNT_GPU_BACKEND=1 (UNVERIFIED on the console; earlier runs froze it)
+#   --allow-gpu-backend   permit MANHUNT_GPU_BACKEND=1 (UNVERIFIED on the console after patch 0016)
 #   --wait-start SECS     how long to wait for you to launch (default 900)
 #   --max-run SECS        how long to wait for the game to be closed (default 900)
 #   --no-upload           do not upload; only listen, collect and summarise
@@ -120,7 +120,7 @@ if grep -q '^MANHUNT_PAD_SCRIPT' "$RUN/manhunt.env.sent"; then
   die "MANHUNT_PAD_SCRIPT in the env: the real controller would be ignored."
 fi
 if grep -q '^MANHUNT_GPU_BACKEND=' "$RUN/manhunt.env.sent" && ! grep -q '^MANHUNT_GPU_BACKEND=0' "$RUN/manhunt.env.sent" && [ "$ALLOW_GPU" != 1 ]; then
-  die "MANHUNT_GPU_BACKEND=1 (deko3d) is UNVERIFIED on the console and earlier runs with it froze the console. Pass --allow-gpu-backend to accept that risk."
+  die "MANHUNT_GPU_BACKEND (deko3d) is UNVERIFIED on the console after patch 0016 (early runs froze with and without it, so it is not the known cause of the freeze). Pass --allow-gpu-backend to run it."
 fi
 if grep -q '^MANHUNT_LOG_TCP' "$RUN/manhunt.env.sent" && ! grep -q "^MANHUNT_LOG_TCP=$MAC_IP:" "$RUN/manhunt.env.sent"; then
   say "note: the env's MANHUNT_LOG_TCP does not point at this Mac ($MAC_IP); the live stream will stay empty"
