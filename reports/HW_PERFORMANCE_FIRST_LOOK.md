@@ -32,6 +32,10 @@ Status: **measurements from one 42 s run on one console, plus hypotheses.** Hard
 - The rasteriser is **single-threaded in this build**: the worker pool in `kernel/nv2a_pb_exec.c` is compiled only for `_WIN32`; the `#else` branch used on Horizon draws every triangle serially on the executor thread. With the guest thread busy-waiting on another core, at most one more core is usable, so threading alone cannot give more than about 2x.
 - Present, clear and everything else together are about 0.5% of the time: a faster rasteriser (or the GPU) is the whole game.
 
+## Effect on control
+
+The user reports that the screen changes about 5 s after a button press (observation, one person, handheld). The measurements explain it: the title polls the controller once per game frame (about every 2.5 s) and a frame takes about 2.2 s to render, so input latency is roughly one poll interval plus one frame time. Faster rendering shortens it directly.
+
 ## What follows from it (reasoning, not measurement)
 
 - The limit is **rendering throughput, not timing**: the 60 Hz timer is healthy, the game spends most of each frame time waiting for the picture.

@@ -195,6 +195,23 @@ if [ "$UPLOAD" = 1 ]; then
   fi
 fi
 
+# Download one file from the console's folder and check its size against the card's listing,
+# retrying: a truncated frame once crashed the summary and hid a result.
+get_verified() {  # remote-relative-path local-path
+  local rel="$1" dst="$2" dir base want got try
+  dir="$(dirname "$rel")"; base="$(basename "$rel")"
+  [ "$dir" = "." ] && dir=""
+  want="$(curl -s --max-time 30 "$(ftp_url "${dir:+$dir/}")" 2>/dev/null | awk -v n="$base" '$NF==n{print $5}' | head -1)"
+  for try in 1 2 3; do
+    curl -s --max-time 180 -o "$dst" "$(ftp_url "$rel")" 2>/dev/null || true
+    got="$(wc -c < "$dst" 2>/dev/null | tr -d ' ')"
+    if [ -z "$want" ] || [ "$got" = "$want" ]; then return 0; fi
+    say "download of $rel: got $got of $want bytes, retrying"
+  done
+  say "WARNING: $rel is incomplete ($got of $want bytes)"
+  return 0
+}
+
 # What Atmosphere already holds, so only new reports are collected afterwards.
 list_remote() { curl -s --max-time 30 --list-only "ftp://$IP:$FTP_PORT/$1/" 2>/dev/null | tr -d '\r' | sort || true; }
 list_remote "sdmc:/atmosphere/crash_reports" > "$RUN/.crash.before"
@@ -240,11 +257,11 @@ fi
 if ftp_up; then
   sleep 3
   say "Sphaira is back; collecting"
-  curl -s --max-time 120 -o "$RUN/log.txt" "$(ftp_url log.txt)" || true
-  curl -s --max-time 60 -o "$RUN/wd.txt" "$(ftp_url wd.txt)" || true
+  get_verified log.txt "$RUN/log.txt"
+  get_verified wd.txt "$RUN/wd.txt"
   mkdir -p "$RUN/frames"
   for f in $(curl -s --max-time 30 --list-only "$(ftp_url frames/)" 2>/dev/null | tr -d '\r' | tail -40); do
-    curl -s --max-time 120 -o "$RUN/frames/$f" "$(ftp_url "frames/$f")" || true
+    get_verified "frames/$f" "$RUN/frames/$f"
     case "$f" in *.bmp|*.BMP) command -v sips >/dev/null 2>&1 && sips -s format png "$RUN/frames/$f" --out "$RUN/frames/${f%.*}.png" >/dev/null 2>&1 || true ;; esac
   done
   list_remote "sdmc:/atmosphere/crash_reports" > "$RUN/.crash.after"

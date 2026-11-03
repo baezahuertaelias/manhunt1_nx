@@ -43,6 +43,8 @@ def bmp_rows(path):
         stride = (w * bytes_pp + 3) & ~3
         top_down = h < 0
         h = abs(h)
+        if w <= 0 or h <= 0 or len(d) < off + stride * h:
+            return None                 # truncated or damaged file (e.g. the game was closed mid-write)
 
         def px(x, y):
             row = y if top_down else h - 1 - y
@@ -297,7 +299,12 @@ def main(run):
         p("## Frames")
         p("- %d file(s) in `frames/` (private: game-derived; look at them, do not commit them)" % len(fl))
         bm = sorted(f for f in os.listdir(fdir) if f.lower().endswith(".bmp"))
-        rows = [(f, highlighted_row(os.path.join(fdir, f))) for f in bm]
+        rows = []
+        for f in bm:
+            try:
+                rows.append((f, highlighted_row(os.path.join(fdir, f))))
+            except (IndexError, ValueError):
+                rows.append((f, None))      # a damaged frame must never stop the summary
         if rows and any(r is not None for _, r in rows):
             seq = ["?" if r is None else MENU_NAMES[r] for _, r in rows]
             p("- Highlighted main-menu entry per frame, in order (heuristic pixel check, UNVERIFIED; `?` = not recognised): %s" % " > ".join(seq))
