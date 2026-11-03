@@ -17,7 +17,7 @@ After the host is ready, continue with [SETUP.md](SETUP.md): inputs, images, bui
 
 ## Host software
 
-The project does not install host packages. Everything else runs in Docker. The host needs only:
+The project does not install host packages. On the Linux reference host everything else runs in Docker; a Mac builds natively with devkitPro instead ([MACOS_SWITCH_SETUP.md](MACOS_SWITCH_SETUP.md), sections 0 and 5a). The Linux host needs only:
 
 | Tool | Reference version | Used by |
 |---|---|---|
@@ -29,7 +29,7 @@ The project does not install host packages. Everything else runs in Docker. The 
 | gh (GitHub CLI) | 2.46.0 | pull requests; needs `gh auth login` with the `repo` scope |
 | jq | 1.7 | optional, for inspecting JSON |
 
-There is no host devkitPro, Ghidra, compiler toolchain or emulator. Those live in the images below.
+On the Linux host there is no devkitPro, Ghidra, compiler toolchain or emulator; those live in the images below.
 
 On a fresh Debian host, installing these is a **host change**. Under AGENTS.md it needs the owner's explicit approval, and the project scripts never do it. For reference only:
 
@@ -104,4 +104,4 @@ Record the results in [../reports/PREFLIGHT.md](../reports/PREFLIGHT.md) after a
 
 - **Eden on the GPU:** `EMU_GPU=1` fails with no Vulkan present queue, so Eden runs on llvmpipe (software). Emulator speed is diagnostic only.
 - **Other images:** the host also holds images and volumes from other projects (for example `dd-ghidra-mcp:local`, `downhill-domination_*`). Do not touch them.
-- **Real Switch hardware:** not available. Every hardware result is UNVERIFIED.
+- **Real Switch hardware:** not on this host. A physical console is used from a Mac since 2026-11-02 ([reports/HW_SWITCH_FIRST_RUN.md](../reports/HW_SWITCH_FIRST_RUN.md)); every hardware result not in that report is UNVERIFIED.

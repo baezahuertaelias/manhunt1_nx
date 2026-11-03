@@ -2,7 +2,20 @@
 
 Purpose: continue the port on a **Mac running macOS Sonoma** with a **modded (custom-firmware) Nintendo Switch**, starting from a fresh `git clone`. This is the handoff document for the next session on that host.
 
-**Status: UNVERIFIED.** It was written on the Linux reference host (Debian 13, x86-64; [HOST_SETUP.md](HOST_SETUP.md)) with no Mac and no Switch. Everything about macOS and about physical hardware below is a plan, not an executed result, unless a line says it was run. Hardware gates in [BETA_STATUS.md](../BETA_STATUS.md) stay UNVERIFIED until a run on the console is captured and reviewed.
+**Status: PARTIALLY EXECUTED (2026-11-02).** The document was first written on the Linux reference host (Debian 13, [HOST_SETUP.md](HOST_SETUP.md)) with no Mac and no Switch. Since then the native Mac build and the first runs on a physical Switch were executed; section 0 is that verified workflow and [reports/HW_SWITCH_FIRST_RUN.md](../reports/HW_SWITCH_FIRST_RUN.md) holds the results. Everything else below is reference or plan unless a line says it was run. Hardware gates in [BETA_STATUS.md](../BETA_STATUS.md) stay UNVERIFIED except where that report says otherwise.
+
+## 0. Verified workflow (executed 2026-11-02, one Mac and one console)
+
+1. **Prerequisites on the Mac:** devkitPro in `/opt/devkitpro` (`switch-dev`, `deko3d`, `uam`, `switch-tools`), `cmake`, `make`, `git`, `patch`, `python3`. No Docker.
+2. **Game files:** copy your lawful files to `assets/manhunt1_xbe/` (gitignored). `DEFAULT.xbe` SHA-256 must be `af69e803695e29c3f99b38d6a759fac4c9300c9a540a2c244e4e7a07fb96afde`.
+3. **Build the NRO:** `scripts/game-build-native.sh` (section 5a). Output: `game/build/switch/manhunt.nro` (game-derived: never commit or share).
+4. **Console:** Sphaira with its FTP server on (port 5000). Everything lives in `sdmc:/switch/manhunt1_nx/`: the NRO, the game data and `manhunt.env`.
+5. **Upload over FTP** (`curl -T file ftp://<console>:5000/sdmc:/switch/manhunt1_nx/<name>`; the transfer can break with curl error 55, so retry). Verify the NRO by reading it back and comparing SHA-256, and the game data by name and size (836 files). Start from `docs/hardware/manhunt.env.example`.
+6. **Optional live log:** run `nc -l 5555` on the Mac and set `MANHUNT_LOG_TCP=<mac ip>:5555`. `nxlink` from the Mac stalled or was reset in every attempt, so it is not part of the workflow.
+7. **Launch** `manhunt.nro` from Sphaira's file list in **title-takeover mode** (hold R while opening a game, then start Sphaira). While the game runs, Sphaira's FTP is closed; close the game to get it back.
+8. **Read results:** `log.txt`, `wd.txt` and `frames/` in the SD folder; Atmosphère's `crash_reports/` and `fatal_errors/`. A fatal report from an unrelated system module can appear on every boot; a kernel panic would show program id `MESOSPHR`.
+9. **Never set `RECOMP_WATCHDOG_SECS`** in normal runs: it calls `_exit(3)` after that many seconds (it ended the first successful run).
+10. **Record** results as text in `reports/` with everything not executed marked `UNVERIFIED`. Frames, logs and the NRO stay private.
 
 ## 1. Why this host, and which path
 
@@ -26,7 +39,7 @@ The repository is **public** (AGENTS.md). It contains no game data. Everything i
 | Item | Where it is on the Linux host | Size | Check |
 |---|---|---|---|
 | Your lawful game files | `assets/manhunt1_xbe/` (`DEFAULT.xbe`, `audio/`, `levels/`) | 2.4 GiB, 836 files, largest 535 MB | `DEFAULT.xbe` SHA-256 `af69e803695e29c3f99b38d6a759fac4c9300c9a540a2c244e4e7a07fb96afde`; whole set against `reports/ASSET_MANIFEST.sha256` (tracked) |
-| Prebuilt NRO | `game/build/switch/manhunt.nro` | about 21 MB | SHA-256 `367b97b7795caa44aea52bf9d53e6159d3b68a55d721945b8fa8c788a05daf5f`: the source of branch `macos-switch-handoff` with the optional SD-card log (`MANHUNT_LOG_FILE`, section 4). The earlier spawn-proof NRO `7b3c6f90…600c6` is identical except it lacks that log feature |
+| Prebuilt NRO | `game/build/switch/manhunt.nro` | about 21 MB | The hash changes with every build: record the one you upload (a read-back of the file on the card must match). Build it with `scripts/game-build-native.sh` (section 0). The NRO contains game-derived code: treat it like game data |
 | Docker images (path B only) | rebuilt from `infra/`, see section 5 | several GB | see section 5 |
 
 The NRO is a build product that contains code derived from the game. Treat it like game data: do not commit it and do not share it.
@@ -139,7 +152,7 @@ Executed in Eden only (three 70 s runs): with the key set the file is created wi
 
 Check on the console after the first run: `sdmc:/switch/manhunt1_nx/log.txt` exists and its first lines are `[MH-BOOT] start (Horizon) game_dir=sdmc:/switch/manhunt1_nx` and the `config` lines. If it is missing, the key was not read: check the file name `sdmc:/manhunt.env` and that it has `KEY=VALUE` lines.
 
-## 5. Path B: full development host on macOS (UNVERIFIED)
+## 5. Path B: full development host on macOS (Docker variant UNVERIFIED; the native variant in 5a was executed)
 
 Do this only if you will change code on the Mac. The existing procedure is [SETUP.md](SETUP.md); this section lists what differs on macOS.
 
@@ -220,10 +233,12 @@ Read in this order: `AGENTS.md` (the rules), `NEXT_ACTION.md` (the single next a
 
 | Open item | Why it matters |
 |---|---|
-| HW-LOG-001 verified on the console | Implemented and checked in Eden only; confirm the log file appears on hardware (section 4). |
+| HW-LOG-001 on the console | VERIFIED 2026-11-02: `log.txt` is written on the SD card, boot lines first. |
+| HW-FREEZE-001 | The earlier console freeze after the first file open did not recur in one run with patch 0016; which of its three changes mattered is not isolated. [BLOCKERS.md](../BLOCKERS.md) H1. |
+| Eden scripts | `scripts/emu-run.sh` and `scripts/switch-boot-proof.sh` still stage the old `sdmc:/manhunt*` layout: stale and UNVERIFIED. |
 | Mac chip, RAM, disk, macOS minor version | Decides path B feasibility and the image platform. |
 | Switch firmware and Atmosphère versions | Needed for any hardware evidence. |
-| Applet vs title-takeover memory | The port's memory use on hardware is unmeasured. |
+| Applet vs title-takeover memory | Process memory (about 3.2 GB total, nearly all of it taken by the default libnx heap) is logged by `MANHUNT_WD`; applet mode is not tested. |
 | ICALL-NULL-001 | A null indirect call is skipped at boot; its cause is unexplained. |
 | Player control (M5) | The scene is static in Eden at 0.1 fps; hardware decides between cutscene, slowness and a defect. |
 | Audio | Not implemented; DirectSound reports no driver. Expect silence. |
@@ -240,7 +255,8 @@ Read in this order: `AGENTS.md` (the rules), `NEXT_ACTION.md` (the single next a
 - [ ] Mac chip, RAM, free disk and macOS version recorded
 - [ ] Repository cloned, branch checked out, git identity set
 - [ ] `assets/manhunt1_xbe/` copied; `DEFAULT.xbe` hash matches; manifest verified
-- [ ] `manhunt.nro` copied; hash matches `7b3c6f90…600c6`
+- [ ] `manhunt.nro` uploaded; the SHA-256 read back from the card matches the Mac build
+- [ ] `manhunt.env` on the card does not contain `RECOMP_WATCHDOG_SECS`
 - [ ] SD card prepared (section 3.2) and `dot_clean` run
 - [ ] Switch firmware and Atmosphère versions noted
 - [ ] Launched in title-takeover mode

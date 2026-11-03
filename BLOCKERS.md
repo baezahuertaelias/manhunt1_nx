@@ -2,13 +2,15 @@
 
 Ranked. Evidence: [reports/FEASIBILITY.md](reports/FEASIBILITY.md), [reports/RECOMP_EVAL.md](reports/RECOMP_EVAL.md), [reports/PREFLIGHT.md](reports/PREFLIGHT.md).
 
+**H1. P0 — Hardware path (HW-FREEZE-001 / HW-SWITCH-001).** On a physical Switch the first NRO froze the console about 2 s after the title opened its first data file. With patch 0016 (ack-thread sleep, file bounce buffer, watchdog without thread pausing) the freeze did not recur in one run: the game drew the original legal/title screen, then a diagnostic watchdog ended it at about 5 s ([reports/HW_SWITCH_FIRST_RUN.md](reports/HW_SWITCH_FIRST_RUN.md)). **Not known:** which of the three changes mattered, whether the game leaves that screen, frame rate, audio, input and stability. Known constraints: the kernel allows only 10 code-memory objects console-wide (we hold about 5 at boot); the guest window must be held whole (`RECOMP_SPAN_4G`) so the register apertures do not land in the libnx heap.
+
 1. **P0 — Gameplay graphics/performance unverified.** A guarded opt-in deko3d menu adapter now passes synthetic, build,240s original-menu/navigation and independent-review gates. Same-binary emulator captures measured0.1305CPU→0.9367native presentations/s (diagnostic only, still slow). Level graphics, unsupported-state coverage, playable performance and Switch hardware remain unverified. [Evidence](reports/RENDER_MENU_NATIVE.md).
 2. **P1 — Audio not implemented.** DirectSound reports "no driver" (`game/src/dsound_hle.c`); a native DirectSound at API level is required (milestone 6).
 3. **P1 — x87 precision/rounding fidelity unresolved.** A bounded host-debug watch observed 53-bit and 64-bit requests, including directed rounding. Double-based execution remains approximate; all-thread, level and source provenance coverage remain UNVERIFIED ([investigation](reports/X87_CONTROL_WORD.md)).
 4. **P1 — Eden runner not reproducible** from this repo (`dd-eden:local`, checked by image ID) (EMU-IMAGE-001).
 5. **P1 — Default runner still uses software rendering.** Optional Wayland/Intel Vulkan presentation now passes the synthetic deko3d proof ([EMU-GPU-PRESENT-001](reports/EMU_GPU_PRESENT.md)). Default Xvfb lacks DRI3 and remains llvmpipe; game validation/integration of the optional path is pending. This is separate from container GPU access, which passes.
 6. **P2 — RAM mirrors unsupported on Horizon.** Not used on the boot path (measured); re-check at level load.
-7. **P2 — No physical Switch.** All hardware gates stay `UNVERIFIED`.
+7. **P2 — Limited hardware evidence.** One console, one session, runs of seconds; see H1. Hardware gates not listed in that report stay `UNVERIFIED`.
 
 8. **P1 — Horizon memory/libc semantics (HZ-PORT-002).** Decommit/release/reservation/remap ownership and close/publication races are corrected within the tested single whole-object anonymous-view subset:303,506hostchecks, intendedracecontrol,4,128Edenchecks, fullSwitchbuild and independentreview pass ([report](reports/HORIZON_MEMORY_OPTIONS.md)). Protection fidelity, mirrors/multipleviews, protection/mapping coverage and general native errno fidelity and level validation remain open. A64MiB split requests about192MiB peak backing/shadow allocation in the mocked test.
 

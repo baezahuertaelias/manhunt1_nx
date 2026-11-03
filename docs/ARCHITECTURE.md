@@ -42,6 +42,17 @@ The concrete design is undecided until the recompiler and platform proofs pass (
 - **Horizon threads:** runtime threads spread over cores 0–2, because Horizon does not time-slice equal-priority threads on one core.
 - **Presentation:** each executor flip is scaled into a libnx framebuffer; a deko3d back end is the next step (`nv2a_backend.h`).
 
+## Learned on real hardware (2026-11-02; [reports/HW_SWITCH_FIRST_RUN.md](../reports/HW_SWITCH_FIRST_RUN.md))
+
+Eden tolerates things the Switch kernel does not, so Horizon code has to follow the real rules:
+
+- **Address space:** the 4 GiB guest window must be reserved whole (`RECOMP_SPAN_4G`, patch 0015). Reserved piecemeal, its top (NV2A/MCPX/flash apertures at `0xFD000000` and up) landed in the libnx heap and the apertures failed to map.
+- **Code-memory objects:** the guest memory layer uses `svcCreateCodeMemory` + `MapOwner`. The kernel has 10 such objects for the whole console (`SlabCountKCodeMemory`, Atmosphère source); we hold about 5 at boot. A console-proven sibling port avoids them with `svcMapProcessCodeMemory`; switching the layer to that recipe is the fallback if the objects prove the limit.
+- **Never-sleeping threads:** `Sleep(0)` is `svcSleepThread(-1)`, a core-migrating yield that takes the scheduler lock. The NV2A ack thread now sleeps (patch 0016). Horizon does not time-slice equal-priority threads, so any spin can starve others.
+- **File I/O:** guest RAM is a code-memory view; file data goes through a heap bounce buffer (patch 0016).
+- **Process shutdown:** `_exit` tears devices down while other threads may still write; the runtime watchdog (`RECOMP_WATCHDOG_SECS`) exits this way and must not be set in normal runs.
+- **Diagnostics:** crash handler (`[MH-CRASH]`, module base from `svcQueryMemory`), opt-in lock-free watchdog and TCP log stream. Which of the 0016 changes removed the early console freeze is not isolated (HW-FREEZE-001).
+
 ## Open questions
 
 - Which x87 control word Manhunt runs with (decides whether the 64-bit approximation matters).

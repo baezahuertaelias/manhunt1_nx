@@ -147,3 +147,8 @@ Reviewed missing-entry correction5C620..5C69C and patch0014 large-local-switch h
 ## 2026-10-30 — LEVEL-MOVE-001 verification (existing build)
 
 No new game build. Existing Switch NRO `7b3c6f90f2be7e77f24a32eb52d6c17b7fed0cb80eaa787c62628af54ab600c6` was tested in a bounded movement probe. Fence-wait regression and pad-script checks execute successfully in pinned recompiler image with read-only source mount; exact output and source/image hashes are private under `game/build/level-load/movement-20261030/`. An initial host invocation of the fence wrapper failed because it expects `/repo`; the container invocation above is the executed proof. Probe result: capture session143/no wrapper result; recovered Docker container1108.810s/exit0, no OOM event, persistent log228presents and all planned inputs. Player control remains UNVERIFIED; frame artefacts persist. No hardware gate is tested.
+
+## 2026-11-02 — Native macOS build and first physical-Switch runs
+
+`scripts/game-build-native.sh` (no Docker; Darwin 23.6.0, devkitPro in `/opt/devkitpro`, Python 3.14 venv with `capstone==5.0.9` and `unicorn==2.1.4`, pinned xboxrecomp `f0f8a46`) built the Switch NRO with patches 0001-0016. Analysis took about 12 min on this Mac; the lift time was not recorded. NRO SHA-256 values (derived binaries, never committed): `27b26209…b981` (patch 0016 variant, the build that ran on the console and drew the legal screen), `bf0aad3a…78f0` (merged `main` after the review follow-up; built, **not run on the console**). Earlier diagnostic builds in the same session (`ea99f573…`, `e8929d86…`, `f2233305…`) froze the console or were superseded. Host/Linux builds were not rerun. Hardware results: [reports/HW_SWITCH_FIRST_RUN.md](reports/HW_SWITCH_FIRST_RUN.md).
+
