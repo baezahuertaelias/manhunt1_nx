@@ -159,3 +159,8 @@ Native builds (derived binaries, never committed): `29ad842d…` (pad latch), `8
 After the independent review of that work (snapshot-buffer race and tooling nits fixed) the final build is `415e6c54…`: built and statically checked, **not run on the console** (the run that moved the menu highlight used `247a98ee…`).
 Update: the final build `415e6c54…` was then run on the console (hold left at 1): main-menu highlight moved through four entries with plain taps, no crash, console up for the whole 106 s window.
 
+
+## 2026-11-03 deko-adapter-perf, first hardware session (UNVERIFIED outcome)
+- Build: `scripts/game-build-native.sh`, NRO SHA-256 fdcf540634ca6e89ebb19d9ab69d9444bd322c43ef0a1be292723274655fee7b (21,595,998 bytes). Upload at HW_RATE=100m verified by SHA read-back.
+- Session 1 (`--allow-gpu-backend MANHUNT_GPU_BACKEND=1 MANHUNT_DEKO_VERIFY=1`): after launch the console stopped answering ping/FTP (about 590 s observed), no TCP log, no SD log pulled, no crash report. Cause not determined (adapter freeze vs Wi-Fi drop/sleep). Verify result, pixel identity and speed are UNVERIFIED.
+- Next on hardware: check console state, pull `log.txt` from the SD card, then rerun with `MANHUNT_LOG_SYNC=1` and, to bisect, the same build with `MANHUNT_GPU_BACKEND=0` (known-good baseline) before enabling the adapter again.
