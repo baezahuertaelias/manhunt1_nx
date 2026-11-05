@@ -27,6 +27,18 @@ static int s_fb_state;                 /* 0 untried, 1 ready, -1 unavailable */
 static volatile uint32_t s_last_va, s_last_pitch;
 static volatile uint64_t s_presents;
 
+/* Complete-frame snapshot for the periodic BMP dump (MANHUNT_DUMP_SECS > 0).
+ * The CPU rasteriser draws into the very surface that is presented, so reading it
+ * from the dump thread captures half-drawn frames (a black band where the menu
+ * entries should be). Each present therefore copies the finished surface into one
+ * of two buffers; the dump reads the last complete one. Off unless dumps are on. */
+static uint8_t *s_snap[2];
+static size_t s_snap_cap;
+static uint32_t s_snap_pitch, s_snap_va_h;
+static int s_snap_idx = -1;            /* last complete buffer, guarded by s_snap_lock for readers/flip */
+static volatile int s_snap_enabled = -1;
+static Mutex s_snap_lock;
+
 static const uint8_t *guest_ptr(uint32_t va)
 {
     return (const uint8_t *)((uintptr_t)g_xbox_mem_offset + va);
@@ -45,15 +57,60 @@ void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars) { (void)name; (void)max_chars; }
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
 
+extern void manhunt_nv2a_deko3d_sync(void);
+
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
     uint32_t w, h, x, y, out_w, x0;
+    /* The GPU renderer (when on) keeps the target resident: guest RAM must be current before it is read. */
+    manhunt_nv2a_deko3d_sync();
     s_last_va = fb_va;
     s_last_pitch = pitch;
     s_presents++;
     if (s_presents == 1 || s_presents % 60 == 0)
         printf("[MH-FRAME] present %llu surface=0x%08X pitch=%u\n",
                (unsigned long long)s_presents, fb_va, pitch);
+
+    if (s_snap_enabled < 0) {
+        const char *e = getenv("MANHUNT_DUMP_SECS");
+        mutexInit(&s_snap_lock);
+        s_snap_enabled = (e && atoi(e) > 0) ? 1 : 0;
+    }
+    if (s_snap_enabled && pitch) {
+        uint32_t sw, sh;
+        surface_dims(pitch, &sw, &sh);
+        size_t sz = (size_t)pitch * sh;
+        if (sz > s_snap_cap) {
+            /* Grow: allocate first, swap the pointers under the lock (the dump
+             * thread copies under the same lock), free the old buffers after. */
+            uint8_t *a = malloc(sz), *b = malloc(sz);
+            if (a && b) {
+                uint8_t *old0, *old1;
+                mutexLock(&s_snap_lock);
+                old0 = s_snap[0];
+                old1 = s_snap[1];
+                s_snap[0] = a;
+                s_snap[1] = b;
+                s_snap_cap = sz;
+                s_snap_idx = -1;
+                mutexUnlock(&s_snap_lock);
+                free(old0);
+                free(old1);
+            } else {
+                free(a);
+                free(b);
+            }
+        }
+        if (s_snap_cap >= sz) {
+            int next = s_snap_idx < 0 ? 0 : s_snap_idx ^ 1;
+            memcpy(s_snap[next], guest_ptr(fb_va), sz);
+            mutexLock(&s_snap_lock);
+            s_snap_pitch = pitch;
+            s_snap_va_h = sh;
+            s_snap_idx = next;
+            mutexUnlock(&s_snap_lock);
+        }
+    }
 
     if (s_fb_state == 0) {
         s_fb_state = R_SUCCEEDED(framebufferCreate(&s_fb, nwindowGetDefault(), SCREEN_W, SCREEN_H,
@@ -64,19 +121,41 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     if (s_fb_state < 0 || !pitch)
         return;
     surface_dims(pitch, &w, &h);
+    if (h == 0 || w > 4096)                        /* pitch comes from the guest; keeps the sums below in 32 bits */
+        return;
     out_w = w * SCREEN_H / h;                      /* keep 4:3, pillarbox */
+    if (out_w > SCREEN_W)
+        out_w = SCREEN_W;
     x0 = (SCREEN_W - out_w) / 2;
     u32 stride;
     uint32_t *dst = framebufferBegin(&s_fb, &stride);
+    /* Column table (one division per output column, not per pixel) and repeated source rows copied:
+     * measured 8 ms per present with a division per pixel. Same pixels as before. */
+    static uint32_t xmap[SCREEN_W];
+    static uint32_t xmap_w, xmap_out;
+    if (xmap_w != w || xmap_out != out_w) {
+        for (x = 0; x < out_w && x < SCREEN_W; x++) xmap[x] = (x * w / out_w) * 4;
+        xmap_w = w;
+        xmap_out = out_w;
+    }
+    uint32_t prev_sy = 0xFFFFFFFFu;
+    uint32_t *prev_row = NULL;
     for (y = 0; y < SCREEN_H; y++) {
-        const uint8_t *src = guest_ptr(fb_va + (y * h / SCREEN_H) * pitch);
+        const uint32_t sy = y * h / SCREEN_H;
         uint32_t *row = (uint32_t *)((uint8_t *)dst + y * stride);
-        memset(row, 0, x0 * 4);
-        for (x = 0; x < out_w; x++) {
-            const uint8_t *p = src + (x * w / out_w) * 4;
-            row[x0 + x] = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+        if (sy == prev_sy && prev_row) {
+            memcpy(row, prev_row, SCREEN_W * 4);
+        } else {
+            const uint8_t *src = guest_ptr(fb_va + sy * pitch);
+            memset(row, 0, x0 * 4);
+            for (x = 0; x < out_w; x++) {
+                const uint8_t *p = src + xmap[x];
+                row[x0 + x] = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+            }
+            memset(row + x0 + out_w, 0, (SCREEN_W - x0 - out_w) * 4);
         }
-        memset(row + x0 + out_w, 0, (SCREEN_W - x0 - out_w) * 4);
+        prev_sy = sy;
+        prev_row = row;
     }
     framebufferEnd(&s_fb);
 }
@@ -88,8 +167,23 @@ int xbox_FramebufferDumpBmp(const char *prefix)
     uint32_t va = s_last_va, pitch = s_last_pitch, w, h, y;
     char path[256];
     FILE *f;
+    uint8_t *snap = NULL;
+    int complete = 0;
     if (!va || !pitch)
         return 0;
+    /* Prefer the last complete presented frame (see s_snap above). */
+    if (s_snap_enabled > 0) {
+        mutexLock(&s_snap_lock);
+        if (s_snap_idx >= 0 && s_snap_pitch) {
+            size_t sz = (size_t)s_snap_pitch * s_snap_va_h;
+            snap = malloc(sz);
+            if (snap) {
+                memcpy(snap, s_snap[s_snap_idx], sz);
+                pitch = s_snap_pitch;           /* keep the live pitch when the copy failed */
+            }
+        }
+        mutexUnlock(&s_snap_lock);
+    }
     surface_dims(pitch, &w, &h);
     snprintf(path, sizeof path, "%s%05d.bmp", prefix, seq++);
     f = fopen(path, "wb");
@@ -106,14 +200,16 @@ int xbox_FramebufferDumpBmp(const char *prefix)
     uint8_t *line = malloc(row + pad);
     memset(line, 0, row + pad);
     for (y = 0; y < h; y++) {                       /* bottom-up */
-        const uint8_t *src = guest_ptr(va + (h - 1 - y) * pitch);
+        const uint8_t *src = snap ? snap + (size_t)(h - 1 - y) * pitch : guest_ptr(va + (h - 1 - y) * pitch);
         for (uint32_t x = 0; x < w; x++)
             memcpy(line + x * 3, src + x * 4, 3);   /* B,G,R */
         fwrite(line, 1, row + pad, f);
     }
     free(line);
+    complete = snap != NULL;
+    free(snap);
     fclose(f);
-    printf("[MH-FRAME] dump %s (presents=%llu)\n", path, (unsigned long long)s_presents);
+    printf("[MH-FRAME] dump %s (presents=%llu%s)\n", path, (unsigned long long)s_presents, complete ? ", complete frame" : ", live surface");
     return 1;
 }
 

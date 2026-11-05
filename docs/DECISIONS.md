@@ -80,7 +80,19 @@ The user now has a physical modded Switch and a Mac host, and asked to stop usin
 - **Native build on the Mac** (`scripts/game-build-native.sh`), no Docker. The Docker scripts stay the Linux path. Rejected: keeping Docker Desktop on the Mac (not needed once devkitPro is installed natively).
 - **One SD folder** `sdmc:/switch/manhunt1_nx/` for the NRO, data, saves, frames, `manhunt.env` and logs (`-DMANHUNT_SD_BASE` overrides). The Eden scripts keep the old layout and are marked stale and UNVERIFIED.
 - **Diagnostics are opt-in** (`MANHUNT_LOG_SYNC`, `MANHUNT_LOG_TCP`, `MANHUNT_WD`, `MANHUNT_WD_DUMP`, `MANHUNT_FOCUS`, `RECOMP_SPAN_4G`) because a diagnostic must not be able to stall the game. Always on: the crash handler and the exit/applet log lines.
-- **Transfer by FTP, logs by TCP.** `nxlink` from the Mac was reset or stalled in every attempt.
+- **Transfer by FTP, logs by TCP.** `nxlink` from the Mac was reset or stalled in every attempt. Update 2026-11-04: from a Windows host, `nxlink` in the toolchain container worked with the log stream, after some stalled sends whose cause is not established, and the copy it sends runs directly rather than replacing the NRO on the card ([WINDOWS_SWITCH_SETUP.md](WINDOWS_SWITCH_SETUP.md)). That is the Windows procedure; this decision still stands for the Mac.
 - **Evidence before changes.** After several guesses failed, three read-only investigations (public sources and Atmosphère code, a code audit, a comparison with a console-proven sibling port) ranked the suspects; a combined fix was tried because each failed run can reset the console. The cost: it is not known which part of patch 0016 mattered (HW-FREEZE-001).
 - **Branches:** work merged to `main` by pull request; only `main` and `level-load-001` are kept, and `level-load-001` was fast-forwarded to `main`.
 
+## 2026-11-04 — Resident render target and time-poll yield are opt-in
+
+Two independent reviews of `deko-adapter-perf` failed the candidate, the second with exact conditions.
+
+- **`MANHUNT_DEKO_RESIDENT` is off by default.** It has a known gap, the guest CPU reading or writing the surface with no GPU completion signal, and verify cannot observe that gap, so a passing verify cannot justify it. In-level verify with the piece on is a gate for HW-PERF-002 before it can ever default on.
+- **`RECOMP_TIME_YIELD` is off by default.** It applies to every Switch build and changes guest timing, and its sleep granularity is not measured. Under AGENTS.md a gameplay difference needs a measured benefit first.
+- **Cost accepted, with limits on what it says.** The menu drops from about 43.6 flips per second in steady windows (39 over the whole log) to about 28.85, on a build that also differs. The drop is not attributed to either piece. The first mission is about 0.19 flips per second either way, so neither piece decides the level, where the CPU rasteriser dominates.
+- **Rejected:** keeping them on because the menu then exceeds 30 flips per second. Beta 1's gate is the first level, and correctness outranks speed.
+- **Depth state is not the single key blocker.** The earlier hypothesis is disproved by `only` = 0. HW-PERF-002 starts by measuring which `surface_ok` check fails and how raster time splits by refusal class, not by adding a feature.
+- **Tooling goes to its own task** (HW-TOOLS-002). The final review decides whether any of it must come first.
+
+Reviewer approval of the final state is still pending ([NEXT_ACTION.md](../NEXT_ACTION.md)).

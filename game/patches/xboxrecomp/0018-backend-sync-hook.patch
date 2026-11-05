@@ -1,0 +1,90 @@
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -133,6 +133,12 @@
+     int (*can_draw_transformed)(const Nv2aSurface *s, const Nv2aDrawInfo *info,
+                                 const Nv2aTransformInfo *transformed);
+     uint32_t wants_float_diffuse; /* request raw colours without changing Nv2aVertex */
++    /* Optional (patch 0018). Bring guest RAM up to date with whatever the back end keeps on the GPU.
++     * invalidate != 0: the CPU renderer is about to take over the surface, so the back end must also
++     * forget its copy. Called wherever the title can see the GPU as done (the pushbuffer GET is
++     * published, the semaphore is released, a report is written, the frame is presented) and when the
++     * runtime falls back to the CPU renderer after a batch was accepted. */
++    void (*sync)(int invalidate);
+ } Nv2aBackend;
+ 
+ /* Register (or, with NULL, remove) the back end. Call before the title starts
+@@ -147,6 +153,8 @@
+  * P8 index/palette spans must fit primary or contiguous 64 MiB RAM views.
+  * Returns 0 if the format is not supported. */
+ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
++/* Calls the registered back end's sync hook, if any (patch 0018). */
++void nv2a_backend_sync(int invalidate);
+ 
+ /* Where BACK_END_WRITE_SEMAPHORE_RELEASE (0x1D70) values land: the guest VA
+  * of the semaphore the title reads GPU progress from (for XDK D3D, the
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -790,6 +790,12 @@
+ /* ---- Render back end (nv2a_backend.h) ------------------------------- */
+ 
+ static const Nv2aBackend *s_backend;
++
++void nv2a_backend_sync(int invalidate)
++{
++    if (s_backend && s_backend->sync)
++        s_backend->sync(invalidate);
++}
+ static int s_backend_batch;
+ static uint32_t s_backend_shading;
+ static Nv2aDrawInfo s_backend_info;
+@@ -3171,7 +3177,7 @@
+         nv2a_backend_transform_info(s_xf, n, &transformed);
+         s_backend_batch = !!s_backend->can_draw_transformed(&surface, &s_backend_info, &transformed);
+     }
+-    if (backend_draws() && !backend_prepare(n)) s_backend_batch = 0;
++    if (backend_draws() && !backend_prepare(n)) { s_backend_batch = 0; nv2a_backend_sync(1); }
+     switch (s_gpu.prim) {
+     case NV_PRIM_TRIANGLES:
+         for (i = 0; i + 2 < n; i += 3)
+@@ -3262,7 +3268,7 @@
+         }
+     }
+ 
+-    if (backend_draws() && !backend_prepare(s_gpu.idx_count)) s_backend_batch = 0;
++    if (backend_draws() && !backend_prepare(s_gpu.idx_count)) { s_backend_batch = 0; nv2a_backend_sync(1); }
+     switch (s_gpu.prim) {
+     case NV_PRIM_TRIANGLES:
+         for (i = 0; i + 2 < s_gpu.idx_count; i += 3)
+@@ -3968,6 +3974,7 @@
+      * held 0xFF000000 at times, which put the write outside guest memory). */
+     if (subch == 0 && method == 0x1D70 && s_sem_va) {
+         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
++        nv2a_backend_sync(0);          /* the title may read the surface once it sees the semaphore */
+         *(volatile uint32_t *)(mem + s_sem_va) = param;
+         return;
+     }
+@@ -4155,6 +4162,7 @@
+         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+         uint32_t at = dma_resolve(param & 0x00FFFFFFu);
+         uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
++        nv2a_backend_sync(0);          /* the report tells the title the GPU is done */
+         memcpy(mem + at, &stamp, 8);
+         memcpy(mem + at + 8, &s_gpu.zpass_count, 4);
+         memset(mem + at + 12, 0, 4);
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -1594,7 +1594,13 @@
+                         nv2a_pb_scan_report();
+                     }
+                 }
+-                /* Consumed, now that it has actually been executed. */
++                /* Consumed, now that it has actually been executed. A GPU renderer that keeps the
++                 * surface resident brings guest RAM up to date first: the title sees GET reach PUT as
++                 * "the GPU is idle" and may read the surface (patch 0018). */
++                {
++                    extern void nv2a_backend_sync(int invalidate);
++                    nv2a_backend_sync(0);
++                }
+                 {
+                     volatile uint32_t *get =
+                         (volatile uint32_t *)((char *)regs
