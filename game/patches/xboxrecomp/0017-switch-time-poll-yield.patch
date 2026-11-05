@@ -15,12 +15,12 @@
 +     * the console: about 3.8 million per second, one core at 100%). Every 64th call sleeps briefly, BEFORE
 +     * the time is read, so the value returned is current and the wait loop stops burning a core (heat,
 +     * battery). How close to its deadline a wait now ends depends on the sleep granularity: NOT measured.
-+     * RECOMP_TIME_YIELD=0 turns this off. */
++     * It changes guest timing, so RECOMP_TIME_YIELD=1 turns it on; off by default until that is measured. */
 +    static int yield_on = -1;
 +    static unsigned long calls;
 +    if (yield_on < 0) {
 +        const char *e = getenv("RECOMP_TIME_YIELD");
-+        yield_on = !(e && *e == '0');
++        yield_on = e && *e == '1';
 +    }
 +    if (yield_on && (++calls & 63u) == 0) {
 +        struct timespec ts = {0, 20000};

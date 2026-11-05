@@ -155,7 +155,7 @@ def main(run):
     first_present = "[MH-FRAME] present 1" in log
     p("- Frames presented: %s%s" % (pres[-1] if pres else ("at least 1" if first_present else "0 seen"), " (from the periodic frame dump)" if pres else ""))
     vb = re.findall(r"\[NV2A\] vblank (\d+): last 600 in (\d+) ms", log)
-    if vb:
+    if vb and int(vb[-1][1]) > 0:
         rate = 600000.0 / float(vb[-1][1])
         p("- Vblank timer: %s ms per 600 (%.1f Hz)" % (vb[-1][1], rate))
     pix = re.findall(r"\[GPU\] (\d+) pixels written", log)
@@ -186,7 +186,7 @@ def main(run):
             rc, rn = last["raster"]
             fc, fn = last["flip"]
             p("- Derived: raster wall time is %.0f%% of the flip intervals (%.1f s of %.1f s); about %.1f ms per raster call; flip interval about %.2f s per frame." % (100.0 * rn / fn, rn / 1e9, fn / 1e9, rn / 1e6 / max(rc, 1), fn / 1e9 / max(fc, 1)))
-            if pix:
+            if pix and rn > 0:
                 p("- Derived: about %.2f million pixels per second through the rasteriser (%s pixels in %.1f s), about %.0f ns per pixel. Rough: the counter and the profile windows are not identical." % (int(pix[-1]) / (rn / 1e9) / 1e6, pix[-1], rn / 1e9, rn / float(max(int(pix[-1]), 1))))
         for scope in ("present", "clear", "scan_excluding_methods_ns"):
             if scope in last and scope != "scan_excluding_methods_ns":
@@ -212,7 +212,7 @@ def main(run):
             if int(bad) == 0:
                 p("- **Verify: %s comparisons, none differ (fast path vs conservative path, exact).**" % n)
             else:
-                p("- **Verify: %s of %s comparisons differ (%s pixels, largest channel difference %s): the fast path is NOT pixel-identical; bisect with MANHUNT_DEKO_RECT/CACHED/TCACHE/RESIDENT=0.**" % (bad, n, px, worst))
+                p("- **Verify: %s of %s comparisons differ (%s pixels, largest channel difference %s): the fast path is NOT pixel-identical; bisect with MANHUNT_DEKO_RECT/CACHED/TCACHE=0, and RESIDENT=0 if it was turned on.**" % (bad, n, px, worst))
         elif "VERIFY mode" in log:
             p("- Verify mode was on but no comparison was logged yet (run too short?).")
         if "[MH-DEKO] FAIL" in log:

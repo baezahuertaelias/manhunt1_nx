@@ -121,16 +121,20 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     if (s_fb_state < 0 || !pitch)
         return;
     surface_dims(pitch, &w, &h);
+    if (h == 0 || w > 4096)                        /* pitch comes from the guest; keeps the sums below in 32 bits */
+        return;
     out_w = w * SCREEN_H / h;                      /* keep 4:3, pillarbox */
+    if (out_w > SCREEN_W)
+        out_w = SCREEN_W;
     x0 = (SCREEN_W - out_w) / 2;
     u32 stride;
     uint32_t *dst = framebufferBegin(&s_fb, &stride);
     /* Column table (one division per output column, not per pixel) and repeated source rows copied:
      * measured 8 ms per present with a division per pixel. Same pixels as before. */
-    static uint16_t xmap[SCREEN_W];
+    static uint32_t xmap[SCREEN_W];
     static uint32_t xmap_w, xmap_out;
     if (xmap_w != w || xmap_out != out_w) {
-        for (x = 0; x < out_w && x < SCREEN_W; x++) xmap[x] = (uint16_t)((x * w / out_w) * 4);
+        for (x = 0; x < out_w && x < SCREEN_W; x++) xmap[x] = (x * w / out_w) * 4;
         xmap_w = w;
         xmap_out = out_w;
     }

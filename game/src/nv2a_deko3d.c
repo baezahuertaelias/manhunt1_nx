@@ -61,7 +61,8 @@ static uint64_t texture_bytes(const Nv2aTexture *t)
     return 0;
 }
 
-static int texture_ok(const Nv2aTexture *t)
+/* Every texture_ok check except the P8 index scan. */
+static int texture_shape_ok(const Nv2aTexture *t)
 {
     uint64_t bytes;
     if (!t || !t->width || !t->height || t->width > MAX_DIMENSION
@@ -85,8 +86,14 @@ static int texture_ok(const Nv2aTexture *t)
             bytes = (uint64_t)(t->width / 4) * (t->height / 4) * 16;
         } else return 0;
     }
-    if (!ram_span(t->offset, bytes)) return 0;
+    return ram_span(t->offset, bytes);
+}
+
+static int texture_ok(const Nv2aTexture *t)
+{
+    if (!texture_shape_ok(t)) return 0;
     if (t->color == 0x0B) {
+        const uint64_t bytes = texture_bytes(t);
         const uint8_t *indices = (const uint8_t *)xbox_GetMemoryOffset() + t->offset;
         for (uint64_t i = 0; i < bytes; i++) if (indices[i] >= t->palette_entries) return 0;
     }
@@ -115,6 +122,67 @@ static int state_ok(const Nv2aRenderState *r)
             && factor(r->blend_src, &src) && factor(r->blend_dst, &dst)));
 }
 
+/* Diagnostics only (decides nothing): why can_draw refused a draw. "any" counts every failing check of a
+ * refused draw; "only" counts draws refused by that check alone, so it is what supporting the feature would
+ * move to the GPU. That is an upper bound: a null render state or a bad P8 index (not rescanned here: up to
+ * 4 MB per call) is not a named check, and shows as "other" only when no named check fails.
+ * An unsupported format is measured as a 32-bit texture for tex_other.
+ * Printed by flip() as [MH-DEKO-R]. Runs only on the refused path. */
+enum { RJ_SURFACE, RJ_DEPTH, RJ_STENCIL, RJ_CULL, RJ_COLOR_MASK, RJ_ALPHA, RJ_BLEND, RJ_SHADING, RJ_PATH,
+       RJ_FILTER_NO_COMBINER, RJ_PRIMITIVE, RJ_NO_TEXCOORDS, RJ_NO_TEXTURE, RJ_TEX_LEVELS, RJ_TEX_ADDR,
+       RJ_TEX_FILTER, RJ_TEX_FORMAT, RJ_TEX_OTHER, RJ_OTHER, RJ_COUNT };
+static const char *const s_rj_name[RJ_COUNT] = { "surface", "depth", "stencil", "cull", "color_mask", "alpha",
+    "blend", "shading", "path", "filter_no_combiner", "primitive", "no_texcoords", "no_texture", "tex_levels",
+    "tex_addr", "tex_filter", "tex_format", "tex_other", "other" };
+static uint64_t s_rj_any[RJ_COUNT], s_rj_only[RJ_COUNT], s_rj_color[128];
+
+static void count_reject(const Nv2aSurface *s, const Nv2aRenderState *r, const Nv2aDrawInfo *info)
+{
+    DkBlendFactor src, dst;
+    uint32_t m = 0;
+    if (!s_device || !surface_ok(s)) m |= 1u << RJ_SURFACE;
+    if (r) {
+        if (r->depth_test_enable || r->depth_write) m |= 1u << RJ_DEPTH;
+        if (r->stencil_enable) m |= 1u << RJ_STENCIL;
+        if (r->cull_enable) m |= 1u << RJ_CULL;
+        if (r->color_mask & ~0x01010101u) m |= 1u << RJ_COLOR_MASK;
+        if (r->alpha_test_enable && !(r->alpha_func == 0x204 && (r->alpha_ref == 0 || r->alpha_ref == 128)))
+            m |= 1u << RJ_ALPHA;
+        if (r->blend_enable && !(r->blend_eq == 0x8006 && factor(r->blend_src, &src) && factor(r->blend_dst, &dst)))
+            m |= 1u << RJ_BLEND;
+    }
+    if (info->shading != NV2A_SHADE_DIFFUSE && info->shading != NV2A_SHADE_MODULATE) m |= 1u << RJ_SHADING;
+    if (info->path != NV2A_DRAW_FFP && info->path != NV2A_DRAW_PROGRAM) m |= 1u << RJ_PATH;
+    if (info->shading == NV2A_SHADE_MODULATE && !info->combiner_seen && info->texture && info->texture->filter != 0)
+        m |= 1u << RJ_FILTER_NO_COMBINER;
+    if (info->primitive < 5 || info->primitive > 10) m |= 1u << RJ_PRIMITIVE;
+    if (info->shading == NV2A_SHADE_MODULATE) {
+        const Nv2aTexture *t = info->texture;
+        if (info->path != NV2A_DRAW_PROGRAM && !info->has_texcoords) m |= 1u << RJ_NO_TEXCOORDS;
+        if (!t) m |= 1u << RJ_NO_TEXTURE;
+        else {
+            /* The same texture with the named checks made to pass: still refused means another check failed too. */
+            Nv2aTexture rest = *t;
+            rest.levels = 1; rest.addr_u = rest.addr_v = 3; rest.filter = 0;
+            if (t->color != 0x12 && t->color != 0x0B && t->color != 0x0E) rest.color = 0x06;
+            if (t->levels != 1) m |= 1u << RJ_TEX_LEVELS;
+            if (t->addr_u != 3 || t->addr_v != 3) m |= 1u << RJ_TEX_ADDR;
+            if (t->filter != 0 && t->filter != MENU_FILTER) m |= 1u << RJ_TEX_FILTER;
+            if (t->color != 0x12 && t->color != 0x06 && t->color != 0x0B && t->color != 0x0E) {
+                m |= 1u << RJ_TEX_FORMAT;
+                s_rj_color[t->color & 127]++;
+            }
+            if (!texture_shape_ok(&rest)) m |= 1u << RJ_TEX_OTHER;
+        }
+    }
+    if (!m) m = 1u << RJ_OTHER;
+    for (int i = 0; i < RJ_COUNT; i++) {
+        if (!(m & (1u << i))) continue;
+        s_rj_any[i]++;
+        if (m == (1u << i)) s_rj_only[i]++;
+    }
+}
+
 static int can_draw(const Nv2aSurface *s, const Nv2aRenderState *r,
                     const Nv2aDrawInfo *info)
 {
@@ -126,7 +194,7 @@ static int can_draw(const Nv2aSurface *s, const Nv2aRenderState *r,
         && info->primitive >= 5 && info->primitive <= 10
         && (info->shading != NV2A_SHADE_MODULATE
             || ((info->path == NV2A_DRAW_PROGRAM || info->has_texcoords) && texture_ok(info->texture)));
-    if (!ok) { s_stats.rejected_draws++; resident_invalidate(SYNC_REJECT); }
+    if (!ok) { s_stats.rejected_draws++; count_reject(s, r, info); resident_invalidate(SYNC_REJECT); }
     return ok;
 }
 
@@ -206,7 +274,8 @@ static void fail_closed(void)
  *   MANHUNT_DEKO_RECT     only the rectangle a draw touches is transferred;
  *   MANHUNT_DEKO_TCACHE   decoded textures are kept on the GPU, keyed by address, format and a
  *                         64-bit hash of every byte the decode reads (texels and palette);
- *   MANHUNT_DEKO_RESIDENT the render target stays on the GPU across calls. Guest RAM is brought up
+ *   MANHUNT_DEKO_RESIDENT default OFF, "=1" turns it on, unlike the others, because of the gap below.
+ *                         The render target stays on the GPU across calls. Guest RAM is brought up
  *                         to date (a "sync") before anything else can read or overwrite the surface:
  *                         the present (horizon_compat.c calls manhunt_nv2a_deko3d_sync first), a
  *                         draw or clear the CPU renderer takes (the can_* callbacks), a texture that
@@ -228,7 +297,7 @@ static DkMemBlock s_code_mem;
 static uint32_t s_code_cap;
 static DkShader s_vs, s_fs_diffuse, s_fs_texture;
 static int s_shaders_ready;
-static int s_use_rect = 1, s_want_cached = 1, s_use_tcache = 1, s_use_resident = 1, s_verify;
+static int s_use_rect = 1, s_want_cached = 1, s_use_tcache = 1, s_use_resident = 0, s_verify;
 
 typedef struct { uint64_t prep, build, gpu, readback, tex; uint32_t draws, clears, pixels, tex_hits, tex_misses, syncs, why[SYNC_REASONS]; } DekoTime;
 static DekoTime s_time;
@@ -554,8 +623,11 @@ static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_ar
         int same = R.valid && R.va == s->color_va && R.pitch == s->pitch && R.w == w && R.h == h && R.pix0 == o->pix0;
         if (!same) { resident_invalidate(SYNC_SWITCH); upload_full = 1; }
         else if (b && b->shading == NV2A_SHADE_MODULATE && b->texture && R.dirty) {
-            /* render-to-texture: the texture decode reads guest RAM, which may overlap the dirty surface */
-            if (spans_overlap(b->texture->offset, texture_bytes(b->texture), s->color_va, (uint64_t)s->pitch * h))
+            /* render-to-texture: the texture decode reads guest RAM, which may overlap the dirty surface;
+             * a P8 texture also reads its palette there */
+            const Nv2aTexture *t = b->texture;
+            if (spans_overlap(t->offset, texture_bytes(t), s->color_va, (uint64_t)s->pitch * h)
+                || (t->color == 0x0B && spans_overlap(t->palette_va, (uint64_t)t->palette_entries * 4, s->color_va, (uint64_t)s->pitch * h)))
                 resident_flush_dirty(SYNC_OVERLAP);
         }
     }
@@ -867,6 +939,18 @@ static void flip(void)
             (unsigned long long)s_flips, (unsigned long long)s_stats.draws,
             (unsigned long long)s_stats.clears, (unsigned long long)s_stats.rejected_draws,
             (unsigned long long)s_stats.rejected_clears, (unsigned long long)s_stats.rejected_transforms);
+    /* Every 5 flips, and only when more draws were refused: a level runs far below 60 flips per minute. */
+    static uint64_t reported;
+    if (s_flips % 5 == 0 && s_stats.rejected_draws != reported) {
+        reported = s_stats.rejected_draws;
+        printf("[MH-DEKO-R] flip=%llu refused=%llu transforms=%llu (reason any/only):", (unsigned long long)s_flips,
+            (unsigned long long)s_stats.rejected_draws, (unsigned long long)s_stats.rejected_transforms);
+        for (int i = 0; i < RJ_COUNT; i++)
+            if (s_rj_any[i]) printf(" %s=%llu/%llu", s_rj_name[i], (unsigned long long)s_rj_any[i], (unsigned long long)s_rj_only[i]);
+        for (int i = 0; i < 128; i++)
+            if (s_rj_color[i]) printf(" fmt0x%02X=%llu", i, (unsigned long long)s_rj_color[i]);
+        printf("\n");
+    }
 }
 
 static const Nv2aBackend s_backend = {
@@ -897,7 +981,7 @@ int manhunt_nv2a_deko3d_init(void)
         e = getenv("MANHUNT_DEKO_TCACHE");
         s_use_tcache = !(e && *e == '0');
         e = getenv("MANHUNT_DEKO_RESIDENT");
-        s_use_resident = !(e && *e == '0');
+        s_use_resident = e && *e == '1';   /* off by default: see the gap described above */
         e = getenv("MANHUNT_DEKO_VERIFY");
         s_verify = e && *e == '1';
         if (s_verify) printf("[MH-DEKO] VERIFY mode: every call runs twice and is compared (slow; timings are not representative)\n");

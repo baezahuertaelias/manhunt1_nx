@@ -4,6 +4,8 @@
 # Needs the patched runtime headers (game/build/xboxrecomp, made by scripts/game-build-native.sh) and the
 # deko3d header from devkitPro (/opt/devkitpro/libnx/include).   usage: tests/deko-adapter/run.sh [seeds]
 set -euo pipefail
+# LeakSanitizer exits without flushing stdout, which would hide the RESULT line that the mutation check reads.
+export ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0"
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 seeds="${1:-30}"
 tmp="$(mktemp -d)"
@@ -15,9 +17,22 @@ build() {  # extra flags..., output
   local out="${@: -1}"; local extra=("${@:1:$#-1}")
   clang "${cflags[@]}" ${extra[@]+"${extra[@]}"} "$root/tests/deko-adapter/test_adapter.c" "$root/tests/deko-adapter/stub_deko.c" -o "$out" -lm
 }
+# Old clang's ASan can segfault at start under high-entropy ASLR, before printing anything (measured: 9 of 40
+# runs, clang 14 in Docker Desktop). That is not a test result, and it would make a mutant look caught: retry it.
+run_test() {  # binary seeds
+  local out rc try
+  for try in 1 2 3 4 5 6 7 8 9 10; do
+    # A hang (rc 124) ends with no verdict: INCONCLUSIVE. timeout's own core-dump message is not test output.
+    rc=0; out="$(timeout 600 "$1" "$2" 2>&1)" || rc=$?
+    out="${out#timeout: the monitored command dumped core}"
+    if [ "$rc" != 139 ] || [ -n "$out" ]; then printf '%s\n' "$out"; return "$rc"; fi
+    echo "run_test: $1 gave SIGSEGV and no output (try $try), retrying" >&2
+  done
+  echo "$1: no output and SIGSEGV in all $try tries"; return 139
+}
 echo "== real adapter vs conservative reference ($seeds seeds)"
 build "$tmp/test"
-"$tmp/test" "$seeds" 2>&1 | grep -v '^\[MH-DEKO'
+run_test "$tmp/test" "$seeds" | grep -v '^\[MH-DEKO'
 
 echo; echo "== mutation test: each deliberately broken adapter MUST be caught"
 python3 -I - "$root" "$tmp" <<'PY'
@@ -42,14 +57,15 @@ for i, (name, (a, b)) in enumerate(mutants.items(), 1):
     open("%s/m%d.c" % (tmp, i), "w").write(src.replace(a, b, 1))
 open(tmp + "/names.txt", "w").write("\n".join(mutants.keys()) + "\n")
 PY
-i=0; survived=0
+i=0; survived=0; inconclusive=0
 while IFS= read -r name; do
   i=$((i+1))
   build "-DADAPTER_SRC=\"$tmp/m$i.c\"" -I "$root/game/src" "$tmp/mut$i"
-  if "$tmp/mut$i" "$seeds" 2>&1 | grep -v '^\[MH-DEKO' | grep -q "RESULT: all passed"; then
-    echo "SURVIVED  $name   <-- the test did NOT catch this bug"; survived=$((survived+1))
-  else
-    echo "killed    $name"
-  fi
+  result="$(run_test "$tmp/mut$i" "$seeds" || true)"
+  case "$result" in
+    *"RESULT: all passed"*) echo "SURVIVED  $name   <-- the test did NOT catch this bug"; survived=$((survived+1)) ;;
+    *"RESULT: "*" FAILED"*|*"ERROR: AddressSanitizer"*|*"unexpectedly rejected"*|*"expected a rejection"*) echo "killed    $name" ;;
+    *) echo "INCONCLUSIVE $name   <-- the run gave no verdict"; inconclusive=$((inconclusive+1)) ;;
+  esac
 done < "$tmp/names.txt"
-echo; if [ "$survived" = 0 ]; then echo "MUTATION RESULT: every planted bug was caught"; else echo "MUTATION RESULT: $survived planted bug(s) survived"; exit 1; fi
+echo; if [ "$survived" = 0 ] && [ "$inconclusive" = 0 ]; then echo "MUTATION RESULT: every planted bug was caught"; else echo "MUTATION RESULT: $survived planted bug(s) survived, $inconclusive inconclusive"; exit 1; fi

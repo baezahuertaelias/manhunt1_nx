@@ -169,14 +169,15 @@ int main(int argc, char **argv)
     static const Config ref = {"reference (all fast pieces off, nothing resident)",
         {"MANHUNT_DEKO_RECT=0", "MANHUNT_DEKO_CACHED=0", "MANHUNT_DEKO_TCACHE=0", "MANHUNT_DEKO_RESIDENT=0", NULL}, 1, 1};
     static const Config cfgs[] = {
-        {"all on", {NULL}, 1, 1},
-        {"RECT=0", {"MANHUNT_DEKO_RECT=0", NULL}, 1, 1},
-        {"CACHED=0", {"MANHUNT_DEKO_CACHED=0", NULL}, 1, 1},
-        {"TCACHE=0", {"MANHUNT_DEKO_TCACHE=0", NULL}, 1, 1},
+        {"defaults (resident off)", {NULL}, 1, 1},
+        {"all on", {"MANHUNT_DEKO_RESIDENT=1", NULL}, 1, 1},
+        {"RECT=0", {"MANHUNT_DEKO_RECT=0", "MANHUNT_DEKO_RESIDENT=1", NULL}, 1, 1},
+        {"CACHED=0", {"MANHUNT_DEKO_CACHED=0", "MANHUNT_DEKO_RESIDENT=1", NULL}, 1, 1},
+        {"TCACHE=0", {"MANHUNT_DEKO_TCACHE=0", "MANHUNT_DEKO_RESIDENT=1", NULL}, 1, 1},
         {"RESIDENT=0", {"MANHUNT_DEKO_RESIDENT=0", NULL}, 1, 1},
-        {"VERIFY=1, all on", {"MANHUNT_DEKO_VERIFY=1", NULL}, 1, 1},
+        {"VERIFY=1, all on", {"MANHUNT_DEKO_VERIFY=1", "MANHUNT_DEKO_RESIDENT=1", NULL}, 1, 1},
         {"VERIFY=1, RESIDENT=0", {"MANHUNT_DEKO_VERIFY=1", "MANHUNT_DEKO_RESIDENT=0", NULL}, 1, 1},
-        {"NEGATIVE CONTROL: all on, sync calls withheld (must differ)", {NULL}, 0, 0},
+        {"NEGATIVE CONTROL: all on, sync calls withheld (must differ)", {"MANHUNT_DEKO_RESIDENT=1", NULL}, 0, 0},
     };
     uint8_t *ga = malloc(GUEST_BYTES), *gb = malloc(GUEST_BYTES);
     static Trace A, B;
@@ -200,5 +201,7 @@ int main(int argc, char **argv)
         failures += !ok;
     }
     printf(failures ? "RESULT: %d FAILED\n" : "RESULT: all passed\n", failures);
+    free(ga);
+    free(gb);
     return failures != 0;
 }

@@ -16,7 +16,9 @@
 | **Milestone 2: Switch boot to menu** | `scripts/switch-boot-proof.sh` (builds, copies data to the emulated SD, runs 240 s in Eden, checks markers/frames) | PASS 2026-10-27 (Eden, llvmpipe) |
 | Host boot to menu | `scripts/game-build.sh` then `scripts/game-run.sh 100` with the boot switches (CONFIGURATION.md) | PASS 2026-10-27 |
 | Horizon capability probe | build `tests/horizon-probe`, `scripts/emu-run.sh tests/horizon-probe/horizon-probe.nro HZ-PROBE` | 2026-10-27: exception=0 shmem_alias=0 codemem_alias=1 window=1 (measurement) |
-| Hardware playability / 30 FPS | requires a physical Switch | UNVERIFIED |
+| Hardware 30 FPS in the first level | render profile on a physical Switch ([report](../reports/HW_DEKO_ADAPTER_RUNS.md)) | FAIL 2026-11-04: about 0.19 flips per second in the first mission |
+| Hardware playability | requires a physical Switch and a person at the controller | UNVERIFIED |
+| **Deko adapter differential and mutation** | `tests/deko-adapter/run.sh 30` (section below) | PASS 2026-11-04 on the source of NRO `45892c0f…`, 9 of 9 configurations, 8 of 8 mutants |
 
 `scripts/emu-run.sh` exit codes:
 
@@ -82,6 +84,8 @@ Procedure: [MACOS_SWITCH_SETUP.md](MACOS_SWITCH_SETUP.md) section 0. A hardware 
 
 ## Deko adapter host differential and mutation test (`tests/deko-adapter/run.sh`)
 
-Runs the real `game/src/nv2a_deko3d.c` against a software deko3d stand-in on the host and compares guest memory with a conservative reference (all optimisations off) over random seeds. Covers RECT/CACHED/TCACHE/RESIDENT on and off, the in-adapter verify mode, a negative control (sync withheld, must differ), and 8 planted bugs (M1-M8) that must each be caught.
-Result 2026-11-02, 12 seeds: all configurations pass, all 8 mutants killed. A verify-mode false positive was a test-harness ordering flaw (optimised pass wrote guest RAM before the conservative pass read the same texture); the conservative pass now runs first.
-Limits: the stand-in is not the real GPU, so this does not prove Switch behaviour. Hardware pixel identity stays UNVERIFIED until the `MANHUNT_DEKO_VERIFY=1` run on the console.
+Runs the real `game/src/nv2a_deko3d.c` against a software deko3d stand-in on the host and compares guest memory with a conservative reference (all optimisations off) over random seeds. Covers the defaults (resident off), RECT/CACHED/TCACHE/RESIDENT on and off, the in-adapter verify mode, a negative control (sync withheld, must differ), and 8 planted bugs (M1-M8) that must each be caught. Configurations that exercise the resident target, and the negative control, request `MANHUNT_DEKO_RESIDENT=1` explicitly.
+Result 2026-11-02, 12 seeds: all configurations pass, all 8 mutants killed. A verify-mode false positive was a test-harness ordering flaw (optimised pass wrote guest RAM before the conservative pass read the same texture); the conservative pass now runs first. This result predates the strict rule below and is not trustworthy on its own.
+Rules since 2026-11-04: leak detection is off, because LeakSanitizer exits without flushing the `RESULT` line. Clang 14's ASan can segfault at start with no output, at random (9 of 40 runs measured, with either form of `ASAN_OPTIONS`); such a run is retried and logged to stderr. A mutant counts as killed only on `RESULT: N FAILED`, an AddressSanitizer report or an explicit test abort. Anything else is INCONCLUSIVE and the script exits 1, as it does for a survivor. Each run is also bounded at 600 s, so that a hang gives INCONCLUSIVE; the result below had that bound.
+Result 2026-11-04, source of NRO `45892c0f…`, Debian clang 14.0.6, 30 seeds: 9 of 9 configurations pass, including the negative control (30 of 30 differ); 8 of 8 mutants killed; `MUTATION RESULT: every planted bug was caught`, rc=0; start-up SIGSEGVs retried and logged. Later source edits were comments only, and the rebuilt NRO has the same hash.
+Limits: the stand-in is not the real GPU, so this does not prove Switch behaviour. No test case covers the P8 palette in the render-to-texture overlap flush: UNVERIFIED by test. On the console `MANHUNT_DEKO_VERIFY=1` found 0 differences on the main menu and, thinly, in the level; a level-wide pixel-identity pass and the resident target under heavier GPU use stay UNVERIFIED ([report](../reports/HW_DEKO_ADAPTER_RUNS.md)). Verify cannot observe a guest CPU access with no GPU completion signal.

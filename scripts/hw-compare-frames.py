@@ -29,6 +29,9 @@ def compare(a, b, ignore_top=0):
     if ra[0] != rb[0] or ra[1] != rb[1]:
         return {"error": "size differs %dx%d vs %dx%d" % (ra[0], ra[1], rb[0], rb[1])}
     w, h = ra[0], ra[1]
+    if ignore_top >= h:
+        sys.stderr.write("--ignore-top %d leaves no rows: image height is %d\n" % (ignore_top, h))
+        sys.exit(2)
     pa, pb = ra[2], rb[2]
     diff = 0
     worst = 0
