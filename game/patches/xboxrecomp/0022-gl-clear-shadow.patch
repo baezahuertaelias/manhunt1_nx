@@ -1,0 +1,23 @@
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -201,6 +201,9 @@
+ /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */
+ uint32_t nv2a_pb_resolve(uint32_t dma_offset);
+-
++
++/* Borrowed method shadow on the executor thread, including before first draw. */
++const uint32_t *nv2a_pb_registers(void);
++
+ typedef struct {
+     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
+      * zstencil: SET_ZSTENCIL_CLEAR_VALUE (depth in the top 24 bits for Z24S8). */
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -390,6 +390,7 @@
+  * (nv2a_pb_reg_dirty); starts all set. */
+ static uint8_t s_reg_dirty[0x2000 / 64] = { [0 ... 0x2000 / 64 - 1] = 1 };
+ uint8_t *nv2a_pb_reg_dirty(void) { return s_reg_dirty; }
++const uint32_t *nv2a_pb_registers(void) { return s_reg; }
+ static uint32_t s_vtx_epoch;            /* Nv2aRawBatch.vtx_epoch */
+ static float reg_f(uint32_t method)
+ {

@@ -1,3 +1,4 @@
+#include "audio_mmio.h"
 /*
  * Manhunt (Xbox) static recompilation: Horizon (Nintendo Switch) boot.
  *
@@ -44,17 +45,11 @@
 
 #define MANHUNT_ENTRY_POINT 0x001FE908u
 /* SD layout: everything lives in one folder next to the NRO.
- *   <base>/DEFAULT.xbe + audio/ levels/   game data
+ *   <base>/game/DEFAULT.xbe + game/audio/ game/levels/   game data
  *   <base>/save  <base>/frames            saves, frame dumps
  *   <base>/manhunt.env                    optional KEY=VALUE config
  * (The old Eden scripts used sdmc:/manhunt; override with -DMANHUNT_SD_BASE=.) */
-#ifndef MANHUNT_SD_BASE
-#define MANHUNT_SD_BASE "sdmc:/switch/manhunt1_nx"
-#endif
-#define GAME_DIR   MANHUNT_SD_BASE
-#define SAVE_DIR   MANHUNT_SD_BASE "/save"
-#define FRAME_DIR  MANHUNT_SD_BASE "/frames"
-#define ENV_FILE   MANHUNT_SD_BASE "/manhunt.env"
+#include "sd_layout.h"
 #define GUEST_THREAD_STACK (64u << 20)
 
 extern RECOMP_TLS uint32_t g_esp;
@@ -66,8 +61,17 @@ static void gpu_backend_init(void)
     const char *option = getenv("MANHUNT_GPU_BACKEND");
     if (!option || strcmp(option, "0") == 0)
         return;
+    if (strcmp(option, "2") == 0) {
+        extern int manhunt_gl_init(void);
+        if (!manhunt_gl_init()) {
+            printf("[MH-BOOT] FAIL OpenGL renderer initialization\n");
+            exit(1);
+        }
+        printf("[MH-GPU] enabled OpenGL NV2A renderer\n");
+        return;
+    }
     if (strcmp(option, "1") != 0) {
-        printf("[MH-BOOT] FAIL MANHUNT_GPU_BACKEND must be 0 or 1\n");
+        printf("[MH-BOOT] FAIL MANHUNT_GPU_BACKEND must be 0, 1 or 2\n");
         exit(1);
     }
     if (R_FAILED(romfsInit()) || !manhunt_nv2a_deko3d_init()) {
@@ -432,6 +436,39 @@ static void on_sigabrt(int sig)
     svcExitProcess();
 }
 
+/* MANHUNT_AUTO_EXIT_SECS=N: end the run after N seconds, for runs with nobody at the console. Restarting the title
+ * is what can bring the launcher back; whether it does depends on the console's title-override setup. If the restart
+ * returns or does nothing, the process exits. Guest threads are still running, so this never calls exit(). */
+static void auto_exit_main(void *arg)
+{
+    const int secs = (int)(intptr_t)arg;
+    svcSleepThread((s64)secs * 1000000000ll);
+    exit_note("auto exit, restarting the title", secs);
+    const Result rc = appletRestartProgram(NULL, 0);
+    svcSleepThread(5000000000ll);
+    exit_note("auto exit, restart did not end the process", (int)rc);
+    svcExitProcess();
+}
+
+static void auto_exit_start(void)
+{
+    const char *e = getenv("MANHUNT_AUTO_EXIT_SECS");
+    const int secs = e ? atoi(e) : 0;
+    if (secs <= 0)
+        return;
+    /* As for the watchdog: guest threads can starve a default-priority thread completely. */
+    static Thread thread;
+    static const int prios[] = {0x10, 0x18, 0x20, 0x2B};
+    for (unsigned i = 0; i < sizeof prios / sizeof prios[0]; i++) {
+        if (R_SUCCEEDED(threadCreate(&thread, auto_exit_main, (void *)(intptr_t)secs, NULL, 0x4000, prios[i], -2))
+            && R_SUCCEEDED(threadStart(&thread))) {
+            printf("[MH-BOOT] auto exit in %d s\n", secs);
+            return;
+        }
+    }
+    printf("[MH-BOOT] auto exit: no thread could start\n");
+}
+
 /* ---- crash report ------------------------------------------------------- */
 /* libnx runs this on a CPU exception (data abort, bad instruction, ...) in the
  * faulting process, on the exception stack below. It writes where the fault
@@ -604,6 +641,8 @@ static void *guest_main(void *xbe_arg)
      * (see nx_spread_thread in patch 0003 for why this matters on Horizon). */
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 0x7);
 
+    extern int manhunt_widescreen_configure(void);
+    if (!manhunt_audio_configure() || !manhunt_widescreen_configure()) return NULL;
     if (!xbox_MemoryLayoutInit(xbe->data, xbe->size)) {
         printf("[MH-BOOT] FAIL memory layout\n");
         return NULL;
@@ -629,9 +668,11 @@ static void *guest_main(void *xbe_arg)
     xbox_path_init(GAME_DIR, SAVE_DIR);
     xbox_kernel_bridge_init();
     g_esp = XBOX_STACK_TOP;
+    if (!manhunt_audio_init(xbox_GetMemoryBase())) { return NULL; }
     if (!recomp_dispatch_init())
         printf("[MH-BOOT] flat dispatch unavailable; indirect calls use binary search\n");
     xbox_WatchdogStart();                     /* RECOMP_WATCHDOG_SECS, as on the host */
+    auto_exit_start();
 
     pthread_t dumper;
     pthread_create(&dumper, NULL, frame_dumper, NULL);

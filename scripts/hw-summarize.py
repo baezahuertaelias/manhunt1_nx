@@ -26,6 +26,94 @@ def first(rx, text, flags=0):
     return m.group(0).strip() if m else None
 
 
+def raster_reports(log):
+    """[MH-DEKO-N] reports by flip. Returns (complete reports in flip order, flips rejected as incomplete).
+
+    A report counts only if every class line arrived and the buckets add up to raster_ns: a log line can be lost
+    or split, and a silently missing class would make another class look larger."""
+    entries = {}
+    for flip, ns, name in re.findall(r"^\[MH-DEKO-N\] flip=(\d+) ns=(\d+) class=([a-z_+]+)\s*$", log, re.M):
+        entries.setdefault(int(flip), {})[name] = int(ns)
+    complete, rejected = [], []
+    rx = r"^\[MH-DEKO-N\] flip=(\d+) raster_ns=(\d+) unattributed=(\d+) transform_refused=(\d+) more_than_\d+_combinations=(\d+) combinations=(\d+)\s*$"
+    headers = re.findall(rx, log, re.M)
+    # The same flip with other values means two runs in one log: neither can be trusted.
+    mixed = {int(h[0]) for h in headers if any(h[0] == o[0] and h != o for o in headers)}
+    for flip, raster, unattributed, transform, other, classes in dict.fromkeys(headers):
+        flip = int(flip)
+        if flip in mixed:
+            rejected.append(flip)
+            continue
+        buckets = {"(unattributed)": int(unattributed), "(transform refused)": int(transform), "(past the class table)": int(other)}
+        buckets.update(entries.get(flip, {}))
+        if len(entries.get(flip, {})) != int(classes) or sum(buckets.values()) != int(raster):
+            rejected.append(flip)
+        else:
+            complete.append({"flip": flip, "raster_ns": int(raster), "buckets": buckets})
+    complete.sort(key=lambda r: r["flip"])
+    return complete, sorted(set(rejected + [f for f in entries if f not in {r["flip"] for r in complete}]))
+
+
+def raster_window(reports, flips=10):
+    """Growth over the last `flips` flips, since values are cumulative from boot. None if the log is too short,
+    or if the two reports cannot be from one run: the counters only grow, so anything else is mixed data."""
+    if not reports:
+        return None
+    last = reports[-1]
+    earlier = [r for r in reports if r["flip"] <= last["flip"] - flips]
+    if not earlier:
+        return None
+    start = earlier[-1]
+    window = {"from": start["flip"], "to": last["flip"], "raster_ns": last["raster_ns"] - start["raster_ns"],
+              "buckets": {k: v - start["buckets"].get(k, 0) for k, v in last["buckets"].items()}}
+    if (set(start["buckets"]) - set(last["buckets"]) or window["raster_ns"] < 0
+            or min(window["buckets"].values()) < 0 or sum(window["buckets"].values()) != window["raster_ns"]):
+        return None
+    return window
+
+
+def texture_row_flags(e):
+    """What `stages` says about a [MH-DEKO-X] row. The screen path (refused for `path`) and draws with no combiner ignore it."""
+    if "path" in e["reasons"].split("+"):
+        return ", screen path, so `stages` does not apply"
+    if not e["combiner"]:
+        return ", no combiner seen, so `stages` does not apply"
+    flags = ""
+    if not int(e["stages"], 16) & 0x1F:
+        flags += ", **stage 0 not sampled**"
+    if int(e["stages"], 16) >> 5:
+        flags += ", **other stages active**"
+    return flags
+
+
+def texture_report(log):
+    """Latest [MH-DEKO-X] report in the log that is complete and adds up: (report or None, flips rejected). Cumulative from boot."""
+    entries = {}
+    rx = (r"^\[MH-DEKO-X\] flip=(\d+) ns=(\d+) draws=(\d+) fmt=(0x[0-9A-F]+) size=(\d+x\d+) pitch=(\d+) levels=(\d+) filter=(0x[0-9A-F]+) addr=(\d+,\d+) blend=(0x[0-9A-F]+/0x[0-9A-F]+) stages=(0x[0-9A-F]+) "
+          r"shading=(\d+) combiner=(\d+) offset=(0x[0-9A-F]+) target=([01]) rendered_flip=(-?\d+) bound_flip=(\d+) reasons=([a-z_+]+)\s*$")
+    for flip, ns, draws, fmt, size, _pitch, levels, filt, addr, blend, stages, shading, combiner, offset, target, rendered, bound, reasons in re.findall(rx, log, re.M):
+        entries.setdefault(int(flip), {})[(offset, fmt, size, stages, shading, reasons)] = {
+            "ns": int(ns), "draws": int(draws), "fmt": fmt, "size": size, "levels": int(levels), "filter": filt, "addr": addr, "blend": blend, "stages": stages, "shading": int(shading),
+            "combiner": int(combiner), "offset": offset, "target": target == "1", "rendered_flip": int(rendered), "bound_flip": int(bound), "reasons": reasons}
+    best, rejected = None, []
+    rx = r"^\[MH-DEKO-X\] flip=(\d+) raster_ns=(\d+) other=(\d+) evicted=(\d+) not_printed=(\d+) textures=(\d+) of=(\d+) target_draws_lost=(\d+)\s*$"
+    headers = re.findall(rx, log, re.M)
+    mixed = {h[0] for h in headers if any(h[0] == o[0] and h != o for o in headers)}
+    if mixed:  # two runs in one log: neither can be trusted
+        return None, sorted(int(h[0]) for h in headers if h[0] in mixed)
+    for flip, raster, other, evicted, not_printed, textures, _table, lost in dict.fromkeys(headers):
+        found = entries.get(int(flip), {})
+        formats = re.findall(r"^\[MH-DEKO-F\] flip=%s fmt=(0x[0-9A-F]+) ns=(\d+) alone_ns=(\d+) draws=(\d+)\s*$" % flip, log, re.M)
+        if (len(found) != int(textures) or int(other) + int(evicted) + int(not_printed) + sum(e["ns"] for e in found.values()) != int(raster)
+                or int(other) + sum(int(f[1]) for f in dict.fromkeys(formats)) != int(raster)):
+            rejected.append(int(flip))
+        else:
+            best = {"flip": int(flip), "raster_ns": int(raster), "other_ns": int(other), "evicted_ns": int(evicted), "not_printed_ns": int(not_printed),
+                    "formats": sorted(({"fmt": f[0], "ns": int(f[1]), "alone_ns": int(f[2]), "draws": int(f[3])} for f in dict.fromkeys(formats)), key=lambda e: -e["ns"]),
+                    "target_draws_lost": int(lost), "textures": sorted(found.values(), key=lambda e: -e["ns"])}
+    return best, sorted(rejected)
+
+
 def bmp_rows(path):
     """Return (width, height, getpixel(x, y)->(r,g,b)) for an uncompressed 24/32-bit BMP, or None."""
     try:
@@ -217,6 +305,32 @@ def main(run):
             p("- Verify mode was on but no comparison was logged yet (run too short?).")
         if "[MH-DEKO] FAIL" in log:
             p("- **An accepted GPU operation failed: `[MH-DEKO] FAIL ...` (the adapter stops the process by design).**")
+        reports, rejected = raster_reports(log)
+        if rejected:
+            p("- **%d `[MH-DEKO-N]` report(s) ignored as incomplete, last at flip %d.**" % (len(rejected), rejected[-1]))
+        window = raster_window(reports)
+        if window and window["raster_ns"] > 0:
+            p("- CPU raster time by refusal class, flips %d to %d (%.1f s, raster only, not the full saving of moving a class to the GPU):" % (window["from"], window["to"], window["raster_ns"] / 1e9))
+            for name, ns in sorted(window["buckets"].items(), key=lambda kv: -kv[1]):
+                if ns:
+                    p("  - %.1f%% `%s` (%.1f s)" % (100.0 * ns / window["raster_ns"], name, ns / 1e9))
+        elif reports:
+            p("- Raster split not shown: no window of at least 10 flips with raster time, or the reports are not from one run.")
+        textures, bad_textures = texture_report(log)
+        if bad_textures:
+            p("- **%d `[MH-DEKO-X]` report(s) ignored as incomplete, last at flip %d.**" % (len(bad_textures), bad_textures[-1]))
+        if textures and textures["raster_ns"] > 0:
+            p("- Raster time by the stage 0 texture of refused draws, cumulative from boot to flip %d (%.1f s), so not comparable with the 10-flip split above. A row means this was bound on a refused batch, and its time covers everything that batch did:" % (textures["flip"], textures["raster_ns"] / 1e9))
+            for f in textures["formats"]:
+                p("  - format %s: %.1f%%, of which refused for the format alone %.1f%%, %d draws, %.1f ms per draw" % (f["fmt"], 100.0 * f["ns"] / textures["raster_ns"], 100.0 * f["alone_ns"] / textures["raster_ns"], f["draws"], f["ns"] / 1e6 / max(f["draws"], 1)))
+            p("  - Costliest rows:")
+            for e in textures["textures"]:
+                where = "target, rendered flip %d" % e["rendered_flip"] if e["target"] else "no surface recorded here"
+                flags = texture_row_flags(e)
+                p("  - %.1f%% %s %s, %d draws, refused for `%s`, levels %d, filter %s, addr %s, blend %s, stages %s, shading %d, %s, bound flip %d, %s%s" % (100.0 * e["ns"] / textures["raster_ns"], e["fmt"], e["size"], e["draws"], e["reasons"], e["levels"], e["filter"], e["addr"], e["blend"], e["stages"], e["shading"], e["offset"], e["bound_flip"], where, flags))
+            p("  - %.1f%% not printed, %.1f%% evicted, %.1f%% other (accepted, clears, refused transforms, no stage 0 texture, which may still sample other stages)" % (100.0 * textures["not_printed_ns"] / textures["raster_ns"], 100.0 * textures["evicted_ns"] / textures["raster_ns"], 100.0 * textures["other_ns"] / textures["raster_ns"]))
+            if textures["target_draws_lost"]:
+                p("  - **%d draws hit surfaces past the target table, so \"no surface recorded here\" is unreliable.**" % textures["target_draws_lost"])
 
     # ---- controller
     p("")

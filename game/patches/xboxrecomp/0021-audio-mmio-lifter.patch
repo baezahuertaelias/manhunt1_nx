@@ -1,0 +1,163 @@
+--- a/tools/recomp/lifter.py
++++ b/tools/recomp/lifter.py
+@@ -2942,6 +2942,13 @@
+     # ── String operations ──
+ 
+     def _lift_rep_movs(self, size, m):
++        # Explicit elements keep all selected APU register transfers visible.
++        from .audio_mmio import selected
++        if selected(self.func_start):
++            acc = f"MEM{size * 8}"
++            return ["{ uint32_t _i; int32_t _st = RECOMP_DF_STEP(%d);" % size,
++                    f"for (_i = 0; _i < ecx; _i++) {{ {acc}(edi) = {acc}(esi); esi += _st; edi += _st; }}",
++                    "ecx = 0; }"]
+         """Keep forward non-overlap memcpy; MMIO/overlap/DF use volatile elements.
+ 
+         Validate the entire guest range in 64 bits before the host fast path,
+@@ -2992,6 +2999,11 @@
+         if "movsw" in m:
+             return self._lift_rep_movs(2, m)
+         if "stosb" in m:
++            from .audio_mmio import selected
++            if selected(self.func_start):
++                return ["{ uint32_t _i; int32_t _st = RECOMP_DF_STEP(1);",
++                        "for (_i = 0; _i < ecx; _i++) { MEM8(edi) = LO8(eax); edi += _st; }",
++                        "ecx = 0; }"]
+             return ["if (!g_df) { memset((void*)XBOX_PTR(edi), (uint8_t)eax, ecx); edi += ecx; }",
+                     "else { uint32_t _i; for (_i = 0; _i < ecx; _i++)"
+                     " MEM8(edi - _i) = LO8(eax); edi -= ecx; }",
+--- a/tools/recomp/translator.py
++++ b/tools/recomp/translator.py
+@@ -12,6 +12,7 @@
+ """
+ 
+ import bisect
++from .audio_mmio import lower_function
+ import json
+ import glob
+ import os
+@@ -3178,7 +3179,7 @@
+         lines.append(f"}}")
+         lines.append(f"")
+ 
+-        return "\n".join(lines)
++        return lower_function("\n".join(lines), start)
+ 
+     def _find_used_registers(self, instructions):
+         """Find which 32-bit registers are referenced by any instruction."""
+--- /dev/null
++++ b/tools/recomp/audio_mmio.py
+@@ -0,0 +1,104 @@
++"""Project-specific lowering of emitted integer memory accesses.
++
++The tokenizer preserves strings/comments and parses balanced calls and assignment
++statements. Unsupported lvalue operations fail generation instead of bypassing
++MMIO. This is intentionally scoped to Manhunt's linked DSOUND and one XPP poll.
++"""
++import re
++
++_TOKEN = re.compile(r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\s+|[A-Za-z_]\w*|(?:0[xX][0-9a-fA-F]+|\d+)(?:[uUlL]*)|(?:<<=|>>=|==|!=|<=|>=|\+\+|--|\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<|>>|&&|\|\||->)|.', re.S)
++_INTEGER = {'MEM8':(8,False),'MEM16':(16,False),'MEM32':(32,False),
++            'SMEM8':(8,True),'SMEM16':(16,True),'SMEM32':(32,True)}
++_RAW = {'MEMF':('float',4),'MEMD':('double',8),'SMEM64':('int64_t',8)}
++_GATE = {0x225757,0x22579E,0x223C31}
++
++def selected(address):
++    return 0x222820 <= address < 0x24196C or address == 0x2A411E
++
++def _trivia(t):
++    return t.isspace() or t.startswith(('/*','//'))
++
++def _next(tokens,i):
++    while i<len(tokens) and _trivia(tokens[i]):i+=1
++    return i
++
++def _close(tokens,i):
++    pairs={'(':')','[':']','{':'}'};stack=[]
++    for j in range(i,len(tokens)):
++        t=tokens[j]
++        if t in pairs:stack.append(pairs[t])
++        elif t in (')',']','}'):
++            if not stack or stack.pop()!=t:raise ValueError('audio MMIO: unbalanced emitted C')
++            if not stack:return j
++    raise ValueError('audio MMIO: unterminated emitted C call')
++
++def _lower(tokens):
++    out=[];i=0
++    while i<len(tokens):
++        name=tokens[i]
++        if name in ('XMM_LOAD','XMM_STORE','XMM_LOAD_LOW','XMM_LOAD_HIGH',
++                    'XMM_STORE_LOW','XMM_STORE_HIGH','MMX_LOAD','MMX_STORE',
++                    'memcpy','memmove','memset'):
++            raise ValueError('audio MMIO: unhandled bulk/SIMD memory helper '+name)
++        if name not in _INTEGER and name not in _RAW and name!='XBOX_PTR':
++            if re.fullmatch(r'S?MEM\w+',name):raise ValueError('audio MMIO: unknown memory macro '+name)
++            out.append(name);i+=1;continue
++        start=_next(tokens,i+1)
++        if start>=len(tokens) or tokens[start]!='(':raise ValueError('audio MMIO: malformed '+name)
++        end=_close(tokens,start);addr=_lower(tokens[start+1:end]);after=_next(tokens,end+1)
++        before=i-1
++        while before>=0 and _trivia(tokens[before]):before-=1
++        if before>=0 and tokens[before]=='&':
++            prev=before-1
++            while prev>=0 and _trivia(tokens[prev]):prev-=1
++            if prev<0 or tokens[prev] in ('(', ',', '=', '{', ';', '?', ':'):
++                raise ValueError('audio MMIO: unsupported address of memory')
++        if before>=0 and tokens[before] in ('++','--'):
++            raise ValueError('audio MMIO: unsupported memory address/modify expression')
++        if name in _RAW:
++            typ,size=_RAW[name]
++            out.append('(*(volatile %s *)manhunt_audio_raw_ptr((uint32_t)(%s), %d))'%(typ,addr,size));i=end+1;continue
++        if name=='XBOX_PTR':
++            # Only atomics remain after selected string operations become
++            # explicit element loops. A new pointer escape must be reviewed.
++            p=before
++            if p<0 or tokens[p]!='(':raise ValueError('audio MMIO: raw pointer escape')
++            p-=1
++            while p>=0 and _trivia(tokens[p]):p-=1
++            if p<0 or tokens[p] not in ('RECOMP_ATOMIC_CAS32','RECOMP_ATOMIC_XADD32'):
++                raise ValueError('audio MMIO: unhandled raw pointer escape')
++            out.append('manhunt_audio_raw_ptr((uint32_t)(%s), 4)'%addr);i=end+1;continue
++        bits,signed=_INTEGER[name]
++        if after<len(tokens) and tokens[after] in ('+=','-=','*=','/=','%=','&=','|=','^=','<<=','>>=','++','--'):
++            raise ValueError('audio MMIO: unsupported compound memory assignment')
++        if after<len(tokens) and tokens[after]=='=':
++            # A generated store is a statement. Skip balanced subexpressions
++            # to its semicolon; do not confuse nested calls with delimiters.
++            j=after+1
++            while j<len(tokens):
++                if tokens[j] in ('(','['):j=_close(tokens,j)+1;continue
++                if tokens[j]==';':break
++                if tokens[j] in ('}',',','='):raise ValueError('audio MMIO: unsupported embedded store')
++                j+=1
++            if j==len(tokens):raise ValueError('audio MMIO: unterminated store')
++            value=_lower(tokens[after+1:j])
++            out.append('manhunt_audio_write%d((uint32_t)(%s), (uint%d_t)(%s))'%(bits,addr,bits,value));i=j;continue
++        expr='manhunt_audio_read%d((uint32_t)(%s))'%(bits,addr)
++        if signed:expr='((int%d_t)%s)'%(bits,expr)
++        out.append(expr);i=end+1
++    return ''.join(out)
++
++def lower_function(code,address):
++    if not selected(address):return code
++    tokens=_TOKEN.findall(code)
++    code=_lower(tokens)
++    if address in _GATE:
++        # First real opening brace follows the generated void function header;
++        # declarations remain after this C11 statement.
++        ts=_TOKEN.findall(code)
++        for i,t in enumerate(ts):
++            if t=='{':
++                ts.insert(i+1,'\n    if (manhunt_audio_guest_gate(0x%08Xu)) return;\n'%address)
++                code=''.join(ts);break
++        else:raise ValueError('audio MMIO: function body missing')
++    return code
+--- a/templates/runtime/recomp_types.h
++++ b/templates/runtime/recomp_types.h
+@@ -1688,3 +1688,6 @@
+ #define RECOMP_UNIMPL(_text, _va) recomp_unimpl((_text), (_va))
+ 
+ #endif /* RECOMP_TYPES_H */
++
++/* Project audio bus declarations, after the guest memory macros. */
++#include "audio_mmio.h"

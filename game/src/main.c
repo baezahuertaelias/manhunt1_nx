@@ -22,6 +22,8 @@
 #include <sys/mman.h>
 
 #include <xbox/xboxrecomp.h>
+#include "audio_mmio.h"
+#include "process_exit.h"
 
 #define MANHUNT_ENTRY_POINT 0x001FE908u   /* reports/XBE_HEADER.md */
 
@@ -132,6 +134,7 @@ int main(int argc, char **argv)
         return 1;
     printf("[MH-BOOT] xbe loaded bytes=%zu\n", xbe_size);
 
+    if (!manhunt_audio_configure()) return 1;
     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
         fprintf(stderr, "Failed to initialize the Xbox memory layout\n");
         return 1;
@@ -165,6 +168,7 @@ int main(int argc, char **argv)
     xbox_path_init(game_dir, getenv("MANHUNT_SAVE_DIR"));
     xbox_kernel_bridge_init();
     g_esp = XBOX_STACK_TOP;
+    if (!manhunt_audio_init(xbox_GetMemoryBase())) { return 1; }
 
     if (!recomp_dispatch_init())
         fprintf(stderr, "[BOOT] flat dispatch unavailable; indirect calls use binary search\n");
@@ -174,8 +178,8 @@ int main(int argc, char **argv)
     xbe_entry_point();
 
     printf("[MH-BOOT] entry point returned\n");
-    xbox_kernel_shutdown();
-    xbox_MemoryLayoutShutdown();
-    free(xbe_data);
-    return 0;
+    /* Guest entry returning does not stop the runtime's worker threads. End
+     * their process before reclaiming shared APU/guest-memory resources. */
+    fflush(NULL);
+    manhunt_process_exit(0);
 }
