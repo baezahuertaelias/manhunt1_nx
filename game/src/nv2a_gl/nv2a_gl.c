@@ -2196,6 +2196,139 @@ static int wide_prog_2d(uint64_t vkey)
     return 0;
 }
 
+/* MANHUNT_PAGE_CAPTURE=1: every draw of each new low-draw page (a menu, the
+ * settings page), to see how a page is drawn. A page is told apart by a
+ * signature of its programs and textures. Bounded. Off by default. */
+#define PAGE_MAX_DRAWS 200
+#define PAGE_MAX_DUMPS 24
+static int s_page_on = -1, s_page_dumping;
+volatile int nv2a_gl_page_request;    /* ZL+ZR, set in xpp_input.c: every draw of the next frame */
+static uint32_t s_page_draws, s_page_sig, s_page_dumps;
+static uint32_t s_page_seen[PAGE_MAX_DUMPS];
+
+/* What a stage-0 image's own bytes say about transparency. */
+static void page_alpha(const Nv2aRawBatch *b, uint32_t color, uint32_t w, uint32_t h,
+                       char *out, size_t n)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t va = b->tex_va[0], i, lo = 255, hi = 0;
+
+    snprintf(out, n, "-");
+    if (!va)
+        return;
+    if (color == 0x0B && b->pal_va[0]) {
+        const uint8_t *pal = mem + b->pal_va[0];
+        for (i = 0; i < 256; i++) {
+            if (pal[i * 4 + 3] < lo) lo = pal[i * 4 + 3];
+            if (pal[i * 4 + 3] > hi) hi = pal[i * 4 + 3];
+        }
+        snprintf(out, n, "pal-alpha %u..%u", lo, hi);
+    } else if (color == 0x06 && w && h && w <= 2048 && h <= 2048) {
+        for (i = 0; i < w * h; i++) {
+            uint8_t a = mem[va + i * 4 + 3];
+            if (a < lo) lo = a;
+            if (a > hi) hi = a;
+        }
+        snprintf(out, n, "tex-alpha %u..%u", lo, hi);
+    } else if (color == 0x0C && w && h && w <= 2048 && h <= 2048) {
+        uint32_t blocks = ((w + 3) / 4) * ((h + 3) / 4), keyed = 0;
+        for (i = 0; i < blocks; i++) {
+            uint16_t c0, c1;
+            memcpy(&c0, mem + va + i * 8, 2);
+            memcpy(&c1, mem + va + i * 8 + 2, 2);
+            if (c0 <= c1) keyed++;
+        }
+        snprintf(out, n, "dxt1 keyed blocks %u of %u", keyed, blocks);
+    }
+}
+
+static void page_note(const Nv2aRawBatch *b, const GlSurf *s, const GlProg *p, const Nv2aPshKey *pk)
+{
+    const uint32_t *r = b->regs;
+    uint32_t color = (r[0x1B04 / 4] >> 8) & 0xFF;
+    uint32_t w = 1u << ((r[0x1B04 / 4] >> 20) & 15), h = 1u << ((r[0x1B04 / 4] >> 24) & 15);
+    float mn = -1.0f, mx = -1.0f;
+    char alpha[48];
+
+    if (s_page_on < 0) {
+        const char *e = getenv("MANHUNT_PAGE_CAPTURE");
+        s_page_on = e && *e == '1';
+    }
+    if (!s_page_on)
+        return;
+    if (s_page_dumping == 2) {          /* on request: every draw on every target */
+        if (!wide_xrange(b, &mn, &mx))
+            mn = mx = -1.0f;
+        page_alpha(b, color, w, h, alpha, sizeof alpha);
+        fprintf(stderr, "[MH-REQ] surf %ux%u xf %u prog %016llX prim %u n %u tex 0x%08X fmt %02X %ux%u ctl 0x%08X tex1 0x%08X"
+                " x %.1f..%.1f atest %u ref %u blend %u %X %X sp %08X cc %08X rgb0 %08X/%08X a0 %08X/%08X final %08X/%08X %s\n",
+                s->w, s->h, b->xform, (unsigned long long)p->vkey, b->prim, b->vertex_count, b->tex_va[0], color, w, h,
+                r[0x1B0C / 4], b->tex_va[1], mn, mx, r[0x300 / 4], r[0x340 / 4] & 0xFF, r[0x304 / 4], r[0x344 / 4],
+                r[0x348 / 4], pk->shader_program, pk->control, pk->color_icw[0], pk->color_ocw[0],
+                pk->alpha_icw[0], pk->alpha_ocw[0], pk->final0, pk->final1, alpha);
+        return;
+    }
+    if ((float)s->w / (b->aa_sx > 0 ? b->aa_sx : 1.0f) != 640.0f)
+        return;
+    /* Every texture a 2D draw uses, once. A page with many draws behind it
+     * (the settings page over a paused level) never counts as low-draw. */
+    if (b->tex_va[0] && (b->xform == 0 || (b->xform == 2 && wide_prog_2d(p->vkey)))) {
+        static uint32_t seen[512];
+        static unsigned nseen;
+        unsigned i;
+        for (i = 0; i < nseen && seen[i] != b->tex_va[0]; i++) { }
+        if (i == nseen && nseen < 512) {
+            seen[nseen++] = b->tex_va[0];
+            if (!wide_xrange(b, &mn, &mx))
+                mn = mx = -1.0f;
+            page_alpha(b, color, w, h, alpha, sizeof alpha);
+            fprintf(stderr, "[MH-2D] frame %u tex 0x%08X fmt %02X %ux%u xf %u prog %016llX prim %u n %u x %.1f..%.1f"
+                    " ctl 0x%08X atest %u ref %u blend %u %X %X sp %08X %s\n",
+                    s_frame, b->tex_va[0], color, w, h, b->xform, (unsigned long long)p->vkey, b->prim,
+                    b->vertex_count, mn, mx, r[0x1B0C / 4], r[0x300 / 4], r[0x340 / 4] & 0xFF,
+                    r[0x304 / 4], r[0x344 / 4], r[0x348 / 4], pk->shader_program, alpha);
+        }
+    }
+    s_page_draws++;
+    s_page_sig = (s_page_sig + ((uint32_t)p->vkey ^ (b->tex_va[0] * 16777619u) ^ color)) * 31u;
+    if (!s_page_dumping)
+        return;
+    if (!wide_xrange(b, &mn, &mx))
+        mn = mx = -1.0f;
+    page_alpha(b, color, w, h, alpha, sizeof alpha);
+    fprintf(stderr, "[MH-PAGE] xf %u prog %016llX prim %u n %u tex 0x%08X fmt %02X %ux%u ctl 0x%08X pal 0x%08X"
+            " x %.1f..%.1f atest %u %X ref %u blend %u %X %X cc %08X sp %08X %s\n",
+            b->xform, (unsigned long long)p->vkey, b->prim, b->vertex_count, b->tex_va[0], color, w, h,
+            r[0x1B0C / 4], b->pal_va[0], mn, mx, r[0x300 / 4], r[0x33C / 4], r[0x340 / 4] & 0xFF,
+            r[0x304 / 4], r[0x344 / 4], r[0x348 / 4], pk->control, pk->shader_program, alpha);
+}
+
+static void page_flip(void)
+{
+    uint32_t sig = s_page_sig, n = s_page_draws, i;
+
+    if (s_page_dumping == 1)
+        fprintf(stderr, "[MH-PAGE] end frame %u: %u draws\n", s_frame, n);
+    if (s_page_dumping == 2)
+        fprintf(stderr, "[MH-REQ] end frame %u\n", s_frame);
+    s_page_dumping = 0;
+    s_page_sig = s_page_draws = 0;
+    if (nv2a_gl_page_request) {
+        nv2a_gl_page_request = 0;
+        s_page_dumping = 2;
+        fprintf(stderr, "[MH-REQ] capture frame %u\n", s_frame + 1);
+        return;
+    }
+    if (n < 4 || n > PAGE_MAX_DRAWS || s_page_dumps >= PAGE_MAX_DUMPS)
+        return;
+    for (i = 0; i < s_page_dumps; i++)
+        if (s_page_seen[i] == sig)
+            return;
+    s_page_seen[s_page_dumps++] = sig;
+    s_page_dumping = 1;
+    fprintf(stderr, "[MH-PAGE] capture %u: frame %u, %u draws\n", s_page_dumps, s_frame + 1, n);
+}
+
 static void gl_draw_raw(const Nv2aRawBatch *b)
 {
     GlSurf *s;
@@ -2259,6 +2392,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         gl_fail("shader compilation/link failed");
     }
     s_hz_draws++;
+    page_note(b, s, p, &pk);
     if (p->prog != s_cur_prog) {
         glUseProgram(p->prog);
         s_cur_prog = p->prog;
@@ -2730,6 +2864,7 @@ static void gl_flip(void)
         gl_fail("GL context or entry-point initialization failed");
     }
     vis_poll();
+    page_flip();
     if (s_wide_dumping)
         fprintf(stderr, "[MH-WIDE-DRAW] frame %u end: %u draws on the 640x480 target, %u fixed-function\n",
                 s_frame, s_wide_frame_draws, s_wide_dump_ff);
