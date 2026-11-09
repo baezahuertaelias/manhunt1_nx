@@ -1,0 +1,542 @@
+diff --git a/src/kernel/nv2a_backend.h b/src/kernel/nv2a_backend.h
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -28,6 +28,21 @@
+ #define NV2A_BACKEND_H
+ 
+ #include <stdint.h>
++#include <stdlib.h>
++
++/* The title's display mode, and rows left out of the presented picture (patch 0019, for draw_raw back ends). */
++int xbox_video_widescreen(void);
++static inline int nv2a_present_crop_y(void)
++{
++    static int crop = -1;
++    if (crop < 0) {
++        const char *e = getenv("RECOMP_PRESENT_CROP_Y");
++        crop = 0;
++        while (e && *e >= '0' && *e <= '9')
++            crop = crop * 10 + (*e++ - '0');
++    }
++    return crop;
++}
+ 
+ /* The colour surface being drawn into, in real (anti-aliased) pixels.
+  * aa_sx/aa_sy give the anti-aliasing factor, so width/aa_sx is the logical
+@@ -111,6 +126,81 @@
+     float w, tex_u_abs_max, tex_v_abs_max;
+ } Nv2aTransformInfo;
+ 
++/* A batch as the NV2A itself sees it, for a back end that runs the whole
++ * pipeline on a GPU (vertex programs, register combiners, multi-texture)
++ * rather than taking the executor's CPU-transformed triangles.
++ *
++ * The executor still decodes the pushbuffer and gathers vertex data -- every
++ * attribute type, inline arrays and immediate vertices alike become float4
++ * attributes -- and everything else comes straight from the method shadow:
++ * regs[m / 4] is the last value the title wrote to 3D-class method m, the
++ * same register file the hardware draws from. */
++#define NV2A_RAW_ATTRS 16
++typedef struct {
++    uint32_t        prim;           /* SET_BEGIN_END op: 1 points .. 10 polygon */
++    uint32_t        vertex_count;   /* gathered vertices */
++    uint16_t        attr_present;   /* bit a: attribute a carries data */
++    const float    *attrs;          /* vertex_count x 16 x float4, [v][a][c];
++                                     * absent attributes read (0,0,0,1) */
++    const uint32_t *indices;        /* into the gathered vertices */
++    uint32_t        index_count;
++    const uint32_t *regs;           /* method shadow, 0x2000 bytes */
++    const uint32_t (*vp_program)[4];/* transform program slots */
++    uint32_t        vp_slots;
++    const float    (*vp_consts)[4]; /* transform constants (raw index) */
++    uint32_t        vp_const_count;
++    Nv2aSurface     surface;
++    uint32_t        color_va, zeta_va;  /* resolved guest addresses */
++    /* Which transform applies: 0 pre-transformed (attribute 0 is a surface
++     * position in real pixels, w = 1/rhw), 1 fixed-function (composite
++     * matrix, then divide, then viewport offset, all in logical pixels),
++     * 2 vertex program (the XDK tail leaves oPos in logical screen space with
++     * w still the clip w). */
++    uint32_t        xform;
++    float           composite[16];      /* clip[i] = sum_j m[4i+j] * pos[j] */
++    float           vp_offset[4];
++    float           aa_sx, aa_sy;       /* logical -> real pixels */
++    uint32_t        vp_start;           /* first program slot */
++    /* Only for a back end registered with NV2A_BACKEND_RAW_DIRECT: the
++     * attributes in attr_direct are not converted into attrs[] (their
++     * entries hold garbage) but described as the title stored them, for the
++     * back end to upload as they are. direct[a].ptr is attribute a of
++     * gathered vertex 0; vertex i is at ptr + i * stride, for vertex_count
++     * vertices. type is the NV097 code: 0 D3DCOLOR (size 4, bytes B,G,R,A),
++     * 1 S1 (normalised short), 2 float, 4 normalised unsigned byte, 5 S32K
++     * (short as-is). With the flag, attrs[] entries of absent attributes are
++     * not filled either. */
++    /* Bumped whenever the transform program (slots or start) / constants
++     * change; equal values mean identical contents. Never 0. */
++    uint32_t        vp_prog_gen, vp_const_gen;
++    /* Texture stage i's image and palette as guest VAs (0: none), resolved
++     * by the executor so a back end never reads the executor's DMA state
++     * (a threaded one runs behind it). */
++    uint32_t        tex_va[4], pal_va[4];
++    uint16_t        attr_direct;
++    struct {
++        const uint8_t *ptr;
++        uint32_t       type, size, stride;
++    } direct[NV2A_RAW_ATTRS];
++    /* What an attribute without an array reads: the last SET_VERTEX_DATA*
++     * value the title gave it, as the hardware does. D3D sets them for the
++     * FVF components a draw leaves out -- NFSU2's lens drops have no
++     * specular, and their fog comes from its alpha, which D3D sets to 0.
++     * Held by value so a queued copy of the batch keeps them. attr_const_gen
++     * changes whenever any of them does (never 0). */
++    float           attr_const[NV2A_RAW_ATTRS][4];
++    uint32_t        attr_const_gen;
++    /* Vertex-memory epoch: changes at every semaphore release and trap
++     * (after which the title may reuse buffers the GPU has finished with)
++     * and around every inline-array batch. Two batches with equal epochs
++     * and equal direct[] pointers read the same vertex bytes, so a back end
++     * may reuse what it uploaded for the first (instancing). */
++    uint32_t        vtx_epoch;
++} Nv2aRawBatch;
++
++/* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */
++uint32_t nv2a_pb_resolve(uint32_t dma_offset);
++
+ typedef struct {
+     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
+      * zstencil: SET_ZSTENCIL_CLEAR_VALUE (depth in the top 24 bits for Z24S8). */
+@@ -139,8 +229,39 @@
+      * published, the semaphore is released, a report is written, the frame is presented) and when the
+      * runtime falls back to the CPU renderer after a batch was accepted. */
+     void (*sync)(int invalidate);
++    /* Optional (patch 0019). When set, every batch goes here instead of draw(), before
++     * any CPU transform, clipping or screen-space test. */
++    void (*draw_raw)(const Nv2aRawBatch *b);
++    /* NV2A_BACKEND_* bits. */
++    uint32_t flags;
++    /* Optional: visibility tests (D3D's Begin/EndVisibilityTest).
++     * NV2A_REPORT_CLEAR is CLEAR_REPORT_VALUE: the pixel count restarts at
++     * 0. NV2A_REPORT_GET is GET_REPORT: the pixels that passed the depth test
++     * in the draws made with SET_ZPASS_PIXEL_COUNT_ENABLE (regs[0x17CC / 4])
++     * on since the clear, to be written to the report at guest VA va with
++     * nv2a_pb_write_report once the back end knows them -- later is fine:
++     * until then the title sees the test incomplete. */
++    void (*report)(uint32_t op, uint32_t va);
+ } Nv2aBackend;
+ 
++#define NV2A_REPORT_CLEAR 0u
++#define NV2A_REPORT_GET   1u
++
++/* Fill in a visibility report (from any thread): the pixel count in surface
++ * pixels as the title knows them (any resolution scale taken out), then the
++ * status word that tells D3D the test is done. */
++void nv2a_pb_write_report(uint32_t va, uint32_t pixels);
++
++/* draw_raw takes attributes in their stored format (Nv2aRawBatch.attr_direct).
++ * RECOMP_GL_DIRECT=0 turns it off at run time. */
++#define NV2A_BACKEND_RAW_DIRECT 0x1u
++
++/* Optional, set by the game project: sees every raw batch just before the
++ * back end gets it and may change it. attrs is rb->attrs, writable; an
++ * attribute moved from attr_direct to attrs[] must have its bit cleared. */
++extern void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
++
++
+ /* Register (or, with NULL, remove) the back end. Call before the title starts
+  * submitting work; the executor must also be enabled (RECOMP_PB_EXEC). */
+ void nv2a_backend_register(const Nv2aBackend *backend);
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -304,6 +304,8 @@
+      * methods leave it. Writing attribute 0 (position) emits a vertex. */
+     float      imm_attr[NV_VERTEX_ATTRS][4];
+     uint16_t   imm_used;                /* attributes written since BEGIN */
++    uint16_t   imm_ever;                /* attributes ever written (patch 0019) */
++    uint32_t   attr_const_gen;          /* changes with any imm_attr (patch 0019) */
+     uint32_t   imm_count;
+     int        inline_active;
+     uint32_t   draws, verts, nonzero_draws;
+@@ -384,6 +386,11 @@
+  * material colours, cull and clip state handed to a back end) is read from
+  * here. */
+ static uint32_t s_reg[0x2000 / 4];
++/* The 64-byte blocks of s_reg written since a threaded back end last looked
++ * (nv2a_pb_reg_dirty); starts all set. */
++static uint8_t s_reg_dirty[0x2000 / 64] = { [0 ... 0x2000 / 64 - 1] = 1 };
++uint8_t *nv2a_pb_reg_dirty(void) { return s_reg_dirty; }
++static uint32_t s_vtx_epoch;            /* Nv2aRawBatch.vtx_epoch */
+ static float reg_f(uint32_t method)
+ {
+     float f;
+@@ -811,6 +818,37 @@
+     return s_backend_batch;
+ }
+ 
++uint32_t nv2a_pb_resolve(uint32_t dma_offset) { return dma_resolve(dma_offset); }
++
++/* GET_REPORT's slot: of the two addresses it could be, the one D3D marked
++ * incomplete. 0: neither. */
++static uint32_t report_va(uint32_t param)
++{
++    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
++    uint32_t phys = param & 0x0EFFFFFFu;
++    int k;
++
++    for (k = 0; k < 2; k++, phys |= 0x01000000u) {
++        uint32_t va = dma_resolve(phys);
++        if (va && *(const volatile uint32_t *)(mem + va + 12) == 0xFFFFFFFFu)
++            return va;
++    }
++    return 0;
++}
++
++void nv2a_pb_write_report(uint32_t va, uint32_t pixels)
++{
++    static uint32_t stamp;
++    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
++    volatile uint32_t *slot = (volatile uint32_t *)(mem + va);
++
++    slot[0] = ++stamp;
++    slot[1] = 0;
++    slot[2] = pixels;
++    __atomic_thread_fence(__ATOMIC_RELEASE);
++    slot[3] = 0;                                /* done */
++}
++
+ static void current_surface(Nv2aSurface *out)
+ {
+     out->color_va        = dma_resolve(s_gpu.color_offset);
+@@ -3213,6 +3251,177 @@
+         backend_flush(!s_xf_no_tex);
+ }
+ 
++/* Hand the batch to a GPU back end as raw NV2A state (see Nv2aRawBatch).
++ *
++ * Vertices are gathered over the index range the batch touches -- a mesh
++ * names most of them several times -- and converted to float4 by the same
++ * fetch_attr the CPU path uses, so every attribute type and inline arrays
++ * come out the same way. The back end never reads vertex memory itself. */
++static float    *s_raw_attrs;
++static uint32_t *s_raw_idx;
++static uint32_t  s_raw_cap_v, s_raw_cap_i;
++
++static int raw_direct_on(void)
++{
++    static int on = -1;
++    if (!(s_backend->flags & NV2A_BACKEND_RAW_DIRECT))
++        return 0;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_GL_DIRECT");
++        on = !(e && *e == '0');
++    }
++    return on;
++}
++
++/* Fill rb->direct for every present attribute whose stored format the back
++ * end can read as it is, over gathered vertices lo .. lo+nv-1; returns the
++ * attr_direct mask. What fetch_attr would turn into zeros (no array, a CMP
++ * normal, an inline array that runs short) stays with the converter. */
++static uint16_t raw_direct_attrs(Nv2aRawBatch *rb, uint16_t present,
++                                 uint32_t lo, uint32_t nv)
++{
++    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
++    uint16_t mask = 0;
++    uint32_t a;
++
++    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
++        const VertexAttr *va = &s_gpu.attr[a];
++        uint32_t elem;
++        size_t first, end;
++
++        if (!(present & (1u << a)) || va->size > 4)
++            continue;
++        switch (va->type) {
++        case 0: if (va->size != 4) continue; elem = 4; break;
++        case 2: elem = 4 * va->size; break;
++        case 4: elem = va->size; break;
++        case 1: case 5: elem = 2 * va->size; break;
++        default: continue;
++        }
++        first = (size_t)va->offset + (size_t)lo * va->stride;
++        end = first + (size_t)(nv - 1) * va->stride + elem;
++        if (s_gpu.inline_active) {
++            if (end > (size_t)s_gpu.inline_count * 4)
++                continue;
++            rb->direct[a].ptr = (const uint8_t *)s_gpu.inline_buf + first;
++        } else {
++            if (!va->offset)
++                continue;
++            rb->direct[a].ptr = mem + first;
++        }
++        rb->direct[a].type = va->type;
++        rb->direct[a].size = va->size;
++        rb->direct[a].stride = va->stride;
++        mask |= (uint16_t)(1u << a);
++    }
++    rb->attr_direct = mask;
++    return mask;
++}
++
++void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
++
++static void raw_batch(void)
++{
++    Nv2aRawBatch rb;
++    uint32_t lo = 0xFFFFFFFFu, hi = 0, i, a, nv;
++    uint16_t present = 0, direct = 0;
++
++    for (i = 0; i < s_gpu.idx_count; i++) {
++        if (s_gpu.idx[i] < lo) lo = s_gpu.idx[i];
++        if (s_gpu.idx[i] > hi) hi = s_gpu.idx[i];
++    }
++    nv = hi - lo + 1;
++    if (nv > 1u << 20)
++        return;                                 /* not a real batch */
++    if (nv > s_raw_cap_v) {
++        free(s_raw_attrs);
++        s_raw_cap_v = nv + 1024;
++        s_raw_attrs = (float *)malloc((size_t)s_raw_cap_v * NV2A_RAW_ATTRS * 4
++                                      * sizeof(float));
++    }
++    if (s_gpu.idx_count > s_raw_cap_i) {
++        free(s_raw_idx);
++        s_raw_cap_i = s_gpu.idx_count + 1024;
++        s_raw_idx = (uint32_t *)malloc((size_t)s_raw_cap_i * sizeof(uint32_t));
++    }
++    if (!s_raw_attrs || !s_raw_idx)
++        return;
++    for (a = 0; a < NV2A_RAW_ATTRS && a < NV_VERTEX_ATTRS; a++)
++        if (s_gpu.attr[a].size && s_gpu.attr[a].stride)
++            present |= (uint16_t)(1u << a);
++    memset(&rb, 0, sizeof rb);
++    /* An attribute's current value. Diffuse starts white until the title sets it, as the back ends assume. */
++    memcpy(rb.attr_const, s_gpu.imm_attr, sizeof rb.attr_const);
++    if (!(s_gpu.imm_ever & (1u << 3)))
++        rb.attr_const[3][0] = rb.attr_const[3][1] = rb.attr_const[3][2] = 1.0f;
++    rb.attr_const_gen = s_gpu.attr_const_gen ? s_gpu.attr_const_gen : 1;
++    if (raw_direct_on())
++        direct = raw_direct_attrs(&rb, present, lo, nv);
++    if (direct) {
++        /* Convert only what the back end cannot take as stored (CMP
++         * normals, arrays that run off their buffer). Most batches have
++         * nothing left here. */
++        uint16_t conv = present & (uint16_t)~direct;
++        for (a = 0; conv && a < NV2A_RAW_ATTRS; a++) {
++            if (!(conv & (1u << a)))
++                continue;
++            for (i = 0; i < nv; i++)
++                fetch_attr(&s_gpu.attr[a], lo + i,
++                           s_raw_attrs + ((size_t)i * NV2A_RAW_ATTRS + a) * 4);
++        }
++    } else {
++        for (i = 0; i < nv; i++) {
++            float *v = s_raw_attrs + (size_t)i * NV2A_RAW_ATTRS * 4;
++            for (a = 0; a < NV2A_RAW_ATTRS; a++) {
++                float *o = v + a * 4;
++                if (!(present & (1u << a)) || !fetch_attr(&s_gpu.attr[a], lo + i, o))
++                    memcpy(o, rb.attr_const[a], sizeof rb.attr_const[a]);
++            }
++        }
++    }
++    for (i = 0; i < s_gpu.idx_count; i++)
++        s_raw_idx[i] = s_gpu.idx[i] - lo;
++
++    rb.prim = s_gpu.prim;
++    rb.vertex_count = nv;
++    rb.attr_present = present;
++    rb.attrs = s_raw_attrs;
++    rb.indices = s_raw_idx;
++    rb.index_count = s_gpu.idx_count;
++    rb.regs = s_reg;
++    rb.vp_program = nv2a_vsh_program_slots();
++    rb.vp_slots = NV2A_VSH_SLOTS;
++    rb.vp_consts = nv2a_vsh_constants();
++    rb.vp_const_count = NV2A_VSH_CONSTANTS;
++    current_surface(&rb.surface);
++    rb.color_va = rb.surface.color_va;
++    rb.zeta_va = s_gpu.zeta_offset ? dma_resolve(s_gpu.zeta_offset) : 0;
++    rb.xform = batch_uses_program() ? 2 : batch_is_ffp() ? 1 : 0;
++    memcpy(rb.composite, s_gpu.composite, sizeof rb.composite);
++    memcpy(rb.vp_offset, nv2a_vsh_constant(59), sizeof rb.vp_offset);
++    rb.aa_sx = s_gpu.aa_sx;
++    rb.aa_sy = s_gpu.aa_sy;
++    rb.vp_start = nv2a_vsh_start_slot();
++    for (i = 0; i < 4; i++) {
++        uint32_t base = (0x1B00u + i * 0x40u) / 4;
++        rb.tex_va[i] = s_reg[base] ? dma_resolve(s_reg[base]) : 0;
++        rb.pal_va[i] = (s_reg[base + 8] & ~0x3Fu) ? dma_resolve(s_reg[base + 8] & ~0x3Fu) : 0;
++    }
++    if (s_gpu.inline_active)
++        s_vtx_epoch++;                          /* the payload buffer is reused */
++    rb.vtx_epoch = s_vtx_epoch;
++    if (s_gpu.inline_active)
++        s_vtx_epoch++;
++    rb.vp_prog_gen = nv2a_vsh_prog_gen();
++    rb.vp_const_gen = nv2a_vsh_const_gen();
++    if (nv2a_raw_batch_hook)
++        nv2a_raw_batch_hook(&rb, s_raw_attrs);
++    s_backend->draw_raw(&rb);
++    s_gpu.tris_drawn += s_gpu.idx_count / 3;
++    s_gpu.drawn_offset = s_gpu.color_offset;
++    s_gpu.drawn_pitch = s_gpu.pitch;
++}
++
+ static void raster_batch(void)
+ {
+     uint32_t i;
+@@ -3222,6 +3431,10 @@
+     s_backend_batch = 0;
+     if (s_gpu.idx_count < 3)
+         return;
++    if (s_backend && s_backend->draw_raw) {
++        raw_batch();
++        return;
++    }
+     if (s_backend && s_backend->draw) {
+         Nv2aSurface surf;
+         Nv2aRenderState rs;
+@@ -3726,7 +3939,7 @@
+  * to keep position, diffuse and texcoord 0 only, which dropped any quad with
+  * a second texture coordinate: Burnout 3 composites its whole 3D scene into
+  * the frame with exactly such a quad, and the frame never got the scene. */
+-static int imm_vertex_method(uint32_t method, uint32_t param)
++static int imm_vertex_method_inner(uint32_t method, uint32_t param)
+ {
+     union { uint32_t u; float f; } v;
+     uint32_t attr, c;
+@@ -3815,6 +4028,17 @@
+     }
+     return 0;
+ }
++
++static int imm_vertex_method(uint32_t method, uint32_t param)
++{
++    if (!imm_vertex_method_inner(method, param))
++        return 0;
++    s_gpu.imm_ever |= s_gpu.imm_used;
++    if (++s_gpu.attr_const_gen == 0)
++        s_gpu.attr_const_gen = 1;
++    return 1;
++}
++
+ /* The texture stage registers, all four stages. Stage i's registers are
+  * 0x1B00 + 0x40*i onwards; only stage 0 used to be decoded, which was
+  * enough for menus drawn one texture at a time and not for a 3D frame that
+@@ -3995,8 +4219,13 @@
+         s_gpu.min_x = s_gpu.min_y = 1e30f;
+         s_gpu.max_x = s_gpu.max_y = -1e30f;
+     }
+-    if (subch == 0)                        /* the 3D class's register file */
+-        s_reg[(method & 0x1FFCu) / 4] = param;
++    if (subch == 0) {                      /* the 3D class's register file */
++        uint32_t w = (method & 0x1FFCu) / 4;
++        if (s_reg[w] != param) {
++            s_reg[w] = param;
++            s_reg_dirty[w >> 4] = 1;
++        }
++    }
+     /* Bring-up: the first parameters each surface method carries. A wrong
+      * pitch or clip is indistinguishable from a method never arriving unless
+      * the values are visible. Cached: this runs for every method, and an
+@@ -4147,6 +4376,8 @@
+     case 0x09C4: memcpy(&s_gpu.fog_param[1], &param, 4); break;
+     case 0x17C8:                                  /* CLEAR_REPORT_VALUE */
+         s_gpu.zpass_count = 0;
++        if (s_backend && s_backend->report)
++            s_backend->report(NV2A_REPORT_CLEAR, 0);
+         break;
+     case 0x17CC:                                  /* SET_ZPASS_PIXEL_COUNT_ENABLE */
+         s_gpu.zpass_enable = param;
+@@ -4159,6 +4390,13 @@
+          * 3 culls its world with these, so the race's main view drew only
+          * the sky while the cube-map passes, which do not test, drew it all.
+          * The report DMA object starts at physical 0 here, as D3D sets it. */
++        if (s_backend && s_backend->report) {
++            /* Counted by the back end, which writes the slot when it knows. */
++            uint32_t va = report_va(param);
++            if (va)
++                s_backend->report(NV2A_REPORT_GET, va);
++            break;
++        }
+         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+         uint32_t at = dma_resolve(param & 0x00FFFFFFu);
+         uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
+diff --git a/src/kernel/nv2a_vsh_interp.c b/src/kernel/nv2a_vsh_interp.c
+--- a/src/kernel/nv2a_vsh_interp.c
++++ b/src/kernel/nv2a_vsh_interp.c
+@@ -39,6 +39,7 @@
+ static uint32_t s_load_slot, s_load_word, s_start_slot;
+ static uint32_t s_const_load, s_const_word;
+ static uint32_t s_cxt_write;
++static uint32_t s_prog_gen = 1, s_const_gen = 1;  /* content versions for draw_raw back ends */
+ static int      s_const_trace = -1;      /* RECOMP_VSH_DUMP: constant traffic */
+ 
+ static int vsh_dump_enabled(void)
+@@ -65,13 +66,14 @@
+ {
+     if (s_load_slot < NV2A_VSH_SLOTS)
+         s_program[s_load_slot][s_load_word] = word;
++    s_prog_gen++;
+     if (++s_load_word == 4) {
+         s_load_word = 0;
+         s_load_slot++;
+     }
+ }
+ 
+-void nv2a_vsh_set_start_slot(uint32_t slot) { s_start_slot = slot; }
++void nv2a_vsh_set_start_slot(uint32_t slot) { s_start_slot = slot; s_prog_gen++; }
+ void nv2a_vsh_set_cxt_write(uint32_t enable) { s_cxt_write = enable; }
+ 
+ void nv2a_vsh_set_constant_load(uint32_t index)
+@@ -84,6 +86,7 @@
+ 
+ void nv2a_vsh_constant_word(uint32_t word)
+ {
++    s_const_gen++;
+     if (s_const_load < NV2A_VSH_CONSTANTS)
+         memcpy(&s_const[s_const_load][s_const_word], &word, 4);
+     else if (vsh_dump_enabled()) {
+@@ -192,8 +195,15 @@
+ {
+     if (index < NV2A_VSH_CONSTANTS && comp < 4)
+         memcpy(&s_const[index][comp], &word, 4);
++    s_const_gen++;
+ }
+ 
++const uint32_t (*nv2a_vsh_program_slots(void))[4] { return (const uint32_t (*)[4])s_program; }
++const float (*nv2a_vsh_constants(void))[4] { return (const float (*)[4])s_const; }
++uint32_t nv2a_vsh_start_slot(void) { return s_start_slot; }
++uint32_t nv2a_vsh_prog_gen(void) { return s_prog_gen ? s_prog_gen : 1; }
++uint32_t nv2a_vsh_const_gen(void) { return s_const_gen ? s_const_gen : 1; }
++
+ /* ---- execution ----------------------------------------------------------- */
+ 
+ typedef struct { float v[4]; } vec4;
+diff --git a/src/kernel/nv2a_vsh_interp.h b/src/kernel/nv2a_vsh_interp.h
+--- a/src/kernel/nv2a_vsh_interp.h
++++ b/src/kernel/nv2a_vsh_interp.h
+@@ -58,4 +58,11 @@
+ void nv2a_vsh_constant_component(uint32_t index, uint32_t comp, uint32_t word);
+ void nv2a_vsh_set_instruction(uint32_t slot, const uint32_t words[4]);
+ 
++/* The store as uploaded, for a back end that runs programs on a GPU (patch 0019). */
++const uint32_t (*nv2a_vsh_program_slots(void))[4];
++const float (*nv2a_vsh_constants(void))[4];
++uint32_t nv2a_vsh_start_slot(void);
++uint32_t nv2a_vsh_prog_gen(void);
++uint32_t nv2a_vsh_const_gen(void);
++
+ #endif
+diff --git a/src/kernel/xbox_memory_layout.c b/src/kernel/xbox_memory_layout.c
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -1673,7 +1673,7 @@
+     dsp_ack_init();
+     poke_init();
+     g_nv2a_ack_stop = 0;
+-    g_nv2a_ack_thread = CreateThread(NULL, 0, nv2a_ack_thread,
++    g_nv2a_ack_thread = CreateThread(NULL, 8u << 20 /* a draw_raw back end compiles shaders here */, nv2a_ack_thread,
+                                      g_nv2a_memory, 0, NULL);
+     if (g_nv2a_ack_thread) {
+         fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",

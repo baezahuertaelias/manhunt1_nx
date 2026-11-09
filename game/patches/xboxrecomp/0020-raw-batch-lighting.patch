@@ -1,0 +1,91 @@
+diff --git a/src/kernel/nv2a_pb_exec.c b/src/kernel/nv2a_pb_exec.c
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -3257,6 +3257,29 @@
+  * names most of them several times -- and converted to float4 by the same
+  * fetch_attr the CPU path uses, so every attribute type and inline arrays
+  * come out the same way. The back end never reads vertex memory itself. */
++/* Fixed-function lighting for a draw_raw back end: the shader has none, so the CPU path's lit_color() supplies
++ * attribute 3 (patch 0020). No specular: lit_color computes none. RECOMP_GL_NO_LIGHT=1 turns it off. */
++static uint64_t s_raw_lit_batches, s_raw_lit_vertices, s_raw_lit_ns;
++
++static int raw_light_on(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("RECOMP_GL_NO_LIGHT");
++        on = !(e && *e == '1');
++        fprintf(stderr, "[MH-GL] fixed-function lighting by the CPU's lit_color: %s\n", on ? "on" : "off (RECOMP_GL_NO_LIGHT=1)");
++    }
++    return on;
++}
++
++static void raw_lit_report(void)
++{
++    if (s_raw_lit_batches && nv2a_profile_enabled())
++        fprintf(stderr, "[RENDER-PROFILE] gl_lighting batches=%llu vertices=%llu ns=%llu\n",
++                (unsigned long long)s_raw_lit_batches, (unsigned long long)s_raw_lit_vertices,
++                (unsigned long long)s_raw_lit_ns);
++}
++
+ static float    *s_raw_attrs;
+ static uint32_t *s_raw_idx;
+ static uint32_t  s_raw_cap_v, s_raw_cap_i;
+@@ -3325,6 +3348,7 @@
+     Nv2aRawBatch rb;
+     uint32_t lo = 0xFFFFFFFFu, hi = 0, i, a, nv;
+     uint16_t present = 0, direct = 0;
++    int lit;
+ 
+     for (i = 0; i < s_gpu.idx_count; i++) {
+         if (s_gpu.idx[i] < lo) lo = s_gpu.idx[i];
+@@ -3357,11 +3381,20 @@
+     rb.attr_const_gen = s_gpu.attr_const_gen ? s_gpu.attr_const_gen : 1;
+     if (raw_direct_on())
+         direct = raw_direct_attrs(&rb, present, lo, nv);
++    /* The same test lit_color() and ffp_vertex() make. Lit colours go up as converted attributes, which are copied
++     * fresh for every draw, so nothing reuses one batch's colours for another. */
++    lit = batch_is_ffp() && !batch_uses_program() && s_reg[0x0314 / 4] && s_gpu.attr[2].size && raw_light_on();
++    if (lit) {
++        direct &= (uint16_t)~(1u << 3);
++        rb.attr_direct = direct;
++    }
+     if (direct) {
+         /* Convert only what the back end cannot take as stored (CMP
+          * normals, arrays that run off their buffer). Most batches have
+          * nothing left here. */
+         uint16_t conv = present & (uint16_t)~direct;
++        if (lit)
++            conv &= (uint16_t)~(1u << 3);       /* filled below */
+         for (a = 0; conv && a < NV2A_RAW_ATTRS; a++) {
+             if (!(conv & (1u << a)))
+                 continue;
+@@ -3379,6 +3412,20 @@
+             }
+         }
+     }
++    if (lit) {
++        const int timed = nv2a_profile_enabled();
++        const uint64_t t0 = timed ? xbox_HostNowNs() : 0;
++        for (i = 0; i < nv; i++) {
++            float *o = s_raw_attrs + ((size_t)i * NV2A_RAW_ATTRS + 3) * 4;
++            if (!lit_color(lo + i, o) && !((present & (1u << 3)) && fetch_attr(&s_gpu.attr[3], lo + i, o)))
++                memcpy(o, rb.attr_const[3], sizeof rb.attr_const[3]);
++        }
++        present |= 1u << 3;
++        s_raw_lit_batches++;
++        s_raw_lit_vertices += nv;
++        if (timed)
++            s_raw_lit_ns += xbox_HostNowNs() - t0;
++    }
+     for (i = 0; i < s_gpu.idx_count; i++)
+         s_raw_idx[i] = s_gpu.idx[i] - lo;
+ 
+@@ -4899,6 +4946,7 @@
+ void nv2a_pb_exec_report(void)
+ {
+     nv2a_profile_report();
++    raw_lit_report();
+     peek_addresses();
+     peek_chain();
+     if (getenv("RECOMP_FIND_NAN")) {

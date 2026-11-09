@@ -1,5 +1,7 @@
 /* Synchronous menu subset: guest RAM stays authoritative between callbacks. */
 #include "nv2a_deko3d.h"
+#include "nv2a_profile.h"
+#include "d3d/d3d8_swizzle.h"
 #include <deko3d.h>
 #include <switch.h>
 #include <math.h>
@@ -11,6 +13,7 @@
 #define CODE_SIZE 65536u
 #define CMD_SIZE 16384u
 #define MENU_FILTER 0x02022000u
+#define TENT_MIP_FILTER 0x02062000u   /* mag 2, min 6: the CPU samples level 0 with the same tent */
 #define MAX_DIMENSION 2048u
 #define MAX_VERTICES (65536u * 9u)
 
@@ -41,13 +44,61 @@ static uint32_t swap_rb(uint32_t v)
     return (v & 0xFF00FF00u) | ((v & 255u) << 16) | ((v >> 16) & 255u);
 }
 
+/* MANHUNT_DEKO_DXT1=1 accepts DXT1 textures (0x0C): default off until measured on the console in a level. */
+static int s_use_dxt1;
+/* MANHUNT_DEKO_X8=1 accepts swizzled X8R8G8B8 textures (0x07): default off until measured. In run 12 one such texture,
+ * a render target the CPU draws and then samples 8 times a frame, took 57.5% of the raster time. */
+static int s_use_x8;
+/* MANHUNT_DEKO_WRAP=1 accepts wrap and mirror addressing and the tent-mip filter: default off until measured. The
+ * shader applies the CPU's wrap_coord itself, so sampler wrap modes do not matter. */
+static int s_use_wrap;
+
+/* MANHUNT_DEKO_SWZ=1 draws swizzled colour surfaces on the GPU, and accepts cull, the colour and destination blend
+ * factors and any GREATER alpha reference: default off until measured. The CPU renderer has no culling, so drawing
+ * unculled matches it. */
+static int s_use_swz, s_verify, s_use_resident;
+
+static int addr_ok(uint32_t mode) { return mode == 3 || (s_use_wrap && (mode == 1 || mode == 2)); }
+static int filter_is_tent(uint32_t f) { return f == MENU_FILTER || (s_use_wrap && f == TENT_MIP_FILTER); }
+
+/* Type 2 in SET_SURFACE_FORMAT, with the same colour and zeta as an accepted linear surface. The whole surface only,
+ * since a Morton layout has no rows to clip by: width and height must be the format's powers of two. */
+static int surface_is_swizzled(const Nv2aSurface *s)
+{
+    const uint32_t f = s->format_raw;
+    return s_use_swz && !(s_verify && s_use_resident) && (f & 0xFF00u) == 0x200u && ((f & 0xFFu) == 0x24u || (f & 0xFFu) == 0x08u) && s->width >= 2 && s->height >= 2
+        && s->width == 1u << ((f >> 16) & 0xFu) && s->height == 1u << ((f >> 24) & 0xFu) && s->pitch == s->width * 4;
+}
+
+static int surface_format_ok(const Nv2aSurface *s)
+{
+    return s->format_raw == 8 || s->format_raw == 0x124 || surface_is_swizzled(s);
+}
+
+/* The runtime refuses type 2, which its row-based span check does not describe. With a pitch of width * 4, the Morton
+ * layout fills that same span, so ask about it as linear. */
+static int surface_writable(const Nv2aSurface *s)
+{
+    if (!surface_is_swizzled(s)) return nv2a_backend_surface_writable(s);
+    Nv2aSurface linear = *s;
+    linear.format_raw = (linear.format_raw & ~0xF00u) | 0x100u;
+    return nv2a_backend_surface_writable(&linear);
+}
+
 static int surface_ok(const Nv2aSurface *s)
 {
     return s && s->width && s->height && s->width <= MAX_DIMENSION
         && s->height <= MAX_DIMENSION && s->bytes_per_pixel == 4
         && s->aa_sx == 1 && s->aa_sy == 1 && !s->clip_x && !s->clip_y
-        && (s->format_raw == 8 || s->format_raw == 0x124)
-        && s->pitch >= (uint64_t)s->width * 4 && nv2a_backend_surface_writable(s);
+        && surface_format_ok(s)
+        && s->pitch >= (uint64_t)s->width * 4 && surface_writable(s);
+}
+
+/* Bytes of a surface pixel from its masks, which are both 0 for a linear surface. */
+static void surface_masks(const Nv2aSurface *s, uint32_t *mx, uint32_t *my)
+{
+    *mx = *my = 0;
+    if (surface_is_swizzled(s)) xbox_swizzle_masks(s->width, s->height, mx, my);
 }
 
 /* Bytes of texel data a texture of an accepted format occupies (the span nv2a_backend_decode_texture reads;
@@ -55,9 +106,10 @@ static int surface_ok(const Nv2aSurface *s)
 static uint64_t texture_bytes(const Nv2aTexture *t)
 {
     if (t->color == 0x12) return (uint64_t)(t->height - 1) * t->pitch + (uint64_t)t->width * 4;
-    if (t->color == 0x06) return (uint64_t)t->width * t->height * 4;
+    if (t->color == 0x06 || t->color == 0x07) return (uint64_t)t->width * t->height * 4;
     if (t->color == 0x0B) return (uint64_t)t->width * t->height;
     if (t->color == 0x0E) return (uint64_t)(t->width / 4) * (t->height / 4) * 16;
+    if (t->color == 0x0C) return (uint64_t)((t->width + 3) / 4) * ((t->height + 3) / 4) * 8;
     return 0;
 }
 
@@ -67,14 +119,14 @@ static int texture_shape_ok(const Nv2aTexture *t)
     uint64_t bytes;
     if (!t || !t->width || !t->height || t->width > MAX_DIMENSION
         || t->height > MAX_DIMENSION || t->levels != 1
-        || t->addr_u != 3 || t->addr_v != 3
-        || (t->filter != 0 && t->filter != MENU_FILTER)) return 0;
+        || !addr_ok(t->addr_u) || !addr_ok(t->addr_v)
+        || (t->filter != 0 && !filter_is_tent(t->filter))) return 0;
     if (t->color == 0x12) {
         if (t->pitch < (uint64_t)t->width * 4) return 0;
         bytes = (uint64_t)(t->height - 1) * t->pitch + (uint64_t)t->width * 4;
     } else {
         if (!power_of_two(t->width) || !power_of_two(t->height)) return 0;
-        if (t->color == 0x06) bytes = (uint64_t)t->width * t->height * 4;
+        if (t->color == 0x06 || (t->color == 0x07 && s_use_x8)) bytes = (uint64_t)t->width * t->height * 4;
         else if (t->color == 0x0B) {
             if ((t->palette_entries != 32 && t->palette_entries != 64
                  && t->palette_entries != 128 && t->palette_entries != 256)
@@ -84,6 +136,8 @@ static int texture_shape_ok(const Nv2aTexture *t)
         } else if (t->color == 0x0E) {
             if (t->width < 4 || t->height < 4) return 0;
             bytes = (uint64_t)(t->width / 4) * (t->height / 4) * 16;
+        } else if (t->color == 0x0C && s_use_dxt1) {
+            bytes = (uint64_t)((t->width + 3) / 4) * ((t->height + 3) / 4) * 8;  /* the decoder's block walk */
         } else return 0;
     }
     return ram_span(t->offset, bytes);
@@ -107,6 +161,16 @@ static int factor(uint32_t nv, DkBlendFactor *out)
     case 1: *out = DkBlendFactor_One; return 1;
     case 0x302: *out = DkBlendFactor_SrcAlpha; return 1;
     case 0x303: *out = DkBlendFactor_InvSrcAlpha; return 1;
+    default: break;
+    }
+    if (!s_use_swz) return 0;
+    switch (nv) {
+    case 0x300: *out = DkBlendFactor_SrcColor; return 1;
+    case 0x301: *out = DkBlendFactor_InvSrcColor; return 1;
+    case 0x304: *out = DkBlendFactor_DstAlpha; return 1;
+    case 0x305: *out = DkBlendFactor_InvDstAlpha; return 1;
+    case 0x306: *out = DkBlendFactor_DstColor; return 1;
+    case 0x307: *out = DkBlendFactor_InvDstColor; return 1;
     default: return 0;
     }
 }
@@ -115,9 +179,9 @@ static int state_ok(const Nv2aRenderState *r)
 {
     DkBlendFactor src, dst;
     return r && !r->depth_test_enable && !r->depth_write && !r->stencil_enable
-        && !r->cull_enable && !(r->color_mask & ~0x01010101u)
+        && (s_use_swz || !r->cull_enable) && !(r->color_mask & ~0x01010101u)
         && (!r->alpha_test_enable || (r->alpha_func == 0x204
-            && (r->alpha_ref == 0 || r->alpha_ref == 128)))
+            && (s_use_swz || r->alpha_ref == 0 || r->alpha_ref == 128)))
         && (!r->blend_enable || (r->blend_eq == 0x8006
             && factor(r->blend_src, &src) && factor(r->blend_dst, &dst)));
 }
@@ -136,17 +200,149 @@ static const char *const s_rj_name[RJ_COUNT] = { "surface", "depth", "stencil", 
     "tex_addr", "tex_filter", "tex_format", "tex_other", "other" };
 static uint64_t s_rj_any[RJ_COUNT], s_rj_only[RJ_COUNT], s_rj_color[128];
 
+/* Which surface_ok check failed, and which reasons fail together; printed as [MH-DEKO-S] and [MH-DEKO-C]. */
+enum { RS_DEVICE, RS_SIZE, RS_BPP, RS_AA, RS_CLIP, RS_FORMAT, RS_PITCH, RS_WRITABLE, RS_COUNT };
+static const char *const s_rs_name[RS_COUNT] = { "no_device", "size", "bpp", "aa", "clip", "format", "pitch", "not_writable" };
+static uint64_t s_rs[RS_COUNT];
+static Nv2aSurface s_rs_last;
+#define RJ_COMBOS 16
+static struct { uint32_t mask; uint64_t count, raster_ns; } s_rj_combo[RJ_COMBOS];
+static uint64_t s_rj_combo_other, s_rj_combo_other_ns;
+
+/* Which refusal the CPU raster time belongs to; printed as [MH-DEKO-N]. Diagnostics only (decides nothing).
+ * Reads the RECOMP_RENDER_PROFILE "raster" counter the runtime already measures, and takes no clock of its own.
+ * Each callback hands the raster time since the previous callback to the class that was then in force, since
+ * every batch's rasterising runs after its can_draw and before the next. Whatever no refused draw owns stays
+ * in "unattributed", so the buckets add up to the raster_ns printed with them. [RENDER-PROFILE] prints on a
+ * timer, so its total is from another moment. The executor thread makes these callbacks, and the counter is thread-local to it. */
+static uint64_t s_rn_seen, s_rn_transform, s_rn_unattributed, *s_rn_to = &s_rn_unattributed;
+
+/* The same raster time by refused draw's stage 0 texture, since draw counts have twice pointed at the wrong format;
+ * printed as [MH-DEKO-X]. Diagnostics only. The back end sees stage 0 alone, whether or not the draw samples it, so a
+ * row means "this was bound on a refused batch", and stages, shading and combiner say what the draw was: a draw using
+ * stages 1-3 is refused too, and those stages' textures are not named. reasons is why the batch was refused, so a
+ * format can only move to the GPU where it is the whole reason. Time covers everything the batch did: fill, filtering
+ * and combiners as well as the fetch.
+ * target=1 means a draw or clear rendered over this address at some time, with rendered_flip the last such flip. It
+ * does not show the two are in use together. target=0 only means no colour surface recorded so far covers the address:
+ * not that nothing else wrote it (depth target, blit, CPU copy), and only if target_draws_lost is 0. */
+#define RX_TEXTURES 256
+#define RX_PRINT 16
+#define RX_TARGETS 64
+static struct { uint32_t offset, color, width, height, pitch, levels, filter, addr_u, addr_v, blend_src, blend_dst, stage_program, shading, combiner_seen, mask; uint64_t draws, raster_ns, last_flip; } s_rx[RX_TEXTURES];
+static uint64_t s_rx_other_ns, s_rx_evicted_ns, *s_rx_to = &s_rx_other_ns;
+/* What evicted rows held, by format, so the [MH-DEKO-F] totals survive eviction. */
+static struct { uint64_t ns, alone_ns, draws; } s_rx_fmt[128];
+static struct { uint32_t va; uint64_t bytes, last_flip; } s_rx_target[RX_TARGETS];
+static uint64_t s_rx_target_draws_lost;
+
+static uint64_t *rx_entry(const Nv2aTexture *t, const Nv2aDrawInfo *info, const Nv2aRenderState *r, uint32_t mask)
+{
+    int use = -1;
+    for (int i = 0; i < RX_TEXTURES; i++) {
+        if (s_rx[i].draws && s_rx[i].offset == t->offset && s_rx[i].color == t->color
+            && s_rx[i].width == t->width && s_rx[i].height == t->height
+            && s_rx[i].stage_program == info->stage_program && s_rx[i].shading == info->shading && s_rx[i].mask == mask) {
+            s_rx[i].draws++; s_rx[i].last_flip = s_flips;
+            return &s_rx[i].raster_ns;
+        }
+        if (!s_rx[i].draws) { use = i; break; }
+    }
+    if (use < 0) {
+        /* Full: a level loads more textures than any table holds, so the cheapest row makes way and a costly one always
+         * gets in. Run 11 kept the first 256 instead, and 99.4% of the time had no row. */
+        use = 0;
+        for (int i = 1; i < RX_TEXTURES; i++)
+            if (s_rx[i].raster_ns < s_rx[use].raster_ns) use = i;
+        s_rx_evicted_ns += s_rx[use].raster_ns;
+        s_rx_fmt[s_rx[use].color & 127].ns += s_rx[use].raster_ns;
+        if (s_rx[use].mask == 1u << RJ_TEX_FORMAT) s_rx_fmt[s_rx[use].color & 127].alone_ns += s_rx[use].raster_ns;
+        s_rx_fmt[s_rx[use].color & 127].draws += s_rx[use].draws;
+    }
+    s_rx[use].offset = t->offset; s_rx[use].color = t->color; s_rx[use].width = t->width; s_rx[use].height = t->height;
+    s_rx[use].pitch = t->pitch; s_rx[use].levels = t->levels; s_rx[use].stage_program = info->stage_program;
+    s_rx[use].shading = info->shading; s_rx[use].filter = t->filter; s_rx[use].combiner_seen = info->combiner_seen;
+    s_rx[use].addr_u = t->addr_u; s_rx[use].addr_v = t->addr_v;
+    s_rx[use].blend_src = r && r->blend_enable ? r->blend_src : 0; s_rx[use].blend_dst = r && r->blend_enable ? r->blend_dst : 0;
+    s_rx[use].mask = mask; s_rx[use].draws = 1; s_rx[use].last_flip = s_flips; s_rx[use].raster_ns = 0;
+    return &s_rx[use].raster_ns;
+}
+
+/* Addresses compare within the 64 MiB that ram_span accepts, so the low and 0x80000000 forms agree. */
+static void rx_note_target(const Nv2aSurface *s)
+{
+    if (!s || !nv2a_profile_enabled()) return;
+    uint32_t va = s->color_va & 0x03FFFFFFu;
+    uint64_t bytes = (uint64_t)s->pitch * ((uint64_t)s->clip_y + s->height);
+    for (int i = 0; i < RX_TARGETS; i++) {
+        if (s_rx_target[i].bytes && s_rx_target[i].va == va) {
+            if (bytes > s_rx_target[i].bytes) s_rx_target[i].bytes = bytes;
+            s_rx_target[i].last_flip = s_flips;
+            return;
+        }
+        if (!s_rx_target[i].bytes) { s_rx_target[i].va = va; s_rx_target[i].bytes = bytes; s_rx_target[i].last_flip = s_flips; return; }
+    }
+    s_rx_target_draws_lost++;
+}
+
+/* The last flip a surface covering this address was rendered, or -1. */
+static long long rx_rendered_flip(uint32_t offset)
+{
+    long long last = -1;
+    offset &= 0x03FFFFFFu;
+    for (int i = 0; i < RX_TARGETS && s_rx_target[i].bytes; i++)
+        if (offset >= s_rx_target[i].va && offset < s_rx_target[i].va + s_rx_target[i].bytes
+            && (long long)s_rx_target[i].last_flip > last) last = (long long)s_rx_target[i].last_flip;
+    return last;
+}
+
+static void raster_settle(uint64_t *next)
+{
+    if (!nv2a_profile_enabled()) return;
+    uint64_t now = nv2a_profile.ns[NV_PROFILE_TRIANGLE];
+    *s_rn_to += now - s_rn_seen;
+    *s_rx_to += now - s_rn_seen;
+    s_rn_seen = now;
+    s_rn_to = next;
+    s_rx_to = &s_rx_other_ns;
+}
+
+static void count_surface(const Nv2aSurface *s)
+{
+    if (!s_device) s_rs[RS_DEVICE]++;
+    if (!s) return;
+    if (!s->width || !s->height || s->width > MAX_DIMENSION || s->height > MAX_DIMENSION) s_rs[RS_SIZE]++;
+    if (s->bytes_per_pixel != 4) s_rs[RS_BPP]++;
+    if (s->aa_sx != 1 || s->aa_sy != 1) s_rs[RS_AA]++;
+    if (s->clip_x || s->clip_y) s_rs[RS_CLIP]++;
+    if (!surface_format_ok(s)) s_rs[RS_FORMAT]++;
+    if (s->pitch < (uint64_t)s->width * 4) s_rs[RS_PITCH]++;
+    if (!surface_writable(s)) s_rs[RS_WRITABLE]++;
+    s_rs_last = *s;
+}
+
+/* Returns where this combination's raster time accumulates. */
+static uint64_t *count_combo(uint32_t m)
+{
+    for (int i = 0; i < RJ_COMBOS; i++) {
+        if (s_rj_combo[i].mask == m) { s_rj_combo[i].count++; return &s_rj_combo[i].raster_ns; }
+        if (!s_rj_combo[i].mask) { s_rj_combo[i].mask = m; s_rj_combo[i].count = 1; return &s_rj_combo[i].raster_ns; }
+    }
+    s_rj_combo_other++;
+    return &s_rj_combo_other_ns;
+}
+
 static void count_reject(const Nv2aSurface *s, const Nv2aRenderState *r, const Nv2aDrawInfo *info)
 {
     DkBlendFactor src, dst;
     uint32_t m = 0;
-    if (!s_device || !surface_ok(s)) m |= 1u << RJ_SURFACE;
+    if (!s_device || !surface_ok(s)) { m |= 1u << RJ_SURFACE; count_surface(s); }
     if (r) {
         if (r->depth_test_enable || r->depth_write) m |= 1u << RJ_DEPTH;
         if (r->stencil_enable) m |= 1u << RJ_STENCIL;
-        if (r->cull_enable) m |= 1u << RJ_CULL;
+        if (r->cull_enable && !s_use_swz) m |= 1u << RJ_CULL;
         if (r->color_mask & ~0x01010101u) m |= 1u << RJ_COLOR_MASK;
-        if (r->alpha_test_enable && !(r->alpha_func == 0x204 && (r->alpha_ref == 0 || r->alpha_ref == 128)))
+        if (r->alpha_test_enable && !(r->alpha_func == 0x204 && (s_use_swz || r->alpha_ref == 0 || r->alpha_ref == 128)))
             m |= 1u << RJ_ALPHA;
         if (r->blend_enable && !(r->blend_eq == 0x8006 && factor(r->blend_src, &src) && factor(r->blend_dst, &dst)))
             m |= 1u << RJ_BLEND;
@@ -164,11 +360,13 @@ static void count_reject(const Nv2aSurface *s, const Nv2aRenderState *r, const N
             /* The same texture with the named checks made to pass: still refused means another check failed too. */
             Nv2aTexture rest = *t;
             rest.levels = 1; rest.addr_u = rest.addr_v = 3; rest.filter = 0;
-            if (t->color != 0x12 && t->color != 0x0B && t->color != 0x0E) rest.color = 0x06;
+            int format_ok = t->color == 0x12 || t->color == 0x06 || t->color == 0x0B || t->color == 0x0E
+                || (t->color == 0x0C && s_use_dxt1) || (t->color == 0x07 && s_use_x8);
+            if (!format_ok) rest.color = 0x06;
             if (t->levels != 1) m |= 1u << RJ_TEX_LEVELS;
-            if (t->addr_u != 3 || t->addr_v != 3) m |= 1u << RJ_TEX_ADDR;
-            if (t->filter != 0 && t->filter != MENU_FILTER) m |= 1u << RJ_TEX_FILTER;
-            if (t->color != 0x12 && t->color != 0x06 && t->color != 0x0B && t->color != 0x0E) {
+            if (!addr_ok(t->addr_u) || !addr_ok(t->addr_v)) m |= 1u << RJ_TEX_ADDR;
+            if (t->filter != 0 && !filter_is_tent(t->filter)) m |= 1u << RJ_TEX_FILTER;
+            if (!format_ok) {
                 m |= 1u << RJ_TEX_FORMAT;
                 s_rj_color[t->color & 127]++;
             }
@@ -176,6 +374,8 @@ static void count_reject(const Nv2aSurface *s, const Nv2aRenderState *r, const N
         }
     }
     if (!m) m = 1u << RJ_OTHER;
+    raster_settle(count_combo(m));
+    if (nv2a_profile_enabled() && info->texture) s_rx_to = rx_entry(info->texture, info, r, m);
     for (int i = 0; i < RJ_COUNT; i++) {
         if (!(m & (1u << i))) continue;
         s_rj_any[i]++;
@@ -186,6 +386,7 @@ static void count_reject(const Nv2aSurface *s, const Nv2aRenderState *r, const N
 static int can_draw(const Nv2aSurface *s, const Nv2aRenderState *r,
                     const Nv2aDrawInfo *info)
 {
+    raster_settle(&s_rn_unattributed);
     int ok = s_device && surface_ok(s) && state_ok(r)
         && (info->shading == NV2A_SHADE_DIFFUSE || info->shading == NV2A_SHADE_MODULATE)
         && (info->path == NV2A_DRAW_FFP || info->path == NV2A_DRAW_PROGRAM)
@@ -195,6 +396,7 @@ static int can_draw(const Nv2aSurface *s, const Nv2aRenderState *r,
         && (info->shading != NV2A_SHADE_MODULATE
             || ((info->path == NV2A_DRAW_PROGRAM || info->has_texcoords) && texture_ok(info->texture)));
     if (!ok) { s_stats.rejected_draws++; count_reject(s, r, info); resident_invalidate(SYNC_REJECT); }
+    rx_note_target(s);
     return ok;
 }
 
@@ -210,7 +412,7 @@ static int can_draw_transformed(const Nv2aSurface *s, const Nv2aDrawInfo *info,
         && (info->shading != NV2A_SHADE_MODULATE || (texture && t->texture_q_one
             && isfinite(t->tex_u_abs_max) && isfinite(t->tex_v_abs_max)
             && t->tex_u_abs_max * su <= 1e6 && t->tex_v_abs_max * sv <= 1e6));
-    if (!ok) { s_stats.rejected_transforms++; resident_invalidate(SYNC_REJECT); }
+    if (!ok) { s_stats.rejected_transforms++; raster_settle(&s_rn_transform); resident_invalidate(SYNC_REJECT); }
     return ok;
 }
 
@@ -218,8 +420,10 @@ static int can_clear(const Nv2aSurface *s, const Nv2aRenderState *r,
                     uint32_t flags, uint32_t argb, uint32_t zstencil)
 {
     (void)r; (void)argb; (void)zstencil;
+    raster_settle(&s_rn_unattributed);
     int ok = s_device && surface_ok(s) && flags == 0xF0 && !s->clear_rect_set;
     if (!ok) { s_stats.rejected_clears++; resident_invalidate(SYNC_REJECT); }
+    rx_note_target(s);
     return ok;
 }
 
@@ -280,6 +484,11 @@ static void fail_closed(void)
  *                         the present (horizon_compat.c calls manhunt_nv2a_deko3d_sync first), a
  *                         draw or clear the CPU renderer takes (the can_* callbacks), a texture that
  *                         overlaps the surface (render-to-texture), a change of surface.
+ *   MANHUNT_DEKO_DXT1     default OFF, "=1" also accepts DXT1 textures (0x0C).
+ *   MANHUNT_DEKO_X8       default OFF, "=1" also accepts swizzled X8R8G8B8 textures (0x07).
+ *   MANHUNT_DEKO_WRAP     default OFF, "=1" also accepts wrap and mirror addressing and the tent-mip filter.
+ *   MANHUNT_DEKO_SWZ      default OFF, "=1" also draws swizzled surfaces and accepts cull, more blend factors and
+ *                         any GREATER alpha reference.
  *   MANHUNT_DEKO_VERIFY=1 diagnostic: every call also runs through the conservative path on a host
  *                         shadow of the surface, and the two results are compared exactly.
  * Not covered by any hook: the guest's own CPU reading the surface mid-frame (it would see the
@@ -307,7 +516,7 @@ typedef struct { int use_rect, want_cached, use_tcache, resident; uint8_t *pix0;
 
 /* Resident render target. valid: the GPU image holds the surface; dirty: it is newer than guest RAM
  * inside [dx0,dx1) x [dy0,dy1). */
-static struct { int valid, dirty, cached; uint32_t va, pitch, w, h; uint8_t *pix0;
+static struct { int valid, dirty, cached; uint32_t va, pitch, w, h, mx, my; uint8_t *pix0;
                 uint32_t dx0, dy0, dx1, dy1; } R;
 
 /* Verify mode: host shadow of the surface, driven through the conservative path. */
@@ -366,8 +575,8 @@ static int ensure_shaders(void)
         || !shader(&s_fs_diffuse, s_code_mem, &offset, "romfs:/shaders/nv2a_diffuse_fsh.dksh")
         || !shader(&s_fs_texture, s_code_mem, &offset, "romfs:/shaders/nv2a_texture_fsh.dksh")) return 0;
     s_shaders_ready = 1;
-    printf("[MH-DEKO] fast path active: cached=%d rect=%d tcache=%d resident=%d verify=%d\n",
-           s_want_cached, s_use_rect, s_use_tcache, s_use_resident, s_verify);
+    printf("[MH-DEKO] fast path active: cached=%d rect=%d tcache=%d resident=%d verify=%d dxt1=%d x8=%d wrap=%d swz=%d\n",
+           s_want_cached, s_use_rect, s_use_tcache, s_use_resident, s_verify, s_use_dxt1, s_use_x8, s_use_wrap, s_use_swz);
     return 1;
 }
 
@@ -458,10 +667,21 @@ static TexEntry *tex_lookup(const Nv2aTexture *t)
     return victim;
 }
 
-static void rows_to_buffer(const uint8_t *pix0, uint32_t pitch, uint32_t x0, uint32_t y0,
+static void rows_to_buffer(const uint8_t *pix0, uint32_t pitch, uint32_t mx, uint32_t my, uint32_t x0, uint32_t y0,
                            uint32_t x1, uint32_t y1, uint32_t *dst)
 {
     const uint32_t rw = x1 - x0;
+    if (mx | my) {                                   /* swizzled: the pixel sits at its Morton index */
+        for (uint32_t y = y0; y < y1; y++) {
+            uint32_t *d = dst + (size_t)(y - y0) * rw;
+            for (uint32_t x = 0; x < rw; x++) {
+                uint32_t argb;
+                memcpy(&argb, pix0 + (size_t)(swizzle_deposit(x0 + x, mx) | swizzle_deposit(y, my)) * 4, 4);
+                d[x] = swap_rb(argb);
+            }
+        }
+        return;
+    }
     for (uint32_t y = y0; y < y1; y++) {
         const uint8_t *src = pix0 + (size_t)y * pitch + (size_t)x0 * 4;
         uint32_t *d = dst + (size_t)(y - y0) * rw;
@@ -473,10 +693,20 @@ static void rows_to_buffer(const uint8_t *pix0, uint32_t pitch, uint32_t x0, uin
     }
 }
 
-static void buffer_to_rows(const uint32_t *src, uint8_t *pix0, uint32_t pitch, uint32_t x0, uint32_t y0,
+static void buffer_to_rows(const uint32_t *src, uint8_t *pix0, uint32_t pitch, uint32_t mx, uint32_t my, uint32_t x0, uint32_t y0,
                            uint32_t x1, uint32_t y1)
 {
     const uint32_t rw = x1 - x0;
+    if (mx | my) {
+        for (uint32_t y = y0; y < y1; y++) {
+            const uint32_t *s = src + (size_t)(y - y0) * rw;
+            for (uint32_t x = 0; x < rw; x++) {
+                uint32_t argb = swap_rb(s[x]);
+                memcpy(pix0 + (size_t)(swizzle_deposit(x0 + x, mx) | swizzle_deposit(y, my)) * 4, &argb, 4);
+            }
+        }
+        return;
+    }
     for (uint32_t y = y0; y < y1; y++) {
         const uint32_t *s = src + (size_t)(y - y0) * rw;
         uint8_t *dst = pix0 + (size_t)y * pitch + (size_t)x0 * 4;
@@ -528,7 +758,7 @@ static void resident_flush_dirty(int reason)
     dkCmdBufDestroy(cmd);
     if (dkQueueIsInErrorState(s_queue)) fail_closed();
     dkMemBlockFlushCpuCache(r->read_mem, 0, rbytes);      /* drop stale cache lines: the GPU wrote this memory */
-    buffer_to_rows(dkMemBlockGetCpuAddr(r->read_mem), R.pix0, R.pitch, R.dx0, R.dy0, R.dx1, R.dy1);
+    buffer_to_rows(dkMemBlockGetCpuAddr(r->read_mem), R.pix0, R.pitch, R.mx, R.my, R.dx0, R.dy0, R.dx1, R.dy1);
     if (s_verify && s_shadow && s_shadow_cap >= (size_t)R.pitch * R.h) {
         uint64_t bad = 0;
         uint32_t worst = 0;
@@ -617,10 +847,14 @@ static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_ar
     }
     const uint32_t rw = x1 - x0, rh = y1 - y0;
 
+    uint32_t mx, my;
+    surface_masks(s, &mx, &my);
+
     /* Resident target: a different surface (or none yet) first flushes the old one, then uploads this one. */
     int upload_full = 0;
     if (o->resident) {
-        int same = R.valid && R.va == s->color_va && R.pitch == s->pitch && R.w == w && R.h == h && R.pix0 == o->pix0;
+        int same = R.valid && R.va == s->color_va && R.pitch == s->pitch && R.w == w && R.h == h && R.pix0 == o->pix0
+            && R.mx == mx && R.my == my;
         if (!same) { resident_invalidate(SYNC_SWITCH); upload_full = 1; }
         else if (b && b->shading == NV2A_SHADE_MODULATE && b->texture && R.dirty) {
             /* render-to-texture: the texture decode reads guest RAM, which may overlap the dirty surface;
@@ -651,7 +885,7 @@ static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_ar
     uint32_t *pixels = dkMemBlockGetCpuAddr(r->read_mem);
     if (upload) {
         /* Guest RAM is authoritative: the GPU starts from it. */
-        rows_to_buffer(o->pix0, s->pitch, ux0, uy0, ux1, uy1, pixels);
+        rows_to_buffer(o->pix0, s->pitch, mx, my, ux0, uy0, ux1, uy1, pixels);
         dkMemBlockFlushCpuCache(r->read_mem, 0, (ux1 - ux0) * (uy1 - uy0) * 4);   /* CPU writes must reach memory before the GPU reads */
     }
     t_after_prep = armGetSystemTick();
@@ -695,8 +929,8 @@ static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_ar
         const Nv2aTexture *t = b->shading == NV2A_SHADE_MODULATE ? b->texture : NULL;
         if (t && !texture_ok(t)) goto done;
         float settings[12] = {w, h, 0, 0, t ? t->width : 1, t ? t->height : 1,
-                             b->state->alpha_test_enable, b->state->alpha_ref, t ? 1 : 2,
-                             t && t->filter == MENU_FILTER};
+                             b->state->alpha_test_enable, b->state->alpha_ref & 0xFF, t ? 1 : 2,
+                             t && filter_is_tent(t->filter), t ? t->addr_u : 3, t ? t->addr_v : 3};
         memcpy((uint8_t *)dkMemBlockGetCpuAddr(r->data_mem) + uniform_at, settings, sizeof settings);
         DkShader const *shaders[] = {&s_vs, t ? &s_fs_texture : &s_fs_diffuse};
         dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Shader);
@@ -756,7 +990,7 @@ static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_ar
             DkSampler sampler;
             dkSamplerDefaults(&sampler);
             sampler.wrapMode[0] = sampler.wrapMode[1] = DkWrapMode_ClampToEdge;
-            if (t->filter == MENU_FILTER) sampler.minFilter = sampler.magFilter = DkFilter_Linear;
+            if (filter_is_tent(t->filter)) sampler.minFilter = sampler.magFilter = DkFilter_Linear;
             dkImageDescriptorInitialize(dkMemBlockGetCpuAddr(r->desc_mem), &tv, false, false);
             dkSamplerDescriptorInitialize((DkSamplerDescriptor *)((uint8_t *)dkMemBlockGetCpuAddr(r->desc_mem) + 256), &sampler);
             dkCmdBufBarrier(cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Descriptors);
@@ -819,7 +1053,7 @@ static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_ar
     if (dkQueueIsInErrorState(s_queue)) goto done;
     if (o->resident) {
         /* The GPU image is now newer than guest RAM inside the touched rectangle. */
-        if (upload_full) { R.valid = 1; R.va = s->color_va; R.pitch = s->pitch; R.w = w; R.h = h; R.pix0 = o->pix0; R.dirty = 0; }
+        if (upload_full) { R.valid = 1; R.va = s->color_va; R.pitch = s->pitch; R.w = w; R.h = h; R.mx = mx; R.my = my; R.pix0 = o->pix0; R.dirty = 0; }
         R.cached = o->want_cached;
         if (!R.dirty) { R.dx0 = x0; R.dy0 = y0; R.dx1 = x1; R.dy1 = y1; R.dirty = 1; }
         else {
@@ -830,7 +1064,7 @@ static void gpu_call(const Nv2aSurface *s, const Nv2aBatch *b, uint32_t clear_ar
         }
     } else {
         dkMemBlockFlushCpuCache(r->read_mem, 0, rw * rh * 4);   /* drop stale cache lines: the GPU wrote this memory */
-        buffer_to_rows(pixels, o->pix0, s->pitch, x0, y0, x1, y1);
+        buffer_to_rows(pixels, o->pix0, s->pitch, mx, my, x0, y0, x1, y1);
     }
     ok = 1;
     {
@@ -919,6 +1153,7 @@ static void clear(const Nv2aSurface *s, const Nv2aRenderState *r,
 static void flip(void)
 {
     s_flips++;
+    raster_settle(s_rn_to);
     if (s_verify && s_flips % 30 == 0)
         printf("[MH-DEKO-V] compared %llu: %llu differ, %llu pixels differ in total, largest channel difference %u (fast path vs conservative path)\n",
             (unsigned long long)s_vstat.calls, (unsigned long long)s_vstat.bad_calls,
@@ -950,6 +1185,93 @@ static void flip(void)
         for (int i = 0; i < 128; i++)
             if (s_rj_color[i]) printf(" fmt0x%02X=%llu", i, (unsigned long long)s_rj_color[i]);
         printf("\n");
+        printf("[MH-DEKO-S] flip=%llu surface checks:", (unsigned long long)s_flips);
+        for (int i = 0; i < RS_COUNT; i++)
+            if (s_rs[i]) printf(" %s=%llu", s_rs_name[i], (unsigned long long)s_rs[i]);
+        printf(" | last refused: %ux%u bpp=%u aa=%ux%u clip=%u,%u format=0x%X pitch=%u\n",
+            (unsigned)s_rs_last.width, (unsigned)s_rs_last.height, (unsigned)s_rs_last.bytes_per_pixel,
+            (unsigned)s_rs_last.aa_sx, (unsigned)s_rs_last.aa_sy, (unsigned)s_rs_last.clip_x, (unsigned)s_rs_last.clip_y,
+            (unsigned)s_rs_last.format_raw, (unsigned)s_rs_last.pitch);
+        printf("[MH-DEKO-C] flip=%llu combinations:", (unsigned long long)s_flips);
+        for (int c = 0; c < RJ_COMBOS && s_rj_combo[c].mask; c++) {
+            printf(" %llu=", (unsigned long long)s_rj_combo[c].count);
+            const char *sep = "";
+            for (int i = 0; i < RJ_COUNT; i++)
+                if (s_rj_combo[c].mask & (1u << i)) { printf("%s%s", sep, s_rj_name[i]); sep = "+"; }
+        }
+        if (s_rj_combo_other) printf(" %llu=more_than_%d_combinations", (unsigned long long)s_rj_combo_other, RJ_COMBOS);
+        printf("\n");
+        if (nv2a_profile_enabled()) {
+            /* A header and one line per class, each written whole: the log splits a line at 1023 characters, and
+             * another thread can write between printf pieces. The header's count and total expose a lost line
+             * (scripts/hw-summarize.py checks them). 640 holds the longest [MH-DEKO-X] line with every reason of a mask. */
+            char line[640];
+            int classes = 0;
+            while (classes < RJ_COMBOS && s_rj_combo[classes].mask) classes++;
+            snprintf(line, sizeof line, "[MH-DEKO-N] flip=%llu raster_ns=%llu unattributed=%llu transform_refused=%llu more_than_%d_combinations=%llu combinations=%d\n",
+                (unsigned long long)s_flips, (unsigned long long)nv2a_profile.ns[NV_PROFILE_TRIANGLE],
+                (unsigned long long)s_rn_unattributed, (unsigned long long)s_rn_transform, RJ_COMBOS,
+                (unsigned long long)s_rj_combo_other_ns, classes);
+            fputs(line, stdout);
+            for (int c = 0; c < classes; c++) {
+                int len = snprintf(line, sizeof line, "[MH-DEKO-N] flip=%llu ns=%llu class=", (unsigned long long)s_flips,
+                    (unsigned long long)s_rj_combo[c].raster_ns);
+                const char *sep = "";
+                for (int i = 0; i < RJ_COUNT; i++)
+                    if (s_rj_combo[c].mask & (1u << i)) { len += snprintf(line + len, sizeof line - len, "%s%s", sep, s_rj_name[i]); sep = "+"; }
+                snprintf(line + len, sizeof line - len, "\n");
+                fputs(line, stdout);
+            }
+            /* The costliest refused textures: printing the whole table every 5 flips would be most of the log. */
+            int table = 0, printed = 0, top[RX_PRINT];
+            static uint8_t taken[RX_TEXTURES];
+            uint64_t not_printed = 0;
+            memset(taken, 0, sizeof taken);
+            while (table < RX_TEXTURES && s_rx[table].draws) table++;
+            for (; printed < RX_PRINT && printed < table; printed++) {
+                int pick = -1;
+                for (int i = 0; i < table; i++)
+                    if (!taken[i] && (pick < 0 || s_rx[i].raster_ns > s_rx[pick].raster_ns)) pick = i;
+                taken[pick] = 1;
+                top[printed] = pick;
+            }
+            for (int i = 0; i < table; i++)
+                if (!taken[i]) not_printed += s_rx[i].raster_ns;
+            snprintf(line, sizeof line, "[MH-DEKO-X] flip=%llu raster_ns=%llu other=%llu evicted=%llu not_printed=%llu textures=%d of=%d target_draws_lost=%llu\n",
+                (unsigned long long)s_flips, (unsigned long long)nv2a_profile.ns[NV_PROFILE_TRIANGLE],
+                (unsigned long long)s_rx_other_ns, (unsigned long long)s_rx_evicted_ns,
+                (unsigned long long)not_printed, printed, table, (unsigned long long)s_rx_target_draws_lost);
+            fputs(line, stdout);
+            for (int k = 0; k < printed; k++) {
+                const int t = top[k];
+                const long long rendered = rx_rendered_flip(s_rx[t].offset);
+                int len = snprintf(line, sizeof line, "[MH-DEKO-X] flip=%llu ns=%llu draws=%llu fmt=0x%02X size=%ux%u pitch=%u levels=%u filter=0x%X addr=%u,%u blend=0x%X/0x%X stages=0x%X shading=%u combiner=%u offset=0x%08X target=%d rendered_flip=%lld bound_flip=%llu reasons=",
+                    (unsigned long long)s_flips, (unsigned long long)s_rx[t].raster_ns, (unsigned long long)s_rx[t].draws,
+                    (unsigned)s_rx[t].color, (unsigned)s_rx[t].width, (unsigned)s_rx[t].height, (unsigned)s_rx[t].pitch,
+                    (unsigned)s_rx[t].levels, (unsigned)s_rx[t].filter, (unsigned)s_rx[t].addr_u, (unsigned)s_rx[t].addr_v,
+                    (unsigned)s_rx[t].blend_src, (unsigned)s_rx[t].blend_dst, (unsigned)s_rx[t].stage_program, (unsigned)s_rx[t].shading,
+                    (unsigned)s_rx[t].combiner_seen, (unsigned)s_rx[t].offset, rendered >= 0, rendered, (unsigned long long)s_rx[t].last_flip);
+                const char *sep = "";
+                for (int i = 0; i < RJ_COUNT; i++)
+                    if (s_rx[t].mask & (1u << i)) { len += snprintf(line + len, sizeof line - len, "%s%s", sep, s_rj_name[i]); sep = "+"; }
+                snprintf(line + len, sizeof line - len, "\n");
+                fputs(line, stdout);
+            }
+            /* By format: evicted rows plus the live ones. These and "other" add up to raster_ns. */
+            static struct { uint64_t ns, alone_ns, draws; } fmt[128];
+            memcpy(fmt, s_rx_fmt, sizeof fmt);
+            for (int i = 0; i < table; i++) {
+                fmt[s_rx[i].color & 127].ns += s_rx[i].raster_ns;
+                if (s_rx[i].mask == 1u << RJ_TEX_FORMAT) fmt[s_rx[i].color & 127].alone_ns += s_rx[i].raster_ns;
+                fmt[s_rx[i].color & 127].draws += s_rx[i].draws;
+            }
+            for (int i = 0; i < 128; i++)
+                if (fmt[i].draws) {
+                    snprintf(line, sizeof line, "[MH-DEKO-F] flip=%llu fmt=0x%02X ns=%llu alone_ns=%llu draws=%llu\n", (unsigned long long)s_flips,
+                        (unsigned)i, (unsigned long long)fmt[i].ns, (unsigned long long)fmt[i].alone_ns, (unsigned long long)fmt[i].draws);
+                    fputs(line, stdout);
+                }
+        }
     }
 }
 
@@ -982,6 +1304,14 @@ int manhunt_nv2a_deko3d_init(void)
         s_use_tcache = !(e && *e == '0');
         e = getenv("MANHUNT_DEKO_RESIDENT");
         s_use_resident = e && *e == '1';   /* off by default: see the gap described above */
+        e = getenv("MANHUNT_DEKO_DXT1");
+        s_use_dxt1 = e && *e == '1';
+        e = getenv("MANHUNT_DEKO_X8");
+        s_use_x8 = e && *e == '1';
+        e = getenv("MANHUNT_DEKO_WRAP");
+        s_use_wrap = e && *e == '1';
+        e = getenv("MANHUNT_DEKO_SWZ");
+        s_use_swz = e && *e == '1';
         e = getenv("MANHUNT_DEKO_VERIFY");
         s_verify = e && *e == '1';
         if (s_verify) printf("[MH-DEKO] VERIFY mode: every call runs twice and is compared (slow; timings are not representative)\n");

@@ -1,0 +1,213 @@
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -186,105 +186,117 @@
+      * value the title gave it, as the hardware does. D3D sets them for the
+      * FVF components a draw leaves out -- NFSU2's lens drops have no
+      * specular, and their fog comes from its alpha, which D3D sets to 0.
+      * Held by value so a queued copy of the batch keeps them. attr_const_gen
+      * changes whenever any of them does (never 0). */
+     float           attr_const[NV2A_RAW_ATTRS][4];
+     uint32_t        attr_const_gen;
+     /* Vertex-memory epoch: changes at every semaphore release and trap
+      * (after which the title may reuse buffers the GPU has finished with)
+      * and around every inline-array batch. Two batches with equal epochs
+      * and equal direct[] pointers read the same vertex bytes, so a back end
+      * may reuse what it uploaded for the first (instancing). */
+     uint32_t        vtx_epoch;
+ } Nv2aRawBatch;
+-
++
+ /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */
+ uint32_t nv2a_pb_resolve(uint32_t dma_offset);
+-
++
+ /* Borrowed method shadow on the executor thread, including before first draw. */
+ const uint32_t *nv2a_pb_registers(void);
+-
++
+ typedef struct {
+     /* flags: CLEAR_SURFACE bits (Z 0x1, stencil 0x2, colour 0xF0).
+      * zstencil: SET_ZSTENCIL_CLEAR_VALUE (depth in the top 24 bits for Z24S8). */
+     void (*clear)(const Nv2aSurface *s, const Nv2aRenderState *rs,
+                   uint32_t flags, uint32_t argb, uint32_t zstencil);
+     void (*draw)(const Nv2aSurface *s, const Nv2aBatch *b);
+     void (*flip)(void);
+     /* Optional side-effect-free preflights, once before any clear/draw diversion.
+      * Zero selects the unchanged CPU path; absent callbacks preserve legacy
+-     * behavior. Accepted void callbacks must complete guest-RAM writes before
+-     * returning, including GPU wait/readback. Execution failure must stop/fail;
++     * behavior. Unless NV2A_BACKEND_DEFERRED_RAM is set, accepted void callbacks
++     * complete guest-RAM writes before return, including GPU wait/readback.
++     * Deferred raw backends consume/copy all borrowed input before return and
++     * publish guest RAM at sync(0), sync(1), and presentation. The executor calls
++     * sync before GET publication, semaphore/report completion and CPU fallback.
++     * Guest CPU access while GPU ownership is pending requires the title's
++     * explicit completion protocol; arbitrary unsynchronized CPU reads are not
++     * covered. Execution failure must stop/fail;
+      * it cannot silently return success or request a replay of a vertex program.
+      * All arguments/pointers are borrowed for the duration of the call only. */
+     int (*can_draw)(const Nv2aSurface *s, const Nv2aRenderState *rs,
+                     const Nv2aDrawInfo *info);
+     int (*can_clear)(const Nv2aSurface *s, const Nv2aRenderState *rs,
+                      uint32_t flags, uint32_t argb, uint32_t zstencil);
+     /* Called after transform exactly once, before collection. Zero runs the CPU
+      * primitive loop over those same outputs; it never reruns vertex programs. */
+     int (*can_draw_transformed)(const Nv2aSurface *s, const Nv2aDrawInfo *info,
+                                 const Nv2aTransformInfo *transformed);
+     uint32_t wants_float_diffuse; /* request raw colours without changing Nv2aVertex */
+     /* Optional (patch 0018). Bring guest RAM up to date with whatever the back end keeps on the GPU.
+      * invalidate != 0: the CPU renderer is about to take over the surface, so the back end must also
+      * forget its copy. Called wherever the title can see the GPU as done (the pushbuffer GET is
+      * published, the semaphore is released, a report is written, the frame is presented) and when the
+      * runtime falls back to the CPU renderer after a batch was accepted. */
+     void (*sync)(int invalidate);
+     /* Optional (patch 0019). When set, every batch goes here instead of draw(), before
+      * any CPU transform, clipping or screen-space test. */
+     void (*draw_raw)(const Nv2aRawBatch *b);
+     /* NV2A_BACKEND_* bits. */
+     uint32_t flags;
+     /* Optional: visibility tests (D3D's Begin/EndVisibilityTest).
+      * NV2A_REPORT_CLEAR is CLEAR_REPORT_VALUE: the pixel count restarts at
+      * 0. NV2A_REPORT_GET is GET_REPORT: the pixels that passed the depth test
+      * in the draws made with SET_ZPASS_PIXEL_COUNT_ENABLE (regs[0x17CC / 4])
+      * on since the clear, to be written to the report at guest VA va with
+      * nv2a_pb_write_report once the back end knows them -- later is fine:
+      * until then the title sees the test incomplete. */
+     void (*report)(uint32_t op, uint32_t va);
+ } Nv2aBackend;
+-
++
+ #define NV2A_REPORT_CLEAR 0u
+ #define NV2A_REPORT_GET   1u
+-
++
+ /* Fill in a visibility report (from any thread): the pixel count in surface
+  * pixels as the title knows them (any resolution scale taken out), then the
+  * status word that tells D3D the test is done. */
+ void nv2a_pb_write_report(uint32_t va, uint32_t pixels);
+-
++
+ /* draw_raw takes attributes in their stored format (Nv2aRawBatch.attr_direct).
+  * RECOMP_GL_DIRECT=0 turns it off at run time. */
+ #define NV2A_BACKEND_RAW_DIRECT 0x1u
++#define NV2A_BACKEND_DEFERRED_RAM 0x2u
++
++static inline int nv2a_backend_contract_valid(const Nv2aBackend *b)
++{
++    return !b || !(b->flags & NV2A_BACKEND_DEFERRED_RAM) || (b->draw_raw && b->sync);
++}
+-
++
+ /* Optional, set by the game project: sees every raw batch just before the
+  * back end gets it and may change it. attrs is rb->attrs, writable; an
+  * attribute moved from attr_direct to attrs[] must have its bit cleared. */
+ extern void (*nv2a_raw_batch_hook)(Nv2aRawBatch *rb, float *attrs);
+-
++
+-
++
+ /* Register (or, with NULL, remove) the back end. Call before the title starts
+  * submitting work; the executor must also be enabled (RECOMP_PB_EXEC). */
+ void nv2a_backend_register(const Nv2aBackend *backend);
+-
++
+ /* Linear surface span guard, including image/stack exclusion; validates no data. */
+ int nv2a_backend_surface_writable(const Nv2aSurface *surface);
+-
++
+ /* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
+  * Handles supported swizzled, linear and DXT formats, plus bounded 32/64/128/256-entry P8.
+  * P8 index/palette spans must fit primary or contiguous 64 MiB RAM views.
+  * Returns 0 if the format is not supported. */
+ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
+ /* Calls the registered back end's sync hook, if any (patch 0018). */
+ void nv2a_backend_sync(int invalidate);
+-
++
+ /* Where BACK_END_WRITE_SEMAPHORE_RELEASE (0x1D70) values land: the guest VA
+  * of the semaphore the title reads GPU progress from (for XDK D3D, the
+  * pointer at device+0x30). The executor writes each release there once it
+  * has executed everything before it -- which is
+  * what lets D3D's fence waits and ring-space checks see real progress.
+  *
+  * ponytail: the title supplies the address instead of the executor resolving
+  * the semaphore context DMA object through RAMIN. */
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -784,60 +784,65 @@
+ static void surface_apply_clip(void)
+ {
+     uint32_t aa = (s_gpu.format >> 12) & 0xF;
+     uint32_t sx = aa ? 2 : 1, sy = aa == 2 ? 2 : 1;
+-
++
+     s_gpu.aa_sx = (float)sx;
+     s_gpu.aa_sy = (float)sy;
+-
++
+     s_gpu.clip_x = (s_gpu.clip_raw_h & 0xFFFF) * sx;
+     s_gpu.clip_w = ((s_gpu.clip_raw_h >> 16) & 0xFFFF) * sx;
+     s_gpu.clip_y = (s_gpu.clip_raw_v & 0xFFFF) * sy;
+     s_gpu.clip_h = ((s_gpu.clip_raw_v >> 16) & 0xFFFF) * sy;
+ }
+-
++
+ /* ---- Render back end (nv2a_backend.h) ------------------------------- */
+-
++
+ static const Nv2aBackend *s_backend;
+-
++
+ void nv2a_backend_sync(int invalidate)
+ {
+     if (s_backend && s_backend->sync)
+         s_backend->sync(invalidate);
+ }
+ static int s_backend_batch;
+ static uint32_t s_backend_shading;
+ static Nv2aDrawInfo s_backend_info;
+ static Nv2aTexture s_backend_texture;
+-
++
+ void nv2a_backend_register(const Nv2aBackend *backend)
+ {
++    if (!nv2a_backend_contract_valid(backend)) {
++        fprintf(stderr, "[NV2A] deferred RAM backend requires draw_raw and sync\n");
++        abort();
++    }
++    if (s_backend && s_backend != backend) nv2a_backend_sync(1);
+     s_backend = backend;
+ }
+-
++
+ static int backend_draws(void)
+ {
+     return s_backend_batch;
+ }
+-
++
+ uint32_t nv2a_pb_resolve(uint32_t dma_offset) { return dma_resolve(dma_offset); }
+-
++
+ /* GET_REPORT's slot: of the two addresses it could be, the one D3D marked
+  * incomplete. 0: neither. */
+ static uint32_t report_va(uint32_t param)
+ {
+     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+     uint32_t phys = param & 0x0EFFFFFFu;
+     int k;
+-
++
+     for (k = 0; k < 2; k++, phys |= 0x01000000u) {
+         uint32_t va = dma_resolve(phys);
+         if (va && *(const volatile uint32_t *)(mem + va + 12) == 0xFFFFFFFFu)
+             return va;
+     }
+     return 0;
+ }
+-
++
+ void nv2a_pb_write_report(uint32_t va, uint32_t pixels)
+ {
+     static uint32_t stamp;
+     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();

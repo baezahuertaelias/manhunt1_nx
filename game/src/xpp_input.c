@@ -24,6 +24,10 @@
 
 #include "recomp_types.h"
 #include "pad.h"
+#include "devmenu.h"
+
+/* The developer menu's open flag: items are drawn and navigated only while it is non-zero (reports/DEVMENU.md). */
+#define DEVMENU_OPEN 0x003D7298u
 
 #define XPP_GAMEPAD_TYPE   0x0029F214u
 #define ERROR_SUCCESS      0u
@@ -79,6 +83,13 @@ void sub_002A01D2(void)
         return;
     }
     manhunt_pad_sample(&pad);
+    /* MANHUNT_DEVMENU=1: L3+R3 toggles Rockstar's developer menu by its open flag (reports/DEVMENU.md), here on the
+     * guest thread between the title's frames, so nothing races the game. */
+    if (manhunt_devmenu_combo(&pad)) {
+        const uint32_t open = MEM32(DEVMENU_OPEN) ? 0u : 1u;
+        MEM32(DEVMENU_OPEN) = open;
+        printf("[MH-DEVMENU] %s\n", open ? "opened" : "closed");
+    }
     {
         /* Evidence for hardware runs: how often the title polls and what it is
          * handed. First polls, every change, and a heartbeat every 50th poll. */

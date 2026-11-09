@@ -17,6 +17,9 @@
 
 #include <switch.h>
 
+#include "fps_overlay.h"
+#include "xbox_gamma.h"
+
 extern ptrdiff_t g_xbox_mem_offset;
 
 #define SCREEN_W 1280
@@ -62,6 +65,16 @@ extern void manhunt_nv2a_deko3d_sync(void);
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
 {
     uint32_t w, h, x, y, out_w, x0;
+    /* MANHUNT_GPU_BACKEND=2 swaps its own window, on the same native window, and leaves guest RAM alone. */
+    extern int manhunt_gl_active;
+    if (manhunt_gl_active) {
+        s_last_va = fb_va;
+        s_last_pitch = pitch;
+        s_presents++;
+        if (s_presents == 1 || s_presents % 60 == 0)
+            printf("[MH-FRAME] present %llu (OpenGL)\n", (unsigned long long)s_presents);
+        return;
+    }
     /* The GPU renderer (when on) keeps the target resident: guest RAM must be current before it is read. */
     manhunt_nv2a_deko3d_sync();
     s_last_va = fb_va;
@@ -140,6 +153,9 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     }
     uint32_t prev_sy = 0xFFFFFFFFu;
     uint32_t *prev_row = NULL;
+    /* The title's gamma ramp, which the Xbox applies at scanout (xbox_gamma.c). */
+    static uint8_t gr[256], gg[256], gb[256];
+    const int gamma = xbox_gamma_ramp(gr, gg, gb);
     for (y = 0; y < SCREEN_H; y++) {
         const uint32_t sy = y * h / SCREEN_H;
         uint32_t *row = (uint32_t *)((uint8_t *)dst + y * stride);
@@ -150,12 +166,25 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
             memset(row, 0, x0 * 4);
             for (x = 0; x < out_w; x++) {
                 const uint8_t *p = src + xmap[x];
-                row[x0 + x] = 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+                row[x0 + x] = gamma ? 0xFF000000u | (uint32_t)gb[p[0]] << 16 | (uint32_t)gg[p[1]] << 8 | gr[p[2]]
+                                    : 0xFF000000u | (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
             }
             memset(row + x0 + out_w, 0, (SCREEN_W - x0 - out_w) * 4);
         }
         prev_sy = sy;
         prev_row = row;
+    }
+    /* MANHUNT_FPS_OVERLAY=1: on this host framebuffer only, so guest memory and frame dumps never contain it. */
+    static int fps_on = -1;
+    static MhFps fps;
+    if (fps_on < 0) {
+        const char *e = getenv("MANHUNT_FPS_OVERLAY");
+        fps_on = e && *e == '1';
+        printf("[MH-FRAME] fps overlay %s\n", fps_on ? "on" : "off");
+    }
+    if (fps_on) {
+        mh_fps_tick(&fps, armTicksToNs(armGetSystemTick()));
+        mh_fps_draw(&fps, dst, stride, SCREEN_W, SCREEN_H);
     }
     framebufferEnd(&s_fb);
 }
@@ -225,7 +254,3 @@ long sysconf(int name)
     default: errno = EINVAL; return -1;
     }
 }
-
-/* The watchdog closes the APU's WAV capture before dumping; there is no APU
- * (and no capture) in the Switch build. */
-int apu_wav_close_nowait(int wait_ms) { (void)wait_ms; return 0; }

@@ -24,13 +24,16 @@ file(GLOB MANHUNT_GEN_SOURCES CONFIGURE_DEPENDS "${MANHUNT_GEN_DIR}/*.c")
 set(MANHUNT_GAME_SOURCES
     src/recomp_manual.c
     src/xpp_input.c
+    src/devmenu.c
     src/d3d_fence.c
     src/dsound_hle.c
+    src/audio_apu.c
+    src/audio_sdl.c
 )
 
 if(NINTENDO_SWITCH)
     # Runtime subset: kernel + platform (POSIX layer on newlib/libnx) + the
-    # pushbuffer executor. No SDL2/OpenGL/OpenSSL/APU: D3D is statically
+    # pushbuffer executor and MCPX APU. No OpenSSL: D3D is statically
     # linked in the title, input and audio are native at API level.
     set(XR ${XBOXRECOMP_DIR}/src)
     file(GLOB MANHUNT_RUNTIME_SOURCES
@@ -38,20 +41,36 @@ if(NINTENDO_SWITCH)
         ${XR}/platform/win32_compat.c
         ${XR}/platform/host_time.c
         ${XR}/platform/recomp_exit_hook.c
+        ${XR}/apu/apu_core.c
+        ${XR}/apu/apu_vp.c
+        ${XR}/apu/apu_dsp.c
+        ${XR}/apu/apu_xaudio2.c
+        ${XR}/apu/apu_wav.c
     )
     add_executable(manhunt
         src/main_switch.c
         src/pad_switch.c
         src/pad_script.c
         src/horizon_compat.c
+        src/fps_overlay.c
+        src/xbox_gamma.c
         src/horizon_alloc.c
+        src/d3d_tiled_lock.c
+        src/widescreen.c
         src/nv2a_deko3d.c
+        src/gl_host.c
+        src/nv2a_gl/nv2a_gl.c
+        src/nv2a_gl/gl_api.c
+        src/nv2a_gl/gl_psh.c
+        src/nv2a_gl/gl_vsh.c
         ${MANHUNT_GAME_SOURCES}
         ${MANHUNT_RUNTIME_SOURCES}
         ${MANHUNT_GEN_SOURCES}
     )
     target_include_directories(manhunt PRIVATE
         src/horizon_include
+        src
+        ${DEVKITPRO}/portlibs/switch/include/SDL2
         ${MANHUNT_GEN_DIR}
         ${XBOXRECOMP_DIR}/include
         ${XR} ${XR}/kernel ${XR}/platform ${XR}/nv2a ${XR}/apu ${XR}/d3d ${XR}/audio
@@ -59,7 +78,12 @@ if(NINTENDO_SWITCH)
     )
     target_compile_definitions(manhunt PRIVATE MANHUNT_HORIZON=1)
     target_compile_options(manhunt PRIVATE -g -fno-strict-aliasing -ffp-contract=off)
-    target_link_libraries(manhunt PRIVATE deko3d)
+    target_link_libraries(manhunt PRIVATE deko3d SDL2 EGL glapi drm_nouveau stdc++)
+    # No tiled aperture on Horizon: D3DLOCK_TILED locks get the contiguous
+    # alias (src/d3d_tiled_lock.c).
+    target_link_options(manhunt PRIVATE -Wl,--wrap=sub_00295EC0)
+    # MANHUNT_WIDESCREEN: 4:3 camera view windows widened (src/widescreen.c).
+    target_link_options(manhunt PRIVATE -Wl,--wrap=sub_001E80A0)
     set_source_files_properties(${MANHUNT_RUNTIME_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-w")
     find_program(MANHUNT_UAM uam HINTS "${DEVKITPRO}/tools/bin" REQUIRED)
     set(MANHUNT_ROMFS "${CMAKE_CURRENT_BINARY_DIR}/nv2a_romfs")
@@ -102,6 +126,8 @@ else()
     target_include_directories(manhunt PRIVATE
         ${MANHUNT_GEN_DIR}
         ${XBOXRECOMP_DIR}/include
+        ${XBOXRECOMP_DIR}/src/apu
+        src
     )
     target_link_libraries(manhunt PRIVATE xboxrecomp m)
     target_compile_options(manhunt PRIVATE -g -fno-strict-aliasing -ffp-contract=off)

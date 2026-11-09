@@ -1,51 +1,24 @@
-/*
- * DirectSound at the API level: "no audio driver" for the boot milestone.
- *
- * Why: the statically linked XDK DirectSound programs the MCPX APU through
- * registers. There is no APU behind them here (no fault-trapped MMIO on
- * x86-64 POSIX, and Horizon/Eden does not fault at all), so the lifted
- * DirectSoundCreate "succeeded" against an empty aperture and
- * XAudioDownloadEffectsImage then wrote through a near-null object into the
- * game thread's TIB (reports/FEASIBILITY.md, step 8).
- *
- * Behaviour: the three creation entry points report DSERR_NODRIVER, as on a
- * console whose audio device is missing. Both callers handle it: the game's
- * Miles driver set-up (0x000143C0) logs and returns failure, and the XMV
- * player plays the intro without its audio stream. Audio is NOT implemented;
- * it is a milestone-6 item (docs/ROADMAP.md). Every other DSOUND entry point
- * is unreachable without an object; reaching one with a null object faults
- * loudly instead of corrupting memory.
- *
- * Addresses (.XTLID export IDs, XDK 5849): DirectSoundCreate 0x00225757
- * (ret 0xC), DirectSoundCreateStream 0x0022579E (ret 8),
- * XAudioDownloadEffectsImage 0x00223C31 (ret 0x10).
- */
+/* Rollback gate: original lifted DSOUND runs only with the MCPX model. */
 #include <stdint.h>
 #include <stdio.h>
-
 #include "recomp_types.h"
-
-#define DSERR_NODRIVER 0x88780078u
-
-static uint32_t arg(int i) { return MEM32(g_esp + 4 + 4 * (uint32_t)i); }
-
-static void fail_nodriver(const char *what, uint32_t out_ptr, uint32_t arg_bytes)
+#include "audio_mmio.h"
+int manhunt_audio_guest_gate(uint32_t entry)
 {
-    static int logged;
-    if (out_ptr)
-        MEM32(out_ptr) = 0;
+    unsigned out_arg, bytes;
+    if (manhunt_audio_enabled()) return 0;
+    switch (entry) {
+    case 0x00225757: out_arg = 1; bytes = 12; break;
+    case 0x0022579E: out_arg = 1; bytes = 8; break;
+    case 0x00223C31: out_arg = 3; bytes = 16; break;
+    default: return 0;
+    }
+    uint32_t out = MEM32(g_esp + 4 + 4 * out_arg);
+    if (out) MEM32(out) = 0;
+    static unsigned logged;
     if (logged++ < 8)
-        printf("[MH-AUDIO] %s -> DSERR_NODRIVER (audio not implemented)\n", what);
-    g_eax = DSERR_NODRIVER;
-    g_esp += 4 + arg_bytes;
+        printf("[MH-AUDIO] %08X -> DSERR_NODRIVER (MCPX disabled)\n", entry);
+    g_eax = 0x88780078u;
+    g_esp += 4 + bytes;
+    return 1;
 }
-
-/* HRESULT DirectSoundCreate(LPGUID, LPDIRECTSOUND8 *ppDS, LPUNKNOWN) */
-void sub_00225757(void) { fail_nodriver("DirectSoundCreate", arg(1), 12); }
-
-/* HRESULT DirectSoundCreateStream(LPCDSSTREAMDESC, LPDIRECTSOUNDSTREAM *ppStream) */
-void sub_0022579E(void) { fail_nodriver("DirectSoundCreateStream", arg(1), 8); }
-
-/* HRESULT XAudioDownloadEffectsImage(LPCSTR, LPCDSEFFECTIMAGELOC, DWORD,
- *                                    LPDSEFFECTIMAGEDESC *ppImageDesc) */
-void sub_00223C31(void) { fail_nodriver("XAudioDownloadEffectsImage", arg(3), 16); }

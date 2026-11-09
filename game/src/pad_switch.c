@@ -1,7 +1,8 @@
 /*
  * Switch pad: the MANHUNT_PAD_SCRIPT player when a script is configured
  * (sdmc:/switch/manhunt1_nx/manhunt.env), otherwise the real controller via
- * libnx, mapped to the Xbox pad (A/B/X/Y by position: Switch B = Xbox A).
+ * libnx, mapped to the Xbox pad. A and B follow their labels (Switch A = Xbox A,
+ * the user's choice, 2026-11-05); X and Y are by position (Switch Y = Xbox X).
  *
  * The title polls XInputGetState once per game frame, and on the console the
  * CPU rasteriser runs at well under 1 frame per second, so a button tap
@@ -53,8 +54,8 @@ static void fill_from(PadState *p, ManhuntPad *out)
     if (h & HidNpadButton_Minus)  out->buttons |= MH_PAD_BACK;
     if (h & HidNpadButton_StickL) out->buttons |= MH_PAD_LTHUMB;
     if (h & HidNpadButton_StickR) out->buttons |= MH_PAD_RTHUMB;
-    out->analog[MH_A]     = analog(h, HidNpadButton_B);   /* bottom face button */
-    out->analog[MH_B]     = analog(h, HidNpadButton_A);   /* right */
+    out->analog[MH_A]     = analog(h, HidNpadButton_A);   /* by label: right */
+    out->analog[MH_B]     = analog(h, HidNpadButton_B);   /* by label: bottom */
     out->analog[MH_X]     = analog(h, HidNpadButton_Y);   /* left */
     out->analog[MH_Y]     = analog(h, HidNpadButton_X);   /* top */
     out->analog[MH_BLACK] = analog(h, HidNpadButton_R);

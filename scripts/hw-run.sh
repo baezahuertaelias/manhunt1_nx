@@ -187,9 +187,9 @@ if [ "$UPLOAD" = 1 ]; then
 
   # Cheap sanity check on the game data: DEFAULT.xbe size.
   want="$(wc -c < "$root/assets/manhunt1_xbe/DEFAULT.xbe" 2>/dev/null | tr -d ' ' || true)"
-  have="$(curl -s --max-time 30 "ftp://$IP:$FTP_PORT/$REMOTE/" | awk '$NF=="DEFAULT.xbe"{print $5}')"
+  have="$(curl -s --max-time 30 "ftp://$IP:$FTP_PORT/$REMOTE/game/" | awk '$NF=="DEFAULT.xbe"{print $5}')"
   if [ -n "$want" ] && [ "$want" != "0" ] && [ "$have" != "$want" ]; then
-    say "WARNING: DEFAULT.xbe on the card is '$have' bytes, local is '$want' (game data missing or different)"
+    say "WARNING: $REMOTE/game/DEFAULT.xbe is '$have' bytes, local is '$want' (game data missing or different)"
   else
     say "DEFAULT.xbe size matches the local copy"
   fi
