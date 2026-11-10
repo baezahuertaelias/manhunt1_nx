@@ -441,6 +441,50 @@ const char *nv2a_gl_vsh_main_program(void)
     return NV2A_VSH_MAIN("", "uniform vec2 u_wide;      /* widescreen 2D: x scale, centre (0: off) */\n");
 }
 
+/* Mirrors the runtime's lit_color, including its current local/spot model.
+ * This moves the existing calculation; it adds no new lighting effects. */
+const char *nv2a_gl_vsh_lighting(void)
+{
+    return
+        "uniform vec4 u_light[46];\n"
+        "vec4 nv2a_ffp_diffuse(vec4 pos, vec4 normal, vec4 vc) {\n"
+        "    if (u_light[0].x == 0.0) return vc;\n"
+        "    vec3 e, n;\n"
+        "    for (int k = 0; k < 3; ++k) {\n"
+        "        e[k] = dot(u_light[2+k].xyz, pos.xyz) + u_light[2+k].w;\n"
+        "        n[k] = dot(u_light[2+k].xyz, normal.xyz);\n"
+        "    }\n"
+        "    float len = length(n);\n"
+        "    if (len > 1e-8) n /= len;\n"
+        "    if (u_light[0].w != 0.0 && dot(n,e) > 0.0) n = -n;\n"
+        "    vec3 color = u_light[1].rgb;\n"
+        "    for (int i = 0; i < 8; ++i) {\n"
+        "        int b = 6 + i * 5;\n"
+        "        int kind = int(u_light[b].w);\n"
+        "        if (kind == 0) continue;\n"
+        "        vec3 l; float att = 1.0;\n"
+        "        if (kind == 1) l = u_light[b+2].xyz;\n"
+        "        else {\n"
+        "            l = u_light[b+3].xyz - e;\n"
+        "            float d = length(l);\n"
+        "            float range = u_light[b+1].w;\n"
+        "            if (d > range && range > 0.0) continue;\n"
+        "            if (d > 1e-8) l /= d;\n"
+        "            vec3 a = u_light[b+4].xyz;\n"
+        "            att = a.x + a.y*d + a.z*d*d;\n"
+        "            att = att > 1e-8 ? 1.0 / att : 1.0;\n"
+        "        }\n"
+        "        float ndl = max(dot(n,l), 0.0);\n"
+        "        vec3 amb = u_light[b].rgb, dif = u_light[b+1].rgb;\n"
+        "        if (u_light[0].y != 0.0) amb *= vc.rgb;\n"
+        "        if (u_light[0].z != 0.0) dif *= vc.rgb;\n"
+        "        color += att * (amb + dif * ndl);\n"
+        "    }\n"
+        "    return clamp(vec4(color, u_light[0].z != 0.0 ? vc.a : u_light[1].a), 0.0, 1.0);\n"
+        "}\n"
+        "#define NV2A_DIFFUSE nv2a_ffp_diffuse(v0, v2, v3)\n";
+}
+
 const char *nv2a_gl_vsh_fixed(void)
 {
     /* Vulkan: u_xform is a member of the prelude's uniform block. */
@@ -449,6 +493,7 @@ const char *nv2a_gl_vsh_fixed(void)
     static const char body[] =
         "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
         "uniform vec2 u_wide;      /* widescreen 2D: x scale, centre (0: off) */\n"
+        "#ifndef NV2A_DIFFUSE\n#define NV2A_DIFFUSE v3\n#endif\n"
         "void main() {\n"
         "    if (u_xform == 1) {\n"
         "        vec4 clip = vec4(dot(u_m[0], v0), dot(u_m[1], v0),\n"
@@ -464,7 +509,7 @@ const char *nv2a_gl_vsh_fixed(void)
         "        if (u_wide.x > 0.0) p.x = u_wide.y + (p.x - u_wide.y) * u_wide.x;\n"
         "        gl_Position = nv2a_clip(p * w, w);\n"
         "    }\n"
-        "    vD0 = clamp(v3, 0.0, 1.0); vD1 = clamp(v4, 0.0, 1.0);\n"
+        "    vD0 = clamp(NV2A_DIFFUSE, 0.0, 1.0); vD1 = clamp(v4, 0.0, 1.0);\n"
         "    vT0 = v9; vT1 = v10; vT2 = v11; vT3 = v12; vFog = 0.0;\n"
         "}\n";
     return nv2a_shader_vk ? body + sizeof decl - 1 : body;

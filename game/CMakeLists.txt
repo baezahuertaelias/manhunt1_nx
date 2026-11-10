@@ -15,7 +15,12 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/xboxrecomp" CACHE PATH "pa
 set(MANHUNT_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/gen" CACHE PATH "lifted C")
 # -O0 makes every guest register access a memory access, so gdb probes read
 # exact values (scripts/game-build.sh debug -> game/build/host-O0).
-set(MANHUNT_GEN_OPT "-O1" CACHE STRING "optimisation level for generated code")
+if(NINTENDO_SWITCH)
+    set(MANHUNT_GEN_OPT_DEFAULT "-O2")
+else()
+    set(MANHUNT_GEN_OPT_DEFAULT "-O1")
+endif()
+set(MANHUNT_GEN_OPT "${MANHUNT_GEN_OPT_DEFAULT}" CACHE STRING "optimisation level for generated code")
 
 add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 file(GLOB MANHUNT_GEN_SOURCES CONFIGURE_DEPENDS "${MANHUNT_GEN_DIR}/*.c")
@@ -134,7 +139,7 @@ else()
     set_source_files_properties(src/main.c src/pad_script.c PROPERTIES COMPILE_OPTIONS "-O2;-Wall")
 endif()
 
-# Generated code: ~1.5M lines. -O1 keeps compile time and memory sane on the
-# 4-core host; warnings are the lifter's (unused labels etc.), not ours.
+# Generated code: ~1.5M lines. Switch uses -O2 for the CPU-bound game loop;
+# host bring-up keeps -O1. Warnings are the lifter's, not ours.
 set_source_files_properties(${MANHUNT_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "-w;${MANHUNT_GEN_OPT}")
 set_source_files_properties(${MANHUNT_GAME_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-Wall")

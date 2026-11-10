@@ -22,5 +22,6 @@ const char *nv2a_gl_vsh_prelude(void);
 const char *nv2a_gl_vsh_main_program(void);
 /* main() for fixed-function / pre-transformed batches (no program body). */
 const char *nv2a_gl_vsh_fixed(void);
+const char *nv2a_gl_vsh_lighting(void);
 
 #endif

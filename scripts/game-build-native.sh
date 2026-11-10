@@ -67,7 +67,7 @@ if [ -f "$root/game/icon.jpg" ] && command -v sips >/dev/null 2>&1; then
 fi
 cd "$root/game"
 cmake -S . -B build/switch -G "Unix Makefiles" -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
-  -DCMAKE_BUILD_TYPE=Release > build/logs/cmake-switch.log
+  -DCMAKE_BUILD_TYPE=Release -DMANHUNT_GEN_OPT="${MANHUNT_GEN_OPT:--O2}" > build/logs/cmake-switch.log
 if ! make -C build/switch -k -j"$CPUS" > build/logs/build-switch.log 2>&1; then tail -60 build/logs/build-switch.log; exit 1; fi
 ls -la build/switch/manhunt.nro
 sha build/switch/manhunt.nro

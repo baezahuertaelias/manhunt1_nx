@@ -8,6 +8,18 @@
 #ifndef NV2A_GL_H
 #define NV2A_GL_H
 
+#include <stdint.h>
+
 void nv2a_gl_install(void);
+
+/* Running totals since start (MANHUNT_PERF_LOG). Times in ns; flip_ns
+ * includes swap_ns. All fields are uint64_t: nv2a_gl_perf_read copies them
+ * as an array. max_frame_ns is the longest frame since the previous read. */
+typedef struct {
+    uint64_t frames, slow_frames, max_frame_ns;
+    uint64_t draws, verts, indices, draw_ns, clear_ns, flip_ns, swap_ns;
+    uint64_t texs, tex_bytes, tex_ns, progs, prog_ns;
+} Nv2aGlPerf;
+void nv2a_gl_perf_read(Nv2aGlPerf *out);
 
 #endif

@@ -37,6 +37,7 @@
 #include "gl_api.h"
 #include "gl_psh.h"
 #include "gl_vsh.h"
+#include "gl_lighting.h"
 #include "nv2a_backend.h"
 
 #include <SDL.h>
@@ -143,6 +144,10 @@ static uint32_t      s_frame;
  * compiled and textures uploaded, and the time spent on each. */
 static uint32_t s_hz_progs, s_hz_texs, s_hz_draws;
 static uint64_t s_hz_prog_ns, s_hz_tex_ns, s_hz_tex_bytes;
+/* MANHUNT_PERF_LOG: running totals since start, read as deltas by the perf
+ * thread in main_switch.c (relaxed atomics: it runs on another core). */
+static Nv2aGlPerf s_pf;
+#define PF_ADD(field, v) __atomic_add_fetch(&s_pf.field, (uint64_t)(v), __ATOMIC_RELAXED)
 static uint64_t hz_now(void)
 {
     struct timespec ts;
@@ -1124,7 +1129,7 @@ typedef struct {
     uint64_t   vkey;            /* 0: fixed-function; else program hash */
     Nv2aPshKey pkey;
     GLuint     prog;
-    GLint      u_c, u_surf, u_aa, u_m, u_vpoff, u_xform, u_wide;
+    GLint      u_c, u_surf, u_aa, u_m, u_vpoff, u_xform, u_wide, u_light;
     GLint      u_t[4], u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogcolor, u_afunc, u_aref, u_fogp;
     uint32_t   used;
     int        vpc_valid;       /* vpc holds what this program's "c" was given */
@@ -1134,6 +1139,8 @@ typedef struct {
     int        next;            /* chain in s_prog_head, index + 1 */
     float      vpc[192][4];
     int        uni_valid;       /* uni holds the rest of its uniforms */
+    int        light_valid;
+    float      light[46][4];
     struct GlUni {
         float surf[4], aa[2], m[16], vpoff[4], tscale[4][2];
         float c0[8][4], c1[8][4], fog[4], fc[2][4], aref, fogp[4], wide[2];
@@ -1445,6 +1452,7 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
         vs[nvs++] = vbody;
         vs[nvs++] = nv2a_gl_vsh_main_program();
     } else {
+        vs[nvs++] = nv2a_gl_vsh_lighting();
         vs[nvs++] = nv2a_gl_vsh_fixed();
     }
     if (nv2a_gl_psh(pk, fsrc, sizeof fsrc) < 0)
@@ -1490,6 +1498,7 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->u_vpoff = glGetUniformLocation(p->prog, "u_vpoff");
     p->u_xform = glGetUniformLocation(p->prog, "u_xform");
     p->u_wide = glGetUniformLocation(p->prog, "u_wide");
+    p->u_light = glGetUniformLocation(p->prog, "u_light");
     p->u_tscale = glGetUniformLocation(p->prog, "u_tscale");
     p->u_c0 = glGetUniformLocation(p->prog, "u_c0");
     p->u_c1 = glGetUniformLocation(p->prog, "u_c1");
@@ -2329,7 +2338,7 @@ static void page_flip(void)
     fprintf(stderr, "[MH-PAGE] capture %u: frame %u, %u draws\n", s_page_dumps, s_frame + 1, n);
 }
 
-static void gl_draw_raw(const Nv2aRawBatch *b)
+static void gl_draw_raw_work(const Nv2aRawBatch *b)
 {
     GlSurf *s;
     GlProg *p;
@@ -2447,6 +2456,15 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         p->vpc_valid = 1;
         p->vpc_gen = b->vp_const_gen;
     }
+    if (p->u_light >= 0) {
+        float light[46][4];
+        nv2a_gl_light_uniforms(r, b->lighting, light);
+        if (!p->light_valid || memcmp(light, p->light, sizeof light)) {
+            glUniform4fv(p->u_light, 46, &light[0][0]);
+            memcpy(p->light, light, sizeof light);
+            p->light_valid = 1;
+        }
+    }
     {
         /* The rest, likewise: set only when something differs from what this
          * program already holds. */
@@ -2505,23 +2523,25 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         }
         u.afunc = r[0x300 / 4] ? (GLint)r[0x33C / 4] : 0x207;
         if (!p->uni_valid || memcmp(&u, &p->uni, sizeof u) != 0) {
+            /* Compare fields before updating the snapshot: a texture scale or
+             * alpha change must not resend every matrix and combiner row. */
+            if (p->u_surf >= 0 && (!p->uni_valid || memcmp(&u.surf, &p->uni.surf, sizeof u.surf))) glUniform4fv(p->u_surf, 1, u.surf);
+            if (p->u_aa >= 0 && (!p->uni_valid || memcmp(&u.aa, &p->uni.aa, sizeof u.aa))) glUniform2fv(p->u_aa, 1, u.aa);
+            if (p->u_m >= 0 && (!p->uni_valid || memcmp(&u.m, &p->uni.m, sizeof u.m))) glUniform4fv(p->u_m, 4, u.m);
+            if (p->u_vpoff >= 0 && (!p->uni_valid || memcmp(&u.vpoff, &p->uni.vpoff, sizeof u.vpoff))) glUniform4fv(p->u_vpoff, 1, u.vpoff);
+            if (p->u_xform >= 0 && (!p->uni_valid || memcmp(&u.xform, &p->uni.xform, sizeof u.xform))) glUniform1i(p->u_xform, u.xform);
+            if (p->u_wide >= 0 && (!p->uni_valid || memcmp(&u.wide, &p->uni.wide, sizeof u.wide))) glUniform2fv(p->u_wide, 1, u.wide);
+            if (p->u_tscale >= 0 && (!p->uni_valid || memcmp(&u.tscale, &p->uni.tscale, sizeof u.tscale))) glUniform2fv(p->u_tscale, 4, &u.tscale[0][0]);
+            if (p->u_c0 >= 0 && (!p->uni_valid || memcmp(&u.c0, &p->uni.c0, sizeof u.c0))) glUniform4fv(p->u_c0, 8, &u.c0[0][0]);
+            if (p->u_c1 >= 0 && (!p->uni_valid || memcmp(&u.c1, &p->uni.c1, sizeof u.c1))) glUniform4fv(p->u_c1, 8, &u.c1[0][0]);
+            if (p->u_fogcolor >= 0 && (!p->uni_valid || memcmp(&u.fog, &p->uni.fog, sizeof u.fog))) glUniform4fv(p->u_fogcolor, 1, u.fog);
+            if (p->u_fc0 >= 0 && (!p->uni_valid || memcmp(&u.fc[0], &p->uni.fc[0], sizeof u.fc[0]))) glUniform4fv(p->u_fc0, 1, u.fc[0]);
+            if (p->u_fc1 >= 0 && (!p->uni_valid || memcmp(&u.fc[1], &p->uni.fc[1], sizeof u.fc[1]))) glUniform4fv(p->u_fc1, 1, u.fc[1]);
+            if (p->u_afunc >= 0 && (!p->uni_valid || memcmp(&u.afunc, &p->uni.afunc, sizeof u.afunc))) glUniform1i(p->u_afunc, u.afunc);
+            if (p->u_aref >= 0 && (!p->uni_valid || memcmp(&u.aref, &p->uni.aref, sizeof u.aref))) glUniform1f(p->u_aref, u.aref);
+            if (p->u_fogp >= 0 && (!p->uni_valid || memcmp(&u.fogp, &p->uni.fogp, sizeof u.fogp))) glUniform4fv(p->u_fogp, 1, u.fogp);
             p->uni = u;
             p->uni_valid = 1;
-            if (p->u_surf >= 0) glUniform4fv(p->u_surf, 1, u.surf);
-            if (p->u_aa >= 0) glUniform2fv(p->u_aa, 1, u.aa);
-            if (p->u_m >= 0) glUniform4fv(p->u_m, 4, u.m);
-            if (p->u_vpoff >= 0) glUniform4fv(p->u_vpoff, 1, u.vpoff);
-            if (p->u_xform >= 0) glUniform1i(p->u_xform, u.xform);
-            if (p->u_wide >= 0) glUniform2fv(p->u_wide, 1, u.wide);
-            if (p->u_tscale >= 0) glUniform2fv(p->u_tscale, 4, &u.tscale[0][0]);
-            if (p->u_c0 >= 0) glUniform4fv(p->u_c0, 8, &u.c0[0][0]);
-            if (p->u_c1 >= 0) glUniform4fv(p->u_c1, 8, &u.c1[0][0]);
-            if (p->u_fogcolor >= 0) glUniform4fv(p->u_fogcolor, 1, u.fog);
-            if (p->u_fc0 >= 0) glUniform4fv(p->u_fc0, 1, u.fc[0]);
-            if (p->u_fc1 >= 0) glUniform4fv(p->u_fc1, 1, u.fc[1]);
-            if (p->u_afunc >= 0) glUniform1i(p->u_afunc, u.afunc);
-            if (p->u_aref >= 0) glUniform1f(p->u_aref, u.aref);
-            if (p->u_fogp >= 0) glUniform4fv(p->u_fogp, 1, u.fogp);
         }
     }
 
@@ -2731,8 +2751,8 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     }
 }
 
-static void gl_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
-                     uint32_t flags, uint32_t argb, uint32_t zstencil)
+static void gl_clear_work(const Nv2aSurface *sf, const Nv2aRenderState *rs,
+                          uint32_t flags, uint32_t argb, uint32_t zstencil)
 {
     GlSurf *s;
     GLbitfield bits = 0;
@@ -2849,7 +2869,7 @@ static void dump_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_t
  * elsewhere: the call is skipped. */
 extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
 
-static void gl_flip(void)
+static void gl_flip_work(void)
 {
     state_dirty();
     static int dump_every = -1;
@@ -2896,6 +2916,19 @@ static void gl_flip(void)
                         s_hz_progs, s_hz_prog_ns / 1e6, s_hz_texs,
                         s_hz_tex_bytes / 1048576.0, s_hz_tex_ns / 1e6, s_hz_draws);
         }
+        if (last_ns) {
+            uint64_t dt = now - last_ns, max = __atomic_load_n(&s_pf.max_frame_ns, __ATOMIC_RELAXED);
+            PF_ADD(frames, 1);
+            while (dt > max && !__atomic_compare_exchange_n(&s_pf.max_frame_ns, &max, dt,
+                                                            0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+            if (dt > 50000000ull)
+                PF_ADD(slow_frames, 1);
+        }
+        PF_ADD(progs, s_hz_progs);
+        PF_ADD(prog_ns, s_hz_prog_ns);
+        PF_ADD(texs, s_hz_texs);
+        PF_ADD(tex_bytes, s_hz_tex_bytes);
+        PF_ADD(tex_ns, s_hz_tex_ns);
         last_ns = now;
         s_hz_progs = s_hz_texs = s_hz_draws = 0;
         s_hz_prog_ns = s_hz_tex_ns = s_hz_tex_bytes = 0;
@@ -2918,10 +2951,13 @@ static void gl_flip(void)
             dt = (double)(now.tv_sec - last.tv_sec) + (now.tv_nsec - last.tv_nsec) / 1e9;
             if (dt >= 10.0) {
                 extern void xbox_vblank_report(double, char *, size_t);
+                extern void nv2a_gl_queue_stats(double, int *, int *);
                 char vb[128];
+                int gl_idle, exec_wait;
                 xbox_vblank_report(dt, vb, sizeof vb);
-                fprintf(stderr, "[fps] %.1f fps (frame %u), %s\n",
-                        (s_frame - last_frame) / dt, s_frame, vb);
+                nv2a_gl_queue_stats(dt, &gl_idle, &exec_wait);
+                fprintf(stderr, "[fps] %.1f fps (frame %u), %s gl_idle %d%% exec_wait %d%%\n",
+                        (s_frame - last_frame) / dt, s_frame, vb, gl_idle, exec_wait);
                 last_frame = s_frame;
                 last = now;
             }
@@ -3035,7 +3071,12 @@ static void gl_flip(void)
 swap:
     gl_check("presentation");
     gl_step_done("present");
-    SDL_GL_SwapWindow(s_win);
+    {
+        /* Time blocked here is the GPU (or vsync) holding the CPU back. */
+        uint64_t t0 = hz_now();
+        SDL_GL_SwapWindow(s_win);
+        PF_ADD(swap_ns, hz_now() - t0);
+    }
     if (nv2a_host_frame_presented)
         nv2a_host_frame_presented(s && s_drew_any ? s->pw : 0, s && s_drew_any ? s->ph : 0);
     gl_step_done("swap");
@@ -3044,6 +3085,65 @@ swap:
         SDL_Event e;
         while (SDL_PollEvent(&e)) { }
     }
+}
+
+/* The entry points with their time counted for MANHUNT_PERF_LOG: whatever
+ * thread runs them (the executor, or the GL thread with RECOMP_GL_THREAD=1). */
+static void gl_draw_raw(const Nv2aRawBatch *b)
+{
+    uint64_t t0 = hz_now();
+    gl_draw_raw_work(b);
+    PF_ADD(draw_ns, hz_now() - t0);
+    PF_ADD(draws, 1);
+    PF_ADD(verts, b->vertex_count);
+    PF_ADD(indices, b->index_count);
+}
+
+static void gl_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
+                     uint32_t flags, uint32_t argb, uint32_t zstencil)
+{
+    uint64_t t0 = hz_now();
+    gl_clear_work(sf, rs, flags, argb, zstencil);
+    PF_ADD(clear_ns, hz_now() - t0);
+}
+
+static void gl_flip(void)
+{
+    /* MANHUNT_FPS_CAP=N: present at most N frames a second, sleeping off the
+     * rest of each frame instead of rendering frames nobody needs (battery).
+     * The sleep is not counted in flip_ns: it shows as idle CPU. */
+    static int64_t cap_ns = -1;
+    static uint64_t next_ns;
+    uint64_t t0 = hz_now();
+    gl_flip_work();
+    PF_ADD(flip_ns, hz_now() - t0);
+    if (cap_ns < 0) {
+        const char *e = getenv("MANHUNT_FPS_CAP");
+        int fps = e ? atoi(e) : 0;
+        cap_ns = fps > 0 ? 1000000000ll / fps : 0;
+        if (cap_ns)
+            fprintf(stderr, "  [GL] frame cap %d fps (MANHUNT_FPS_CAP)\n", fps);
+    }
+    if (cap_ns) {
+        uint64_t now = hz_now();
+        next_ns += (uint64_t)cap_ns;
+        if (next_ns + (uint64_t)cap_ns < now)      /* far behind (a load): start again */
+            next_ns = now;
+        if (next_ns > now) {
+            struct timespec ts = { (time_t)((next_ns - now) / 1000000000ull),
+                                   (long)((next_ns - now) % 1000000000ull) };
+            nanosleep(&ts, NULL);
+        }
+    }
+}
+
+void nv2a_gl_perf_read(Nv2aGlPerf *out)
+{
+    uint64_t *d = (uint64_t *)out, *s = (uint64_t *)&s_pf;
+    for (size_t i = 0; i < sizeof *out / sizeof *d; i++)
+        d[i] = __atomic_load_n(&s[i], __ATOMIC_RELAXED);
+    /* The longest frame is per report, not a running total. */
+    out->max_frame_ns = __atomic_exchange_n(&s_pf.max_frame_ns, 0, __ATOMIC_RELAXED);
 }
 
 /* ── Threaded submission (RECOMP_GL_THREAD=1) ─────────────────────────
@@ -3316,7 +3416,9 @@ static void q_draw(const Nv2aRawBatch *b)
     qb->indices = (const uint32_t *)(uintptr_t)idx_at;
     ((QHdr *)rec)->size = (uint32_t)size;
     q_publish(size);
-    q_drain(0,gl_mode() == GL_SYNC_STRICT);
+    /* gpu mode owes the guest nothing per draw: waiting here made the two
+     * threads take turns, so the queue gained nothing. */
+    if (!gl_gpu()) q_drain(0,gl_mode() == GL_SYNC_STRICT);
 }
 
 static void q_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
@@ -3335,7 +3437,7 @@ static void q_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
     c->zs = zs;
     ((QHdr *)rec)->size = (uint32_t)size;
     q_publish(size);
-    q_drain(0,gl_mode() == GL_SYNC_STRICT);
+    if (!gl_gpu()) q_drain(0,gl_mode() == GL_SYNC_STRICT);
 }
 
 static void q_flip(void)
@@ -3381,9 +3483,12 @@ static void *q_gl_thread(void *arg)
 {
     extern void xbox_nx_spread_thread(void);
     extern void xbox_nx_track_thread(void *entry);
+    extern void manhunt_thread_register(const char *name) __attribute__((weak));
     (void)arg;
     xbox_nx_spread_thread();
     xbox_nx_track_thread((void *)q_gl_thread);
+    if (manhunt_thread_register)
+        manhunt_thread_register("gl");
     for (;;) {
         size_t avail = __atomic_load_n(&s_q_head, __ATOMIC_SEQ_CST) - s_q_tail;
         uint8_t *rec;
@@ -3505,6 +3610,10 @@ static Nv2aBackend s_backend_gl = {
 void nv2a_gl_install(void)
 {
     uint32_t flags=NV2A_BACKEND_RAW_DIRECT;
+    const char *shader_light = getenv("MANHUNT_SHADER_LIGHTING");
+    if (!shader_light || strcmp(shader_light, "0")) flags |= NV2A_BACKEND_RAW_LIGHTING;
+    fprintf(stderr, "[MH-GL] fixed-function lighting: %s (MANHUNT_SHADER_LIGHTING)\n",
+            flags & NV2A_BACKEND_RAW_LIGHTING ? "shader" : "CPU");
     if (gl_fenced()) flags |= NV2A_BACKEND_DEFERRED_RAM;
     s_backend_gl.flags=s_backend_q.flags=flags;
     {

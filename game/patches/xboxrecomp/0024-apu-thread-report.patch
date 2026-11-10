@@ -1,0 +1,11 @@
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -1125,3 +1125,8 @@
+ static void *mcpx_apu_frame_thread(void *arg)
+ {
++    /* Optional host diagnostic hook: never called under the APU lock. */
++    extern void manhunt_thread_register(const char *name) __attribute__((weak));
++    if (manhunt_thread_register)
++        manhunt_thread_register("apu");
++
+     MCPXAPUState *d = MCPX_APU_DEVICE(arg);

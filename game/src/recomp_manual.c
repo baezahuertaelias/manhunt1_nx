@@ -116,8 +116,38 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
  */
 void recomp_icall_fail_log(uint32_t va)
 {
-    fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu)\n",
-            va, (unsigned long long)g_icall_count);
+    /* Rate-limited per address as below: 0x0006F9E0 (unlifted until its
+     * add record in function_fixes.json) failed 100-200 times a second in the
+     * level's fights, and these 18 flushed lines each time cost a third of
+     * the frame rate on the console. */
+    enum { SLOTS = 16 };
+    /* Guest workers may fail concurrently. Keep the bounded table private
+     * to each worker so a diagnostic cannot race its slot allocation. */
+    static _Thread_local uint32_t seen[SLOTS];
+    static _Thread_local uint64_t hits[SLOTS];
+    static _Thread_local int count;
+    int i;
+
+    for (i = 0; i < count; i++)
+        if (seen[i] == va)
+            break;
+    if (i == count) {
+        if (count == SLOTS)
+            return;
+        seen[count] = va;
+        hits[count] = 0;
+        count++;
+    }
+    hits[i]++;
+    {
+        uint64_t n = hits[i];
+        while (n >= 10 && n % 10 == 0)
+            n /= 10;
+        if (n != 1)
+            return;
+    }
+    fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X -- %llu time(s) (total calls: %llu)\n",
+            va, (unsigned long long)hits[i], (unsigned long long)g_icall_count);
 
     /* Dump last 16 call targets from the ring buffer */
     fprintf(stderr, "  Recent ICALL targets:\n");
