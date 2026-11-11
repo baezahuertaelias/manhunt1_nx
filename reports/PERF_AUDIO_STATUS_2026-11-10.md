@@ -1,7 +1,8 @@
 # Fight audio, Status Monitor and CPU performance — 2026-11-10
 
 Branch: `settings-font`. Status Monitor FPS is confirmed by the user on Switch.
-Audio improves with the priority boost, but its FPS cost remains under investigation.
+The user reported the final combined gameplay test worked well. Telemetry still
+shows audio starvation under load, and returning to the main menu crashed.
 
 ## Hardware evidence before the combined changes
 
@@ -146,35 +147,67 @@ These runs expose the priority tradeoff; the boost must not be described as a
 complete fix. Some short per-thread CPU samples exceed 100%, so those snapshots
 are advisory, not proof of a physical single-thread utilization above one core.
 Queue consumption and underruns remain the audio acceptance measurements.
-The user has not explicitly confirmed lighting fidelity.
+C/D feedback did not isolate lighting fidelity; the final overall user
+confirmation is recorded below.
 
-## Follow-up candidate E and remaining acceptance
+## Final combined test E and remaining acceptance
 
 Patch 0026 targets repeated mixer exponentiation rather than changing audio
 quality. The consolidated candidate includes patch 0027's wall-time breakdown
 as well. Its Switch build passed. Candidate: `game/build/switch/manhunt.nro`,
 also copied to `consolidated-final.nro` beside the logs, SHA-256
 `47e7aee2b7ccb6b67a8fae60f8297963c37a1e2b9351b43abe3f1e67a8ffb808`.
-Its hardware comparison is pending; E is prepared with the same options as C,
-including the priority boost. The cache-only intermediate `9c10...` NRO was
-not executed on the console and is superseded for this next test.
+It was sent through nxlink and executed with the same options as C, including
+the priority boost. Log: `game/build/hw-test/2026-11-10-audio-smon/run-final.log`;
+`final-summary.json` beside it records the sample selection and summary.
+The cache-only intermediate `9c10...` NRO was not executed on the console.
+
+The user answered **"that worked well"** to the combined fluency/FPS, audio and
+lighting check. This is the final user's overall gameplay assessment; it is
+not a frame-identical comparison or a separate fidelity measurement.
+
+The log confirms shader lighting, successful APU priority change `0x3b -> 0x3a`,
+one FPS block at `0x144`, and reader handshakes (`smon cleared 3`). Measured clocks
+remained CPU/GPU 1020/307 MHz. There are 184 complete parsed perf samples
+(368 sampled seconds; interleaved/incomplete lines are excluded). The last ten
+complete samples above 20,000 vertices/frame have medians:
+
+| Metric | Final combined run |
+| --- | ---: |
+| FPS | 21.0 |
+| Consumed stereo frames/s | 44,847 |
+| Underrun events per approximately 2 s | 16.5 |
+| VP wall time, ms per second | 984.5 |
+
+The final reported underrun count was 725. Thus the subjective improvement is
+confirmed, while the strict zero-underrun/48k acceptance target remains open.
+The wall-time breakdown localizes the remaining work to voice processing;
+DSP mixdown, output and IRQ delivery are much smaller in representative samples.
+Wall time includes preemption and locking, so it does not identify a particular
+voice-processing algorithm as the CPU hotspot by itself.
+
+### Returning to the main menu: confirmed crash trigger
+
+The user clarified that the crash occurred **while attempting to return to the
+main menu**, after gameplay. The tail loads `LOAD_XBOX.TXD` and
+`levels/Jury_Turf/PICLOAD_XBOX.TXD`, reports repeated contiguous allocation
+failures, then logs `[MH-CRASH] kind 0x101`. The last reported arena state was
+64,248 of 65,408 KiB in use, with a reported largest free run of 1,024 KiB.
+The existing allocator excludes a low-memory reserve for unrestricted requests,
+so that free-run statistic alone does not prove an eligible block was available.
+The allocation failures precede the crash; the exact causal chain is unproven.
+This transition has not passed acceptance and must not be reported as normal exit.
 
 The user explicitly asked to consolidate all pending changes and minimize
 manual console tests. Do not request a separate run per optimization or knob.
-The next test should capture FPS display, all fights, audible output, lighting,
-steady-state queue/underruns and the complete APU time breakdown together.
+The completed final run captured gameplay feedback and the complete APU time
+breakdown together. No additional console run is requested by this report.
 
-Per the user's later instruction, finish implementation before further tests.
-Keep CPU clock and the route fixed. First run the combined candidate with GL
-thread on, Status Monitor visible for at least ten seconds, and ordinary audio.
-Confirm the first FPS block is reused, its reader handshake occurs, and FPS is
-actually visible. Reproduce all fights and check lighting, camera, audio and
-normal exit. Audio acceptance requires steady consumption near 48,000 frames/s,
-no increasing underruns in the fight and the user's audible confirmation.
-
-If needed, compare `MANHUNT_APU_BOOST=0` or `MANHUNT_SHADER_LIGHTING=0` one at a
-time in this same build; all candidates are ready before asking for those runs.
-Priority changes are a candidate fix until the console results establish them.
+Future implementation should use the captured evidence before requesting
+another consolidated acceptance run. Remaining work includes reducing VP cost
+without changing sound and diagnosing the return-to-main-menu allocation/crash
+sequence. `MANHUNT_APU_BOOST=0` and `MANHUNT_SHADER_LIGHTING=0` remain rollback
+knobs; separate manual tests for each knob are not the preferred workflow.
 
 Battery validation remains separate: handheld, `MANHUNT_GPU_MHZ=307`, record
 effective clocks, FPS and charge over 20 minutes on a repeatable route.
