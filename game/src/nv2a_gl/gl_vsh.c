@@ -377,7 +377,11 @@ const char *nv2a_gl_vsh_prelude(void)
         "layout(location = 13) in vec4 v13;\n"
         "layout(location = 14) in vec4 v14;\n"
         "layout(location = 15) in vec4 v15;\n"
+        "#ifdef NV2A_GL_UBO\n"
+        "layout(std140) uniform Nv2aConstants { vec4 c[192]; };\n"
+        "#else\n"
         "uniform vec4 c[192];\n"
+        "#endif\n"
         "uniform vec4 u_surf;      /* 2/W, 2/H, 1/zmax, scale offset */\n"
         "uniform vec2 u_aa;        /* logical -> real pixels */\n"
         "uniform vec4 u_m[4];      /* fixed-function composite rows */\n"
@@ -416,6 +420,20 @@ const char *nv2a_gl_vsh_prelude(void)
         "}\n";
 }
 
+const char *nv2a_gl_vsh_prelude_mode(int ubo)
+{
+    const char *pre = nv2a_gl_vsh_prelude();
+    static char block_pre[32768];
+    if (!ubo || nv2a_shader_vk) return pre;
+    if (!block_pre[0]) {
+        const char *body = strchr(pre, '\n');
+        if (!body || snprintf(block_pre, sizeof block_pre,
+                "#version 330 core\n#define NV2A_GL_UBO 1\n%s", body + 1) >= (int)sizeof block_pre)
+            abort();
+    }
+    return block_pre;
+}
+
 #define NV2A_VSH_MAIN(set_ib, decl) \
     decl \
     "void main() {\n" \
@@ -446,7 +464,11 @@ const char *nv2a_gl_vsh_main_program(void)
 const char *nv2a_gl_vsh_lighting(void)
 {
     return
+        "#ifdef NV2A_GL_UBO\n"
+        "layout(std140) uniform Nv2aLighting { vec4 u_light[46]; };\n"
+        "#else\n"
         "uniform vec4 u_light[46];\n"
+        "#endif\n"
         "vec4 nv2a_ffp_diffuse(vec4 pos, vec4 normal, vec4 vc) {\n"
         "    if (u_light[0].x == 0.0) return vc;\n"
         "    vec3 e, n;\n"
@@ -513,4 +535,38 @@ const char *nv2a_gl_vsh_fixed(void)
         "    vT0 = v9; vT1 = v10; vT2 = v11; vT3 = v12; vFog = 0.0;\n"
         "}\n";
     return nv2a_shader_vk ? body + sizeof decl - 1 : body;
+}
+
+/* CMP arrives as four exact, unnormalised bytes. Keeping vec4 inputs avoids
+ * shader variants and integer/float VAO type changes between adjacent draws.
+ * Append after the input declarations so only subsequent references decode. */
+const char *nv2a_gl_vsh_attributes(void)
+{
+    return
+        "uniform int u_cmp_mask;\n"
+        "vec4 nv2a_attr(vec4 a, int slot) {\n"
+        "    if ((u_cmp_mask & (1 << slot)) == 0) return a;\n"
+        "    uvec4 b = uvec4(a);\n"
+        "    uint v = b.x | (b.y << 8) | (b.z << 16) | (b.w << 24);\n"
+        "    return vec4(float(int(v << 21) >> 21) / 1023.0,\n"
+        "                float(int(v << 10) >> 21) / 1023.0,\n"
+        "                float(int(v) >> 22) / 511.0, 1.0);\n"
+        "}\n"
+        "#define v0 nv2a_attr(v0, 0)\n"
+        "#define v1 nv2a_attr(v1, 1)\n"
+        "#define v2 nv2a_attr(v2, 2)\n"
+        "#define v3 nv2a_attr(v3, 3)\n"
+        "#define v4 nv2a_attr(v4, 4)\n"
+        "#define v5 nv2a_attr(v5, 5)\n"
+        "#define v6 nv2a_attr(v6, 6)\n"
+        "#define v7 nv2a_attr(v7, 7)\n"
+        "#define v8 nv2a_attr(v8, 8)\n"
+        "#define v9 nv2a_attr(v9, 9)\n"
+        "#define v10 nv2a_attr(v10, 10)\n"
+        "#define v11 nv2a_attr(v11, 11)\n"
+        "#define v12 nv2a_attr(v12, 12)\n"
+        "#define v13 nv2a_attr(v13, 13)\n"
+        "#define v14 nv2a_attr(v14, 14)\n"
+        "#define v15 nv2a_attr(v15, 15)\n"
+        ;
 }

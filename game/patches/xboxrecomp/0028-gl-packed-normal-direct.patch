@@ -1,0 +1,34 @@
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -3325,6 +3325,9 @@
+         case 2: elem = 4 * va->size; break;
+         case 4: elem = va->size; break;
+         case 1: case 5: elem = 2 * va->size; break;
++        case 6:
++            if (!va->size || !va->stride || !(s_backend->flags & NV2A_BACKEND_RAW_CMP)) continue;
++            elem = 4; break;
+         default: continue;
+         }
+         first = (size_t)va->offset + (size_t)lo * va->stride;
+@@ -3335,6 +3338,10 @@
+             rb->direct[a].ptr = (const uint8_t *)s_gpu.inline_buf + first;
+         } else {
+             if (!va->offset)
++                continue;
++            /* The converter bounds-checks every CMP word. Direct uploads
++             * must reject invalid spans before the GL queue copies them. */
++            if (va->type == 6 && (end < first || !guest_span_ok(first, end - first)))
+                 continue;
+             rb->direct[a].ptr = mem + first;
+         }
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -268,6 +268,8 @@
+ #define NV2A_BACKEND_RAW_DIRECT 0x1u
+ #define NV2A_BACKEND_DEFERRED_RAM 0x2u
+ #define NV2A_BACKEND_RAW_LIGHTING 0x4u
++/* Packed 11:11:10 attributes require a shader decoder, not native GL formats. */
++#define NV2A_BACKEND_RAW_CMP 0x8u
+ 
+ static inline int nv2a_backend_contract_valid(const Nv2aBackend *b)
+ {

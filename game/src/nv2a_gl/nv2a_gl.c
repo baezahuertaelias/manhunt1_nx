@@ -91,6 +91,39 @@ static void gl_check(const char *where)
         gl_fail(where);
 }
 
+/* Diagnostic only: one error query per frame instead of a driver round trip
+ * per draw. This distinguishes a GPU API failure from bad incoming transforms
+ * when investigating the court-punch black screen. It never repairs input. */
+static int gl_validation(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("MANHUNT_GL_VALIDATE"); on = e && !strcmp(e, "1"); }
+    return on;
+}
+static void validate_frame(void)
+{
+    static unsigned errors;
+    if (!gl_validation()) return;
+    GLenum error = glGetError();
+    if (error && errors++ < 16)
+        fprintf(stderr, "[MH-GL-ERROR] present check error 0x%04X occurrence %u\n", error, errors);
+}
+static void validate_transform(const Nv2aRawBatch *b)
+{
+    static unsigned logged;
+    if (!gl_validation() || logged >= 8 || b->xform != 1) return;
+    for (unsigned i = 0; i < 16; i++) {
+        uint32_t bits;
+        memcpy(&bits, &b->composite[i], 4);
+        if ((bits & 0x7f800000u) != 0x7f800000u) continue;
+        logged++;
+        fprintf(stderr, "[MH-GL-NONFINITE] incoming fixed transform component %u bits %08X"
+                " verts %u indices %u prog_gen %u const_gen %u lighting %u\n",
+                i, bits, b->vertex_count, b->index_count, b->vp_prog_gen, b->vp_const_gen, b->lighting);
+        break;
+    }
+}
+
 static int ram_span(uint32_t va, size_t bytes)
 {
     uint64_t end = (uint64_t)va + bytes;
@@ -135,9 +168,20 @@ static void gl_step_done(const char *what)
 }
 static GLuint        s_vao, s_vbo, s_ibo;
 /* Streaming vertex / index buffers (see ring_alloc). */
-typedef struct { GLuint buf; GLenum target; GLsizeiptr cap, off; } GlRing;
-static GlRing s_vring = { 0, GL_ARRAY_BUFFER, 16 << 20, 0 };
-static GlRing s_iring = { 0, GL_ELEMENT_ARRAY_BUFFER, 4 << 20, 0 };
+typedef struct {
+    GLuint buf;
+    GLenum target;
+    GLsizeiptr cap, off, segment_size;
+    uint8_t *mapped;
+    GLsync fence[3];
+    unsigned segment;
+} GlRing;
+static GlRing s_vring = { .target = GL_ARRAY_BUFFER, .cap = 16 << 20 };
+static GlRing s_iring = { .target = GL_ELEMENT_ARRAY_BUFFER, .cap = 4 << 20 };
+static int s_streaming; /* one packed vertex/index upload, even without buffer storage */
+static int s_persistent; /* MANHUNT_GL_PERSISTENT: opt-in until console acceptance */
+static void ring_init(GlRing *g, int persistent);
+static void ring_flip(GlRing *g);
 static const uint32_t *s_regs;          /* the executor's method shadow */
 static uint32_t      s_frame;
 /* Hitch accounting (gl_flip logs frames over 50 ms): per frame, programs
@@ -154,6 +198,34 @@ static uint64_t hz_now(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+/* Detailed draw profiling is opt-in; no extra clocks in ordinary play. */
+static int perf_detail(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("MANHUNT_PERF_LOG"); on = e && atoi(e) > 0; }
+    return on;
+}
+#define PF_STAGE(field) do { if (pt) { uint64_t now = hz_now(); PF_ADD(field, now - pt); pt = now; } } while (0)
+static void pf_uniform4fv(GLint loc, GLsizei n, const GLfloat *v)
+{ if (perf_detail()) { PF_ADD(uniform_calls, 1); PF_ADD(uniform_bytes, n * 16); } p_glUniform4fv(loc, n, v); }
+static void pf_uniform2fv(GLint loc, GLsizei n, const GLfloat *v)
+{ if (perf_detail()) { PF_ADD(uniform_calls, 1); PF_ADD(uniform_bytes, n * 8); } p_glUniform2fv(loc, n, v); }
+static void pf_uniform1i(GLint loc, GLint v)
+{ if (perf_detail()) { PF_ADD(uniform_calls, 1); PF_ADD(uniform_bytes, 4); } p_glUniform1i(loc, v); }
+static void pf_uniform1f(GLint loc, GLfloat v)
+{ if (perf_detail()) { PF_ADD(uniform_calls, 1); PF_ADD(uniform_bytes, 4); } p_glUniform1f(loc, v); }
+static void pf_bind_texture(GLenum target, GLuint tex)
+{ if (perf_detail()) PF_ADD(texture_binds, 1); p_glBindTexture(target, tex); }
+#undef glBindTexture
+#define glBindTexture pf_bind_texture
+#undef glUniform4fv
+#undef glUniform2fv
+#undef glUniform1i
+#undef glUniform1f
+#define glUniform4fv pf_uniform4fv
+#define glUniform2fv pf_uniform2fv
+#define glUniform1i pf_uniform1i
+#define glUniform1f pf_uniform1f
 static GLuint        s_cur_prog;         /* what glUseProgram last got */
 static void state_dirty(void);
 /* Last sampler state set on a GL texture (bind_stage). */
@@ -172,6 +244,17 @@ static void tex_param_forget(GLuint id)
 static int    s_active_unit = -1;
 static GLuint s_bound[4];
 static int    s_bound_known;
+/* Experimental extra elision; keep the established caches with rollback. */
+static int state_cache_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_STATE_CACHE");
+        on = e && *e == '1';
+        fprintf(stderr, "  [GL] incremental state cache: %s\n", on ? "on" : "off");
+    }
+    return on;
+}
 static void tex_bind_forget(void) { s_active_unit = -1; s_bound_known = 0; }
 static void active_unit(int i)
 {
@@ -1062,6 +1145,11 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
     GlSurf *rt;
 
     scale[0] = scale[1] = 1.0f;
+    /* Disabled stages usually already bind zero. Do not cycle active texture
+     * through them just to discover the existing binding cache can skip it. */
+    if (state_cache_enabled() && (!(control0 & 0x40000000u) || !regs[base]) &&
+        (s_bound_known & (1 << i)) && !s_bound[i])
+        return;
     active_unit(i);
     if (!(control0 & 0x40000000u) || !regs[base]) {
         bind_tex(0);
@@ -1125,10 +1213,90 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
 
 /* ── Programs ─────────────────────────────────────────────────────── */
 
+/* GL 3.3 uniform-buffer stream. Orphaning preserves all earlier draws, and
+ * invalidates both cached ranges before any new draw is submitted. Indexed
+ * bindings 0/1 belong solely to this path (the gamma pass uses no blocks). */
+#define GL_UBO_CAP (4 << 20)
+#define GL_UBO_CONSTANT_BYTES (192 * 16)
+static struct {
+    GLuint buf;
+    GLintptr off, align;
+    uint32_t const_gen;
+    int const_valid, light_valid;
+    float light[46][4];
+} s_ubo;
+static int gl_ubo(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("MANHUNT_GL_UBO");
+        enabled = e && atoi(e) > 0; /* promote only after console acceptance */
+        fprintf(stderr, "  [GL] uniform buffers: %s (MANHUNT_GL_UBO)\n", enabled ? "on" : "off");
+    }
+    return enabled;
+}
+static GLintptr ubo_align(GLintptr at)
+{
+    return ((at + s_ubo.align - 1) / s_ubo.align) * s_ubo.align;
+}
+static void ubo_put(GLuint binding, const void *data, GLsizeiptr size)
+{
+    GLintptr at = ubo_align(s_ubo.off);
+    glBufferSubData(GL_UNIFORM_BUFFER, at, size, data);
+    glBindBufferRange(GL_UNIFORM_BUFFER, binding, s_ubo.buf, at, size);
+    s_ubo.off = at + size;
+    if (perf_detail()) { PF_ADD(uniform_calls, 1); PF_ADD(uniform_bytes, size); }
+}
+static void uniform_blocks(const Nv2aRawBatch *b, unsigned blocks)
+{
+    float light[46][4];
+    GLintptr need;
+    if (!blocks) return;
+    if (!s_ubo.buf) {
+        GLint align = 0;
+        glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &align);
+        if (align <= 0 || align > 65536) gl_fail("invalid UBO alignment");
+        s_ubo.align = align;
+        glGenBuffers(1, &s_ubo.buf);
+        if (!s_ubo.buf) gl_fail("uniform buffer allocation failed");
+        glBindBuffer(GL_UNIFORM_BUFFER, s_ubo.buf);
+        glBufferData(GL_UNIFORM_BUFFER, GL_UBO_CAP, NULL, GL_STREAM_DRAW);
+    } else glBindBuffer(GL_UNIFORM_BUFFER, s_ubo.buf);
+    /* Reserve worst case up front: a lighting allocation must never orphan
+     * the constants bound for this same draw. Ranges stay aligned to the
+     * driver's requirement; std140 vec4 arrays need no CPU padding. */
+    need = ubo_align(s_ubo.off);
+    if (blocks & 1) need = ubo_align(need + GL_UBO_CONSTANT_BYTES);
+    if (blocks & 2) need += sizeof light;
+    if (need > GL_UBO_CAP) {
+        glBufferData(GL_UNIFORM_BUFFER, GL_UBO_CAP, NULL, GL_STREAM_DRAW);
+        s_ubo.off = 0;
+        s_ubo.const_valid = s_ubo.light_valid = 0;
+    }
+    if ((blocks & 1) && (!s_ubo.const_valid || s_ubo.const_gen != b->vp_const_gen)) {
+        ubo_put(0, b->vp_consts, GL_UBO_CONSTANT_BYTES);
+        s_ubo.const_gen = b->vp_const_gen;
+        s_ubo.const_valid = 1;
+    }
+    if (blocks & 2) {
+        nv2a_gl_light_uniforms(b->regs, b->lighting, light);
+        if (!s_ubo.light_valid || memcmp(light, s_ubo.light, sizeof light)) {
+            ubo_put(1, light, sizeof light);
+            memcpy(s_ubo.light, light, sizeof light);
+            s_ubo.light_valid = 1;
+        }
+    }
+    gl_check("uniform buffer upload");
+}
+
 typedef struct {
     uint64_t   vkey;            /* 0: fixed-function; else program hash */
     Nv2aPshKey pkey;
     GLuint     prog;
+    GLint      u_cmp_mask;
+    uint32_t   cmp_mask;
+    int        cmp_valid;
+    unsigned   uniform_blocks; /* bit 0 constants; bit 1 lighting */
     GLint      u_c, u_surf, u_aa, u_m, u_vpoff, u_xform, u_wide, u_light;
     GLint      u_t[4], u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogcolor, u_afunc, u_aref, u_fogp;
     uint32_t   used;
@@ -1303,13 +1471,14 @@ static uint64_t prog_hash(const Nv2aRawBatch *b)
  * takes: transform mode, program slots, combiner key), and at start-up the
  * renderer compiles everything in it before the title draws, so a later run
  * finds them ready. RECOMP_PROG_CACHE=<path> moves the file, =0 disables. */
-#define PROG_REC_MAGIC 0x4350564Eu          /* "NVPC" */
+#define PROG_REC_MAGIC 0x3250564Eu          /* "NVP2": uniform-block shader ABI */
 typedef struct {
     uint32_t   magic, xform, vp_start, slots;
     Nv2aPshKey pk;
     uint32_t   prog[136][4];
 } ProgRec;
 static int s_prewarming;
+static int s_prog_cache_write_disabled;
 
 static const char *prog_cache_path(void)
 {
@@ -1330,7 +1499,7 @@ static void prog_cache_append(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     const char *path = prog_cache_path();
     ProgRec rec;
     FILE *f;
-    if (s_prewarming || !path)
+    if (s_prewarming || s_prog_cache_write_disabled || !path)
         return;
     memset(&rec, 0, sizeof rec);
     rec.magic = PROG_REC_MAGIC;
@@ -1343,8 +1512,12 @@ static void prog_cache_append(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     }
     f = fopen(path, "ab");
     if (f) {
-        fwrite(&rec, sizeof rec, 1, f);
-        fclose(f);
+        int failed = fwrite(&rec, sizeof rec, 1, f) != 1;
+        if (fclose(f)) failed = 1;
+        if (failed) {
+            s_prog_cache_write_disabled = 1;
+            fprintf(stderr, "  [GL] shader cache write failed: %s\n", path);
+        }
     }
 }
 
@@ -1356,14 +1529,15 @@ static void prog_cache_prewarm(void)
     struct timespec t0, t1;
     ProgRec rec;
     unsigned n = 0, bad = 0;
+    size_t bytes;
     FILE *f;
     if (!path || !(f = fopen(path, "rb")))
         return;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     s_prewarming = 1;
-    while (fread(&rec, sizeof rec, 1, f) == 1) {
+    while ((bytes = fread(&rec, 1, sizeof rec, f)) != 0) {
         Nv2aRawBatch bb;
-        if (rec.magic != PROG_REC_MAGIC || rec.slots > 136) {
+        if (bytes != sizeof rec || rec.magic != PROG_REC_MAGIC || rec.slots > 136) {
             bad++;
             break;
         }
@@ -1377,7 +1551,26 @@ static void prog_cache_prewarm(void)
             n++;
     }
     s_prewarming = 0;
+    if (ferror(f)) {
+        /* A transient read failure must not destroy an otherwise valid file,
+         * or let this run append behind an unreadable prefix. */
+        s_prog_cache_write_disabled = 1;
+        fprintf(stderr, "  [GL] shader cache read failed: %s\n", path);
+    }
     fclose(f);
+    if (bad && !s_prog_cache_write_disabled) {
+        /* New ABI or interrupted append: don't keep appending behind the
+         * rejected record, where every subsequent prewarm would stop again.
+         * This file is only a derived warmup cache; rebuild it from draws. */
+        int failed;
+        f = fopen(path, "wb");
+        failed = !f;
+        if (f && fclose(f)) failed = 1;
+        if (failed) {
+            s_prog_cache_write_disabled = 1;
+            fprintf(stderr, "  [GL] shader cache reset failed; writes disabled: %s\n", path);
+        } else fprintf(stderr, "  [GL] reset obsolete/corrupt shader cache: %s\n", path);
+    }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     fprintf(stderr, "  [GL] %u shader programs precompiled from %s in %.0f ms%s\n", n, path,
             (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6,
@@ -1393,7 +1586,7 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     uint32_t bucket;
     GlProg *p = NULL, *victim = NULL;
     static char vbody[256 * 1024], fsrc[64 * 1024];
-    const char *vs[4];
+    const char *vs[5];
     int nvs = 0, i;
     GLuint v, fr;
     GLint ok = 0;
@@ -1444,7 +1637,8 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
         fprintf(stderr, "  [GL] %u shader programs compiled (%u live)\n",
                 s_prog_made, s_prog_live + 1);
 
-    vs[nvs++] = nv2a_gl_vsh_prelude();
+    vs[nvs++] = nv2a_gl_vsh_prelude_mode(gl_ubo());
+    vs[nvs++] = nv2a_gl_vsh_attributes();
     if (vkey) {
         if (nv2a_gl_vsh_program(b->vp_program, b->vp_slots, b->vp_start,
                                 vbody, sizeof vbody) < 0)
@@ -1490,6 +1684,13 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->next = s_prog_head[bucket];
     s_prog_head[bucket] = (int)(p - s_prog) + 1;
     last = p;
+    p->u_cmp_mask = glGetUniformLocation(p->prog, "u_cmp_mask");
+    if (gl_ubo()) {
+        GLuint block = glGetUniformBlockIndex(p->prog, "Nv2aConstants");
+        if (block != GL_INVALID_INDEX) { glUniformBlockBinding(p->prog, block, 0); p->uniform_blocks |= 1; }
+        block = glGetUniformBlockIndex(p->prog, "Nv2aLighting");
+        if (block != GL_INVALID_INDEX) { glUniformBlockBinding(p->prog, block, 1); p->uniform_blocks |= 2; }
+    }
     p->u_c = glGetUniformLocation(p->prog, "c");
     p->vpc_rows = p->u_c >= 0 && glGetUniformLocation(p->prog, "c[191]") == p->u_c + 191;
     p->u_surf = glGetUniformLocation(p->prog, "u_surf");
@@ -1593,10 +1794,22 @@ static int ready(void)
     glGenBuffers(1, &s_ibo);
     s_vring.buf = s_vbo;
     s_iring.buf = s_ibo;
-    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
-    glBufferData(GL_ARRAY_BUFFER, s_vring.cap, NULL, GL_STREAM_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_ibo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, s_iring.cap, NULL, GL_STREAM_DRAW);
+    {
+        GLint n = 0;
+        int storage = 0;
+        const char *e = getenv("MANHUNT_GL_PERSISTENT");
+        glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+        for (GLint i = 0; i < n; ++i) {
+            const char *ext = (const char *)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+            if (ext && !strcmp(ext, "GL_ARB_buffer_storage")) storage = 1;
+        }
+        s_streaming = e && atoi(e) != 0;
+        s_persistent = s_streaming && storage && p_glBufferStorage;
+        fprintf(stderr, "  [GL] ARB_buffer_storage %s; persistent streaming %s; packed uploads %s (MANHUNT_GL_PERSISTENT)\n",
+                storage ? "available" : "unavailable", s_persistent ? "on" : "off", s_streaming ? "on" : "off");
+        ring_init(&s_vring, s_persistent);
+        ring_init(&s_iring, 0);
+    }
     s_state = 1;
     prog_cache_prewarm();
     return 1;
@@ -1717,6 +1930,49 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
     want.cm = cm;
     if (s_st_valid && !memcmp(&want, &s_st, sizeof want))
         return;
+    if (state_cache_enabled()) {
+        const int valid = s_st_valid;
+        const GlState old = s_st;
+#define CHANGED(f) (!valid || want.f != old.f)
+#define TOGGLE(cap, f) do { if (CHANGED(f)) { if (want.f) glEnable(cap); else glDisable(cap); } } while (0)
+        TOGGLE(GL_BLEND, blend);
+        if (want.blend) {
+            if (!valid || !old.blend || CHANGED(bsrc) || CHANGED(bdst)) glBlendFunc(want.bsrc, want.bdst);
+            if (!valid || !old.blend || CHANGED(beq)) glBlendEquation(blend_eq(want.beq));
+            if (!valid || !old.blend || CHANGED(bcolor)) {
+                float bc[4]; argb_vec4(want.bcolor, bc); glBlendColor(bc[0], bc[1], bc[2], bc[3]);
+            }
+        }
+        TOGGLE(GL_DEPTH_TEST, depth);
+        if (want.depth && (!valid || !old.depth || CHANGED(dfunc))) glDepthFunc(want.dfunc ? want.dfunc : 0x203);
+        if (CHANGED(dmask)) glDepthMask(want.dmask ? 1 : 0);
+        TOGGLE(GL_STENCIL_TEST, stencil);
+        if (want.stencil) {
+            if (!valid || !old.stencil || CHANGED(smask)) glStencilMask(want.smask & 0xFF);
+            if (!valid || !old.stencil || CHANGED(sfunc) || CHANGED(sref) || CHANGED(sread))
+                glStencilFunc(want.sfunc ? want.sfunc : GL_ALWAYS, (GLint)(want.sref & 0xFF), want.sread & 0xFF);
+            if (!valid || !old.stencil || memcmp(want.sop, old.sop, sizeof want.sop))
+                glStencilOp(want.sop[0] ? want.sop[0] : GL_KEEP, want.sop[1] ? want.sop[1] : GL_KEEP, want.sop[2] ? want.sop[2] : GL_KEEP);
+        }
+        TOGGLE(GL_CULL_FACE, cull);
+        if (want.cull) {
+            if (!valid || !old.cull || CHANGED(cullface)) glCullFace(want.cullface ? want.cullface : GL_BACK);
+            if (!valid || !old.cull || CHANGED(front)) glFrontFace(want.front == GL_CCW ? GL_CW : GL_CCW);
+        }
+        if (CHANGED(cm)) glColorMask((cm & 0x00010000u) != 0, (cm & 0x00000100u) != 0,
+                                     (cm & 0x00000001u) != 0, (cm & 0x01000000u) != 0);
+        if (!valid || (!!want.sc[2] != !!old.sc[2])) {
+            if (want.sc[2] > 0) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+        }
+        if (want.sc[2] > 0 && (!valid || memcmp(want.sc, old.sc, sizeof want.sc)))
+            glScissor(want.sc[0], want.sc[1], want.sc[2], want.sc[3]);
+        if (!valid) glEnable(0x864F); /* GL_DEPTH_CLAMP */
+#undef TOGGLE
+#undef CHANGED
+        s_st = want;
+        s_st_valid = 1;
+        return;
+    }
     s_st = want;
     s_st_valid = 1;
 
@@ -1846,16 +2102,98 @@ static uint32_t zmax_of(const uint32_t *r)
  * synchronisation (nothing the GPU may still read is ever overwritten) and
  * the buffer is orphaned only when it is full. */
 
-/* Space for `size` bytes; returns the offset, and a pointer to write them to
- * (NULL if mapping failed: then ring_put the data instead). */
+/* Persistent storage is three fenced segments within the old memory budget.
+ * An overfull frame can advance more than once; no segment is overwritten
+ * until the GPU has completed every draw that used it. */
+static void ring_wait(GlRing *g, unsigned segment)
+{
+    GLsync fence = g->fence[segment];
+    if (!fence) return;
+    for (;;) {
+        GLenum status = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        if (status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED) break;
+        if (status != GL_TIMEOUT_EXPIRED) gl_fail("persistent ring fence wait failed");
+    }
+    glDeleteSync(fence);
+    g->fence[segment] = NULL;
+}
+
+static void ring_init(GlRing *g, int persistent)
+{
+    glBindBuffer(g->target, g->buf);
+    g->off = 0;
+    g->segment = 0;
+    g->mapped = NULL;
+    g->segment_size = 0;
+    if (persistent) {
+        const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+        g->segment_size = (g->cap / 3) & ~(GLsizeiptr)63;
+        g->cap = g->segment_size * 3;
+        glBufferStorage(g->target, g->cap, NULL, flags);
+        if (perf_detail()) PF_ADD(maps, 1);
+        g->mapped = (uint8_t *)glMapBufferRange(g->target, 0, g->cap, flags);
+        if (!g->mapped) {
+            /* An unsupported/failed map must retain the legacy upload path.
+             * Immutable storage cannot be orphaned: replace its buffer. */
+            GLenum error = glGetError();
+            (void)error;
+            glDeleteBuffers(1, &g->buf);
+            glGenBuffers(1, &g->buf);
+            glBindBuffer(g->target, g->buf);
+            g->segment_size = 0;
+            fprintf(stderr, "  [GL] persistent map failed; using mutable streaming\n");
+        }
+    }
+    if (!g->mapped) glBufferData(g->target, g->cap, NULL, GL_STREAM_DRAW);
+    gl_check("streaming buffer allocation");
+}
+
+static void ring_flip(GlRing *g)
+{
+    GLsizeiptr start;
+    if (!g->mapped) return;
+    start = (GLsizeiptr)g->segment * g->segment_size;
+    if (g->off == start) return; /* no writes since the last advance */
+    if (g->fence[g->segment]) gl_fail("persistent ring segment still fenced");
+    g->fence[g->segment] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!g->fence[g->segment]) gl_fail("persistent ring fence allocation failed");
+    g->segment = (g->segment + 1) % 3;
+    ring_wait(g, g->segment);
+    g->off = (GLsizeiptr)g->segment * g->segment_size;
+}
+
+/* Space for size bytes. NULL on a failed mutable map means subdata fallback. */
 static GLintptr ring_alloc(GlRing *g, GLsizeiptr size, void **ptr)
 {
     GLintptr at;
-
+    if (size <= 0) gl_fail("invalid streaming allocation size");
     glBindBuffer(g->target, g->buf);
+    if (g->mapped) {
+        if (size > g->segment_size) {
+            /* Rare giant draw: drain the immutable store before replacing it.
+             * Ordinary wrap waits only for the particular reused segment. */
+            glFinish();
+            for (unsigned i = 0; i < 3; ++i) ring_wait(g, i);
+            if (!glUnmapBuffer(g->target)) gl_fail("persistent buffer data invalidated");
+            glDeleteBuffers(1, &g->buf);
+            glGenBuffers(1, &g->buf);
+            g->cap = ((size + 63) & ~(GLsizeiptr)63) * 3;
+            ring_init(g, 1);
+        }
+        if (g->mapped) {
+            at = (g->off + 63) & ~(GLintptr)63;
+            if (at + size > (GLsizeiptr)(g->segment + 1) * g->segment_size) {
+                ring_flip(g);
+                at = g->off;
+            }
+            g->off = at + size;
+            *ptr = g->mapped + at;
+            return at;
+        }
+    }
     if (size > g->cap) {
         g->cap = size * 2;
-        g->off = g->cap;                    /* forces the orphan below */
+        g->off = g->cap;
     }
     at = (g->off + 63) & ~(GLintptr)63;
     if (at + size > g->cap) {
@@ -1863,25 +2201,24 @@ static GLintptr ring_alloc(GlRing *g, GLsizeiptr size, void **ptr)
         at = 0;
     }
     g->off = at + size;
-    *ptr = glMapBufferRange(g->target, at, size,
-                            GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT
-                            );
-    /* No GL_MAP_INVALIDATE_RANGE_BIT: nothing the GPU may still read is
-     * ever overwritten, and with it nouveau gave each map a staging buffer
-     * of its own (nouveau_bo_new + map + free: ~3% of the GL thread). */
+    if (perf_detail()) PF_ADD(maps, 1);
+    *ptr = glMapBufferRange(g->target, at, size, GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+    /* Never INVALIDATE_RANGE: nouveau would allocate staging per map. */
     return at;
 }
 
 static void ring_done(GlRing *g, GLintptr at, GLsizeiptr size, void *ptr,
                       const void *fallback)
 {
-    if (ptr) {
+    if (g->mapped) {
+        if (ptr != g->mapped + at) gl_fail("invalid persistent upload pointer");
+    } else if (ptr) {
         if (!glUnmapBuffer(g->target) && !gl_gpu()) gl_fail("vertex/index buffer data invalidated");
-    }
-    else if (fallback)
+    } else if (fallback) {
         glBufferSubData(g->target, at, size, fallback);
-    else if (!gl_gpu())
+    } else if (!gl_gpu()) {
         gl_fail("missing vertex/index upload data");
+    }
     gl_check("vertex/index buffer upload");
 }
 
@@ -1899,13 +2236,13 @@ static void attr_enable(uint32_t a, int on)
 
 /* Vertex data for one draw, in one ring allocation.
  *
- * Attributes in b->attr_direct go up as the title stored them: every NV097
- * type but the packed CMP normal is a GL vertex format with the same
- * meaning (D3DCOLOR is GL_BGRA; S1 normalises with GL's max(c/32767, -1)).
+ * Attributes in b->attr_direct go up as the title stored them: CMP uses
+ * four unnormalised bytes decoded by nv2a_attr; the other types use native
+ * GL vertex formats with the same meaning (D3DCOLOR is GL_BGRA; S1 normalises with GL's max(c/32767, -1)).
  * Attributes that share a vertex buffer -- interleaved, the usual case --
  * are copied once, as the byte range they span together, from a 4-aligned
- * start so each keeps its alignment. The rest (CMP, and every attribute for
- * a back end without direct batches) are packed float4 from b->attrs. */
+ * start so each keeps its alignment. Converted attributes are packed
+ * float4 from b->attrs. */
 /* The byte ranges the direct attributes of `b` span, merged where they
  * overlap (interleaved attributes share one), each from a 4-aligned start;
  * of_run[a] says which range attribute a is in. Returns the range count. */
@@ -1920,7 +2257,7 @@ static uint32_t vertex_runs(const Nv2aRawBatch *b, VRun *run, int *of_run)
         if (!(b->attr_direct & (1u << a)))
             continue;
         switch (b->direct[a].type) {
-        case 0: elem = 4; break;
+        case 0: case 6: elem = 4; break;
         case 2: elem = 4 * b->direct[a].size; break;
         case 4: elem = b->direct[a].size; break;
         default: elem = 2 * b->direct[a].size; break;
@@ -1964,14 +2301,15 @@ static uint32_t vertex_runs(const Nv2aRawBatch *b, VRun *run, int *of_run)
     return nrun;
 }
 
-static int upload_vertices(const Nv2aRawBatch *b)
+static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
+                           uint32_t index_count, GLenum index_type, GLintptr *index_at)
 {
     VRun run[NV2A_RAW_ATTRS];
     int of_run[NV2A_RAW_ATTRS];
     uint32_t slot[NV2A_RAW_ATTRS], np = 0, nrun = 0, a, i, v;
     uint32_t nv = b->vertex_count;
     uint16_t conv = b->attr_present & (uint16_t)~b->attr_direct;
-    GLsizeiptr bytes = 0, pack_at;
+    GLsizeiptr bytes = 0, pack_at, index_offset = 0;
     GLintptr at;
     uint8_t *dst;
     void *map;
@@ -1980,6 +2318,11 @@ static int upload_vertices(const Nv2aRawBatch *b)
 
     if (!nv)
         return 0;
+    if (perf_detail()) for (a = 0; a < NV2A_RAW_ATTRS; a++) if (conv & (1u << a)) {
+        PF_ADD(converted_attrs, 1); PF_ADD(converted_verts, nv);
+        unsigned type = b->regs ? b->regs[(0x1760 / 4) + a] & 7 : 7;
+        PF_ADD(converted_type[type], nv);
+    }
     nrun = vertex_runs(b, run, of_run);
     for (i = 0; i < nrun; i++) {
         run[i].at = bytes;
@@ -1993,6 +2336,10 @@ static int upload_vertices(const Nv2aRawBatch *b)
     if (!bytes)
         return 0;
 
+    if (s_streaming) {
+        index_offset = (bytes + 3) & ~(GLsizeiptr)3;
+        bytes = index_offset + (GLsizeiptr)index_count * (index_type == GL_UNSIGNED_SHORT ? 2 : 4);
+    }
     at = ring_alloc(&s_vring, bytes, &map);
     dst = (uint8_t *)map;
     if (!dst) {
@@ -2014,7 +2361,17 @@ static int upload_vertices(const Nv2aRawBatch *b)
                        b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slot[i]) * 4,
                        4 * sizeof(float));
     }
+    if (s_streaming) {
+        *index_at = at + index_offset;
+        if (index_type == GL_UNSIGNED_SHORT) {
+            uint16_t *out = (uint16_t *)(dst + index_offset);
+            for (i = 0; i < index_count; ++i) out[i] = (uint16_t)indices[i];
+        } else {
+            memcpy(dst + index_offset, indices, (size_t)index_count * 4);
+        }
+    }
     ring_done(&s_vring, at, bytes, map, staging);
+    if (s_streaming) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_vring.buf);
 
     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
         GLintptr off;
@@ -2032,6 +2389,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
         size = (GLint)b->direct[a].size;
         switch (b->direct[a].type) {
         case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+        case 6:  size = 4; type = GL_UNSIGNED_BYTE; norm = GL_FALSE; break;
         case 1:  type = GL_SHORT; norm = GL_TRUE; break;
         case 2:  type = GL_FLOAT; norm = GL_FALSE; break;
         case 4:  type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
@@ -2349,11 +2707,13 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     GLintptr idx_at;
     GLenum mode, idx_type = GL_UNSIGNED_INT;
     float tscale[4][2], c0[8][4], c1[8][4], fog[4], surf[4], aa[2], m[16];
+    uint64_t pt = perf_detail() ? hz_now() : 0;
 
     if (!ready()) {
         if (gl_gpu()) return;
         gl_fail("GL context or entry-point initialization failed");
     }
+    validate_transform(b);
     s_regs = r;
     s_batch = b;
     s = surf_bind(&b->surface, b->zeta_va);
@@ -2387,6 +2747,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                     r[0x1B68 / 4], r[0x1B6C / 4], r[0x1B70 / 4], r[0x1B74 / 4]);
         }
     }
+    PF_STAGE(other_ns);
     {
         uint32_t made = s_prog_made;
         uint64_t t0 = hz_now();
@@ -2396,6 +2757,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
             s_hz_prog_ns += hz_now() - t0;
         }
     }
+    PF_STAGE(lookup_ns);
     if (!p) {
         if (gl_gpu()) return;
         gl_fail("shader compilation/link failed");
@@ -2407,6 +2769,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
         s_cur_prog = p->prog;
     }
 
+    PF_STAGE(other_ns);
     {
         uint32_t texs = s_hz_texs;
         uint64_t t0 = hz_now();
@@ -2415,6 +2778,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
         if (s_hz_texs != texs)
             s_hz_tex_ns += hz_now() - t0;
     }
+    PF_STAGE(bind_ns);
     for (i = 0; i < 8; i++) {
         argb_vec4(r[0xA60 / 4 + i], c0[i]);
         argb_vec4(r[0xA80 / 4 + i], c1[i]);
@@ -2431,6 +2795,17 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     aa[0] = b->aa_sx > 0 ? b->aa_sx : 1.0f;
     aa[1] = b->aa_sy > 0 ? b->aa_sy : 1.0f;
     memcpy(m, b->composite, sizeof m);
+
+    {
+        uint32_t mask = 0;
+        for (a = 0; a < NV2A_RAW_ATTRS; a++)
+            if ((b->attr_direct & (1u << a)) && b->direct[a].type == 6) mask |= 1u << a;
+        if (p->u_cmp_mask >= 0 && (!p->cmp_valid || mask != p->cmp_mask)) {
+            glUniform1i(p->u_cmp_mask, (GLint)mask);
+            p->cmp_mask = mask; p->cmp_valid = 1;
+        }
+    }
+    if (p->uniform_blocks) uniform_blocks(b, p->uniform_blocks);
 
     /* 192 constants are 3 KB, and most draws in a row share them: upload
      * only when they changed since this program last got them. */
@@ -2545,6 +2920,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
         }
     }
 
+    PF_STAGE(uniform_ns);
     {
         /* RECOMP_GL_WATCH=<hex va>: the state of draws that render into or
          * sample that surface/texture (first 24). */
@@ -2638,10 +3014,16 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
         }
     }
 
+    PF_STAGE(other_ns);
     apply_state(r, b->zeta_va != 0, s);
+    PF_STAGE(state_ns);
 
-    glBindVertexArray(s_vao);
-    if (!upload_vertices(b)) {
+    /* ready() selects this VAO and gamma_pass restores it. */
+    if (!state_cache_enabled()) glBindVertexArray(s_vao);
+    mode = gl_prim(b, &idx, &n);
+    if (!n) return;
+    idx_type = b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+    if (!upload_vertices(b, idx, n, idx_type, &idx_at)) {
         if (gl_gpu()) return;
         gl_fail("vertex upload failed");
     }
@@ -2661,10 +3043,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                                      b->attr_const[a][2], b->attr_const[a][3]);
         }
     }
-    mode = gl_prim(b, &idx, &n);
-    if (!n)
-        return;
-    {
+    if (!s_streaming) {
         /* 16-bit indices whenever the batch's vertices allow: half the bytes
          * through the ring, and the GPU's native index size. */
         static uint16_t *idx16;
@@ -2694,6 +3073,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
             ring_done(&s_iring, idx_at, (GLsizeiptr)n * 2, dst, idx16);
         }
     }
+    PF_STAGE(upload_ns);
     {
         /* RECOMP_GL_FINISH=1: name each draw before it is submitted and wait
          * for the GPU to finish it. With a synchronous log, the last line
@@ -2719,7 +3099,9 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                     (float)((double)s->w * s->h / ((double)s->pw * s->ph));
                 glBeginQuery(GL_SAMPLES_PASSED, s_vis_q[s_vis_head % GL_VIS_QUERIES]);
             }
+            PF_STAGE(other_ns);
             glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
+            PF_STAGE(submit_ns);
             if (vq) {
                 glEndQuery(GL_SAMPLES_PASSED);
                 s_vis_head++;
@@ -3091,9 +3473,15 @@ swap:
  * thread runs them (the executor, or the GL thread with RECOMP_GL_THREAD=1). */
 static void gl_draw_raw(const Nv2aRawBatch *b)
 {
-    uint64_t t0 = hz_now();
+    uint64_t t0 = hz_now(), before = 0;
+    if (perf_detail()) before = s_pf.lookup_ns + s_pf.upload_ns + s_pf.uniform_ns + s_pf.bind_ns + s_pf.state_ns + s_pf.submit_ns + s_pf.other_ns;
     gl_draw_raw_work(b);
-    PF_ADD(draw_ns, hz_now() - t0);
+    uint64_t elapsed = hz_now() - t0;
+    if (perf_detail()) {
+        uint64_t stages = s_pf.lookup_ns + s_pf.upload_ns + s_pf.uniform_ns + s_pf.bind_ns + s_pf.state_ns + s_pf.submit_ns + s_pf.other_ns - before;
+        if (elapsed > stages) PF_ADD(other_ns, elapsed - stages);
+    }
+    PF_ADD(draw_ns, elapsed);
     PF_ADD(draws, 1);
     PF_ADD(verts, b->vertex_count);
     PF_ADD(indices, b->index_count);
@@ -3116,6 +3504,9 @@ static void gl_flip(void)
     static uint64_t next_ns;
     uint64_t t0 = hz_now();
     gl_flip_work();
+    ring_flip(&s_vring);
+    ring_flip(&s_iring);
+    validate_frame();
     PF_ADD(flip_ns, hz_now() - t0);
     if (cap_ns < 0) {
         const char *e = getenv("MANHUNT_FPS_CAP");
@@ -3610,6 +4001,9 @@ static Nv2aBackend s_backend_gl = {
 void nv2a_gl_install(void)
 {
     uint32_t flags=NV2A_BACKEND_RAW_DIRECT;
+    const char *cmp = getenv("MANHUNT_GL_CMP");
+    if (cmp && *cmp == '1') flags |= NV2A_BACKEND_RAW_CMP;
+    fprintf(stderr, "[MH-GL] packed normals: %s (MANHUNT_GL_CMP)\n", (flags & NV2A_BACKEND_RAW_CMP) ? "shader" : "CPU");
     const char *shader_light = getenv("MANHUNT_SHADER_LIGHTING");
     if (!shader_light || strcmp(shader_light, "0")) flags |= NV2A_BACKEND_RAW_LIGHTING;
     fprintf(stderr, "[MH-GL] fixed-function lighting: %s (MANHUNT_SHADER_LIGHTING)\n",

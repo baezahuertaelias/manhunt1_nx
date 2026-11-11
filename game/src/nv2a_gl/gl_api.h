@@ -30,9 +30,20 @@ typedef char          GLchar;
 typedef unsigned char GLubyte;
 typedef ptrdiff_t     GLsizeiptr;
 typedef ptrdiff_t     GLintptr;
+typedef struct __GLsync *GLsync;
 
 #define GL_FALSE                          0
 #define GL_NO_ERROR                       0
+#define GL_MAP_PERSISTENT_BIT             0x0040
+#define GL_MAP_COHERENT_BIT               0x0080
+#define GL_NUM_EXTENSIONS                 0x821D
+#define GL_EXTENSIONS                     0x1F03
+#define GL_SYNC_GPU_COMMANDS_COMPLETE     0x9117
+#define GL_SYNC_FLUSH_COMMANDS_BIT        0x00000001
+#define GL_ALREADY_SIGNALED               0x911A
+#define GL_TIMEOUT_EXPIRED                0x911B
+#define GL_CONDITION_SATISFIED            0x911C
+#define GL_WAIT_FAILED                    0x911D
 #define GL_MAP_WRITE_BIT                  0x0002
 #define GL_MAP_INVALIDATE_RANGE_BIT       0x0004
 #define GL_MAP_UNSYNCHRONIZED_BIT         0x0020
@@ -91,6 +102,9 @@ typedef ptrdiff_t     GLintptr;
 #define GL_UNSIGNED_INT_8_8_8_8_REV       0x8367
 #define GL_ARRAY_BUFFER                   0x8892
 #define GL_ELEMENT_ARRAY_BUFFER           0x8893
+#define GL_UNIFORM_BUFFER                 0x8A11
+#define GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT 0x8A34
+#define GL_INVALID_INDEX                  0xFFFFFFFFu
 #define GL_STREAM_DRAW                    0x88E0
 #define GL_DEPTH24_STENCIL8               0x88F0
 #define GL_FRAGMENT_SHADER                0x8B30
@@ -117,6 +131,7 @@ typedef ptrdiff_t     GLintptr;
 /* X(return type, name, parameter list) */
 #define NV2A_GL_FUNCS(X) \
     X(const GLubyte *, glGetString, (GLenum)) \
+    X(const GLubyte *, glGetStringi, (GLenum, GLuint)) \
     X(GLenum, glGetError, (void)) \
     X(void, glViewport, (GLint, GLint, GLsizei, GLsizei)) \
     X(void, glScissor, (GLint, GLint, GLsizei, GLsizei)) \
@@ -175,6 +190,9 @@ typedef ptrdiff_t     GLintptr;
     X(void, glGetProgramiv, (GLuint, GLenum, GLint *)) \
     X(void, glGetProgramInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) \
     X(void, glUseProgram, (GLuint)) \
+    X(GLuint, glGetUniformBlockIndex, (GLuint, const GLchar *)) \
+    X(void, glUniformBlockBinding, (GLuint, GLuint, GLuint)) \
+    X(void, glBindBufferRange, (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr)) \
     X(GLint, glGetUniformLocation, (GLuint, const GLchar *)) \
     X(void, glUniform1i, (GLint, GLint)) \
     X(void, glUniform1iv, (GLint, GLsizei, const GLint *)) \
@@ -184,6 +202,11 @@ typedef ptrdiff_t     GLintptr;
     X(void, glGenVertexArrays, (GLsizei, GLuint *)) \
     X(void, glBindVertexArray, (GLuint)) \
     X(void, glGenBuffers, (GLsizei, GLuint *)) \
+    X(void, glDeleteBuffers, (GLsizei, const GLuint *)) \
+    X(void, glBufferStorage, (GLenum, GLsizeiptr, const void *, GLbitfield)) \
+    X(GLsync, glFenceSync, (GLenum, GLbitfield)) \
+    X(GLenum, glClientWaitSync, (GLsync, GLbitfield, uint64_t)) \
+    X(void, glDeleteSync, (GLsync)) \
     X(void, glBindBuffer, (GLenum, GLuint)) \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void *, GLenum)) \
 X(void, glBufferSubData, (GLenum, GLintptr, GLsizeiptr, const void *)) \
@@ -205,11 +228,12 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
 NV2A_GL_FUNCS(NV2A_GL_DECLARE)
 #undef NV2A_GL_DECLARE
 
-/* Resolve every entry point. Returns the number that could not be found
+/* Resolve entry points (glBufferStorage is optional). Returns the number of required entries that could not be found
  * (0 on success); `getproc` is SDL_GL_GetProcAddress or equivalent. */
 int nv2a_gl_load(void *(*getproc)(const char *name));
 
 /* The renderer calls through these names. */
+#define glGetStringi             p_glGetStringi
 #define glGetString              p_glGetString
 #define glGetError               p_glGetError
 #define glViewport               p_glViewport
@@ -272,6 +296,9 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glGetProgramiv           p_glGetProgramiv
 #define glGetProgramInfoLog      p_glGetProgramInfoLog
 #define glUseProgram             p_glUseProgram
+#define glGetUniformBlockIndex   p_glGetUniformBlockIndex
+#define glUniformBlockBinding    p_glUniformBlockBinding
+#define glBindBufferRange        p_glBindBufferRange
 #define glGetUniformLocation     p_glGetUniformLocation
 #define glUniform1i              p_glUniform1i
 #define glUniform1iv             p_glUniform1iv
@@ -280,6 +307,11 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glUniform4fv             p_glUniform4fv
 #define glGenVertexArrays        p_glGenVertexArrays
 #define glBindVertexArray        p_glBindVertexArray
+#define glDeleteBuffers          p_glDeleteBuffers
+#define glBufferStorage          p_glBufferStorage
+#define glFenceSync              p_glFenceSync
+#define glClientWaitSync         p_glClientWaitSync
+#define glDeleteSync             p_glDeleteSync
 #define glGenBuffers             p_glGenBuffers
 #define glBindBuffer             p_glBindBuffer
 #define glBufferData             p_glBufferData

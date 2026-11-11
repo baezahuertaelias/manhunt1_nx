@@ -18,10 +18,14 @@ extern int nv2a_shader_depth_clamp;
 
 /* Declarations and helpers every vertex shader starts with. */
 const char *nv2a_gl_vsh_prelude(void);
+/* GL only: std140 constant/lighting blocks; Vulkan is unchanged. */
+const char *nv2a_gl_vsh_prelude_mode(int ubo);
 /* main() for a vertex-program shader (follows the program body). */
 const char *nv2a_gl_vsh_main_program(void);
 /* main() for fixed-function / pre-transformed batches (no program body). */
 const char *nv2a_gl_vsh_fixed(void);
 const char *nv2a_gl_vsh_lighting(void);
+
+const char *nv2a_gl_vsh_attributes(void);
 
 #endif

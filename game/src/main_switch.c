@@ -636,6 +636,20 @@ static void perf_main(void *arg)
                      (g.tex_bytes - g_last.tex_bytes) / 1048576.0, (g.tex_ns - g_last.tex_ns) / 1e6,
                      (unsigned long long)(g.progs - g_last.progs), (g.prog_ns - g_last.prog_ns) / 1e6);
         }
+        {
+            const double per = g.frames > g_last.frames ? (double)(g.frames - g_last.frames) : 1.0;
+#define GL_MS(f) ((g.f - g_last.f) / per / 1e6)
+#define GL_CALLS(f) ((g.f - g_last.f) / per)
+            printf("[perf-gl] lookup %.3f upload %.3f uniform %.3f bind %.3f state %.3f submit %.3f other %.3f ms"
+                   " | maps %.1f uniforms %.1f bytes %.0f binds %.1f convattrs %.1f convverts %.0f"
+                   " | types %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n",
+                   GL_MS(lookup_ns), GL_MS(upload_ns), GL_MS(uniform_ns), GL_MS(bind_ns), GL_MS(state_ns), GL_MS(submit_ns), GL_MS(other_ns),
+                   GL_CALLS(maps), GL_CALLS(uniform_calls), GL_CALLS(uniform_bytes), GL_CALLS(texture_binds), GL_CALLS(converted_attrs), GL_CALLS(converted_verts),
+                   GL_CALLS(converted_type[0]), GL_CALLS(converted_type[1]), GL_CALLS(converted_type[2]), GL_CALLS(converted_type[3]),
+                   GL_CALLS(converted_type[4]), GL_CALLS(converted_type[5]), GL_CALLS(converted_type[6]), GL_CALLS(converted_type[7]));
+#undef GL_MS
+#undef GL_CALLS
+        }
         g_last = g;
         PERF_PUT(" | cpu");
         {
