@@ -198,6 +198,34 @@ static uint64_t hz_now(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
+/* Owner-requested scene ambient RGB. -1 retains the title's ambient;
+ * only lit fixed-function geometry is affected, never UI/unlit batches. */
+static float ambient_level(void)
+{
+    static float value;
+    static int initialized;
+    if (!initialized) {
+        const char *e = getenv("MANHUNT_AMBIENT_LIGHT");
+        char *end = NULL;
+        value = e ? strtof(e, &end) : 0.33f;
+        if (e && (end == e || *end || !(value == -1.0f || (value >= 0.0f && value <= 1.0f)))) {
+            fprintf(stderr, "[MH-GL] invalid MANHUNT_AMBIENT_LIGHT; retaining game ambient\n");
+            value = -1.0f;
+        }
+        initialized = 1;
+        fprintf(stderr, "[MH-GL] scene ambient %s %.2f (MANHUNT_AMBIENT_LIGHT)\n",
+                value < 0.0f ? "game" : "RGB", value);
+    }
+    return value;
+}
+static void light_uniforms(const uint32_t *r, uint32_t lighting, float light[46][4])
+{
+    nv2a_gl_light_uniforms(r, lighting, light);
+    float ambient = ambient_level();
+    if ((lighting & 1u) && ambient >= 0.0f)
+        light[1][0] = light[1][1] = light[1][2] = ambient;
+}
+
 /* Detailed draw profiling is opt-in; no extra clocks in ordinary play. */
 static int perf_detail(void)
 {
@@ -1279,7 +1307,7 @@ static void uniform_blocks(const Nv2aRawBatch *b, unsigned blocks)
         s_ubo.const_valid = 1;
     }
     if (blocks & 2) {
-        nv2a_gl_light_uniforms(b->regs, b->lighting, light);
+        light_uniforms(b->regs, b->lighting, light);
         if (!s_ubo.light_valid || memcmp(light, s_ubo.light, sizeof light)) {
             ubo_put(1, light, sizeof light);
             memcpy(s_ubo.light, light, sizeof light);
@@ -2833,7 +2861,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     }
     if (p->u_light >= 0) {
         float light[46][4];
-        nv2a_gl_light_uniforms(r, b->lighting, light);
+        light_uniforms(r, b->lighting, light);
         if (!p->light_valid || memcmp(light, p->light, sizeof light)) {
             glUniform4fv(p->u_light, 46, &light[0][0]);
             memcpy(p->light, light, sizeof light);

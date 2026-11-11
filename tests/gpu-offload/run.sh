@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run in manhunt-recompiler:xboxrecomp-f0f8a46 with --user 0.
 set -euo pipefail
+export MANHUNT_AMBIENT_LIGHT=-1
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$root"
 out="$root/game/build/hw-test/2026-11-10-gpu-offload/host"
@@ -11,6 +12,7 @@ run review-new env MANHUNT_GL_PERSISTENT=1 MANHUNT_GL_UBO=1 MANHUNT_GL_STATE_CAC
 run streaming bash tests/nv2a-gl-review/run-streaming.sh
 run ubo bash tests/nv2a-gl-review/run-ubo.sh
 run ubo-real bash tests/nv2a-gl-review/run-ubo-real.sh
+run ambient bash tests/nv2a-gl-review/run-ambient.sh
 run validation bash tests/nv2a-gl-review/run-validation.sh
 run progcache bash tests/nv2a-gl-review/run-progcache.sh
 run backend-contract bash tests/nv2a-gl-review/run-contract.sh

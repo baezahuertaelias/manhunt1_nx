@@ -79,6 +79,11 @@ int main(int argc, char **argv)
             }
             regf(0x103c, 1); regf(0x03b4, 1);
             memcpy(expected, color, sizeof expected);
+            if (b.lighting && ambient_level() >= 0.0f)
+                for (unsigned k = 0; k < 3; k++) {
+                    float value = ambient_level() + (phase == 6 ? color[k] : 0.0f);
+                    expected[k] = value > 1.0f ? 1.0f : value;
+                }
         }
         if (queued_mode) q_draw(&b); else gl_draw_raw(&b);
         complete();

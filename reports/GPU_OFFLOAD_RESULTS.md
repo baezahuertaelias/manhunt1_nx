@@ -179,3 +179,30 @@ passes profile=0 and validation=1 explicitly; it does not overwrite the card's
 configuration or saves. This is a prepared diagnostic/rollback candidate, not
 an assertion that the combat black screen has been fixed. Awaiting the owner's
 nxlink activation before the next console comparison.
+
+## Owner rollback feedback and ambient adjustment
+
+The diagnostic NRO `b696a0d8...` was deployed successfully with all four new paths
+off, RECOMP_RENDER_PROFILE=0 and validation enabled. Evidence:
+`game/build/hw-test/gpu-offload/20261110-234419-rollback/` (manifest and live log).
+The owner reports **"screen goes well"** on this rollback. Their NPC/FPS wording
+was interpreted as about 12 FPS with NPCs, about 20 without; that condition split
+is user-observed, not isolated by the perf log. The previous black-screen failure
+has not been attributed to a single new path, and the prior test also differed
+in per-method profiling. New paths remain off by default. The launch helper now
+requires `-EnableExperimentalGpuPaths` to enable the experimental group.
+
+At the owner's request, scene ambient RGB for shader-lit fixed-function geometry
+now defaults to **0.33**, applied before the existing ambient/diffuse light sum.
+It is an absolute RGB level, not a final-frame brightness multiplier. Material
+alpha, individual lights, unlit geometry/UI and programmable vertex shaders are
+preserved. `MANHUNT_AMBIENT_LIGHT=-1` restores the title's scene ambient;
+0..1 selects a different level. The existing CPU-lighting fallback retains its
+original title calculation. Ordinary uniforms and UBOs use the same preparation.
+
+All 16 host groups pass, including ambient configuration/alpha/unlit contracts
+and real-driver analytic pixels at 0.33 (ordinary and UBO outputs identical),
+plus the previous shader, renderer and audio regressions. Incremental Switch
+build passed. Candidate: `game/build/hw-test/2026-11-10-gpu-offload/ambient-033.nro`,
+SHA-256 `f7cc2377c651473573603985729cb00a5c5ade15d4fd708ff5d3ec386857f57c`. New ambient appearance is UNVERIFIED on Switch;
+waiting for the owner to activate nxlink before sending this build.
