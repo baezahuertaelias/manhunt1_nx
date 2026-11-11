@@ -589,6 +589,7 @@ static void clocks_lower(void)
 static u8 *volatile s_nxfps;
 static volatile u32 s_nxfps_cleared;
 static int nxfps_list(char *out, size_t n);
+extern void mcpx_apu_perf_read(uint64_t out[7]);
 
 static void perf_main(void *arg)
 {
@@ -597,12 +598,14 @@ static void perf_main(void *arg)
     int core_ok[3], seen = 0;
     Nv2aGlPerf g_last, g;
     ManhuntAudioStats a_last, a;
+    uint64_t apu_last[7], apu[7];
     int psm_ok = R_SUCCEEDED(psmInitialize());
 
     for (int c = 0; c < 3; c++)
         core_ok[c] = core_idle_ticks(c, &idle_last[c]);
     nv2a_gl_perf_read(&g_last);
     manhunt_audio_stats(&a_last);
+    mcpx_apu_perf_read(apu_last);
     for (;;) {
         svcSleepThread((s64)armTicksToNs(period));
         const u64 t = armGetSystemTick(), dt = t - t_last;
@@ -671,6 +674,20 @@ static void perf_main(void *arg)
             PERF_PUT(" | audio off");
         }
         a_last = a;
+        mcpx_apu_perf_read(apu);
+        if (a.active) {
+            /* Wall time includes preemption and guest ISR/DPC work. Buckets
+             * identify where the worker waits/spends time, not pure CPU cost. */
+            PERF_PUT(" | apu %.0f frames/s wall ms/s wait %.0f vp %.0f dsp %.0f out %.0f irq %.0f handoff %.0f",
+                     (apu[0] - apu_last[0]) / secs,
+                     (apu[1] - apu_last[1]) / (secs * 1000),
+                     (apu[2] - apu_last[2]) / (secs * 1000),
+                     (apu[3] - apu_last[3]) / (secs * 1000),
+                     (apu[4] - apu_last[4]) / (secs * 1000),
+                     (apu[5] - apu_last[5]) / (secs * 1000),
+                     (apu[6] - apu_last[6]) / (secs * 1000));
+        }
+        memcpy(apu_last, apu, sizeof apu_last);
         if (s_nxfps) {
             char list[64];
             nxfps_list(list, sizeof list);

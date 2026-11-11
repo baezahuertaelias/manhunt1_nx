@@ -1,6 +1,7 @@
 # Fight audio, Status Monitor and CPU performance — 2026-11-10
 
-Branch: `settings-font`. Hardware acceptance of the combined candidate is pending.
+Branch: `settings-font`. Status Monitor FPS is confirmed by the user on Switch.
+Audio improves with the priority boost, but its FPS cost remains under investigation.
 
 ## Hardware evidence before the combined changes
 
@@ -69,6 +70,17 @@ Owning sources inspected:
 - Switch builds explicitly use `MANHUNT_GEN_OPT=-O2`; native host bring-up stays
   at `-O1`. The native build script accepts `MANHUNT_GEN_OPT=-O1` for rollback.
 - Retain the added `0x0006F9E0` function record and per-address ICALL log limit.
+- Follow-up patch 0026 caches exact voice-mixer math on Switch: initialize all
+  4,096 attenuation values once with the original `powf` expression, and cache
+  repeated pitch/filter `powf(2, exponent)` results using exact float-bit keys.
+  The attenuation table is 16 KiB shared storage; the pow cache is 3 KiB per
+  thread. No sample, voice, filter or mixing stage is omitted. Other hosts keep
+  the original math path. Host tests explicitly enable the Switch cache path.
+- Patch 0027 adds cumulative APU wall-time buckets to the existing perf line:
+  throttling, voice processing, DSP mixdown, output, guest IRQ/DPC delivery and
+  mutex handoff. Counters are collected only with `MANHUNT_PERF_LOG` enabled.
+  This prepares the next run to explain remaining stalls without another
+  diagnostic-only console run. Wall time includes preemption and waiting.
 
 Runtime-only changes were compiled incrementally against the existing lifted
 game code, which already contains `sub_0006F9E0`. A clean build applies the
@@ -87,6 +99,11 @@ the patch list invalidates that pipeline's lift cache as before.
   `sub_0006F9E0`. Failure-log rate-limit tables are private to each guest worker.
 - SDL sink and APU glue tests pass, including snapshot values, wrap, overflow,
   silence, expected drain, reopen and shutdown.
+- Exact APU math tests pass for all 65,536 uint16 volume inputs, pitch/cutoff
+  exponents, fractional envelopes, cache collisions, infinities/NaNs and four
+  workers racing initial table creation. Finite results match the original
+  math bit-for-bit on the host. These establish arithmetic equivalence, not a
+  measured Switch speedup.
 - Status FPS tests cover first-block selection, complete-block bounds and
   detecting timing changes independently of reader-owned active flags.
 - Real OpenGL transform feedback on Mesa llvmpipe compares shader output with
@@ -107,7 +124,45 @@ bash tests/shader-lighting/run.sh
 bash tests/nv2a-gl-review/run.sh
 ```
 
-## Consolidated Switch acceptance
+## Combined Switch tests C and D
+
+Both used the combined `a59a...` NRO above, GL thread on, shader lighting on,
+`-O2`, and measured CPU/GPU clocks of 1020/307 MHz. Logs are `run-c.log` and
+`run-d.log` beside A/B. The manual route was not an identical replay.
+
+- C, `MANHUNT_APU_BOOST=1`: log confirms APU priority `0x3b -> 0x3a` succeeded
+  and the first FPS block at `0xbc` was reused. The user confirmed FPS displayed
+  and audio sounded better, but gameplay felt slower. Heavy portions reached
+  roughly 14–25 FPS. Audio often sustained approximately 48,000 frames/s, yet
+  underruns resumed under heavier load; the counter ended near 297. Thus this
+  did not pass sustained audio acceptance or performance acceptance.
+- D, same binary with `MANHUNT_APU_BOOST=0`: the user said it felt better.
+  Representative heavy-scene samples showed 25–35.5 FPS, but audio fell to about
+  27–32k consumed frames/s with 46–47 underrun events per two seconds. Status
+  Monitor cleared the active flag again (`smon cleared 3`), consistent with the
+  user's confirmed FPS display. Audio acceptance still fails.
+
+These runs expose the priority tradeoff; the boost must not be described as a
+complete fix. Some short per-thread CPU samples exceed 100%, so those snapshots
+are advisory, not proof of a physical single-thread utilization above one core.
+Queue consumption and underruns remain the audio acceptance measurements.
+The user has not explicitly confirmed lighting fidelity.
+
+## Follow-up candidate E and remaining acceptance
+
+Patch 0026 targets repeated mixer exponentiation rather than changing audio
+quality. The consolidated candidate includes patch 0027's wall-time breakdown
+as well. Its Switch build passed. Candidate: `game/build/switch/manhunt.nro`,
+also copied to `consolidated-final.nro` beside the logs, SHA-256
+`47e7aee2b7ccb6b67a8fae60f8297963c37a1e2b9351b43abe3f1e67a8ffb808`.
+Its hardware comparison is pending; E is prepared with the same options as C,
+including the priority boost. The cache-only intermediate `9c10...` NRO was
+not executed on the console and is superseded for this next test.
+
+The user explicitly asked to consolidate all pending changes and minimize
+manual console tests. Do not request a separate run per optimization or knob.
+The next test should capture FPS display, all fights, audible output, lighting,
+steady-state queue/underruns and the complete APU time breakdown together.
 
 Per the user's later instruction, finish implementation before further tests.
 Keep CPU clock and the route fixed. First run the combined candidate with GL

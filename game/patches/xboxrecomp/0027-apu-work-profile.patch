@@ -1,0 +1,84 @@
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -29,6 +29,30 @@
+ /* ============================================================
+  * Globals
+  * ============================================================ */
++
++/* Wall-time buckets in microseconds, enabled only with the perf report.
++ * IRQ includes guest ISR/DPC work delivered on this worker, not just mixing. */
++static uint64_t apu_perf[7];
++static int apu_perf_on(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) {
++        const char *e = getenv("MANHUNT_PERF_LOG");
++        enabled = e && *e && *e != '0';
++    }
++    return enabled;
++}
++void mcpx_apu_perf_read(uint64_t out[7])
++{
++    for (int i = 0; i < 7; ++i)
++        out[i] = __atomic_load_n(&apu_perf[i], __ATOMIC_RELAXED);
++}
++static void apu_perf_add(int bucket, int64_t start)
++{
++    __atomic_fetch_add(&apu_perf[bucket],
++                       (uint64_t)(qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start),
++                       __ATOMIC_RELAXED);
++}
+
+ uint8_t *g_apu_ram_ptr = NULL;
+
+@@ -1081,9 +1105,17 @@
+     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
+     memset(mixbins, 0, sizeof(mixbins));
+
++    const int timed = apu_perf_on();
++    int64_t t = timed ? qemu_clock_get_us(QEMU_CLOCK_REALTIME) : 0;
+     mcpx_apu_vp_frame(d, mixbins);
++    if (timed) { apu_perf_add(2, t); t = qemu_clock_get_us(QEMU_CLOCK_REALTIME); }
+     mcpx_apu_dsp_frame(d, mixbins);
++    if (timed) { apu_perf_add(3, t); t = qemu_clock_get_us(QEMU_CLOCK_REALTIME); }
+     mcpx_apu_monitor_frame(d);
++    if (timed) {
++        apu_perf_add(4, t);
++        __atomic_fetch_add(&apu_perf[0], 1, __ATOMIC_RELAXED);
++    }
+
+     d->ep_frame_div++;
+
+@@ -1147,7 +1179,10 @@
+         /* Always run the audio output loop — the software mixer and test tone
+          * need continuous frame delivery regardless of APU register state.
+          * The VP/DSP pipeline (se_frame) only runs when registers allow it. */
++        const int timed = apu_perf_on();
++        int64_t t = timed ? qemu_clock_get_us(QEMU_CLOCK_REALTIME) : 0;
+         throttle(d);
++        if (timed) apu_perf_add(1, t);
+         int div0 = d->ep_frame_div;
+
+         /* The doorbell ack stands in for the GP DSP, which on hardware runs
+@@ -1229,7 +1264,9 @@
+             update_irq(d);
+             d->set_irq = false;
+         }
++        if (timed) t = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+         apu_deliver_irq(d);
++        if (timed) apu_perf_add(5, t);
+         apu_irq_stats_line();
+
+         /* Let the guest in once per frame.
+@@ -1242,9 +1279,11 @@
+          * thread starved there indefinitely: Burnout 3 froze on its vehicle
+          * select, blocked in voice_lock at raised IRQL, which in turn held
+          * off every USB interrupt. */
++        if (timed) t = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+         qemu_mutex_unlock(&d->lock);
+         SwitchToThread();
+         qemu_mutex_lock(&d->lock);
++        if (timed) apu_perf_add(6, t);
+         if (fe_trapped &&
+             (qatomic_read(&d->regs[NV_PAPU_FECTL]) &
+              NV_PAPU_FECTL_FEMETHMODE_TRAPPED)) {
