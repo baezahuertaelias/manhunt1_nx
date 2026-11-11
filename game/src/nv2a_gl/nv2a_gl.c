@@ -229,9 +229,14 @@ static void light_uniforms(const uint32_t *r, uint32_t lighting, float light[46]
 /* Detailed draw profiling is opt-in; no extra clocks in ordinary play. */
 static int perf_detail(void)
 {
-    static int on = -1;
-    if (on < 0) { const char *e = getenv("MANHUNT_PERF_LOG"); on = e && atoi(e) > 0; }
-    return on;
+    static atomic_int on = -1;
+    int value = atomic_load_explicit(&on, memory_order_relaxed);
+    if (value < 0) {
+        const char *e = getenv("MANHUNT_PERF_LOG");
+        value = e && atoi(e) > 0;
+        atomic_store_explicit(&on, value, memory_order_relaxed);
+    }
+    return value;
 }
 #define PF_STAGE(field) do { if (pt) { uint64_t now = hz_now(); PF_ADD(field, now - pt); pt = now; } } while (0)
 static void pf_uniform4fv(GLint loc, GLsizei n, const GLfloat *v)
@@ -2329,6 +2334,18 @@ static uint32_t vertex_runs(const Nv2aRawBatch *b, VRun *run, int *of_run)
     return nrun;
 }
 
+/* Count CPU conversions before queue packing can re-describe their float4
+ * storage as direct. Producers and the GL consumer update atomic totals. */
+static void count_converted(const Nv2aRawBatch *b, uint16_t conv)
+{
+    if (!perf_detail()) return;
+    for (unsigned a = 0; a < NV2A_RAW_ATTRS; a++) if (conv & (1u << a)) {
+        PF_ADD(converted_attrs, 1); PF_ADD(converted_verts, b->vertex_count);
+        unsigned type = b->regs ? b->regs[(0x1760 / 4) + a] & 7 : 7;
+        PF_ADD(converted_type[type], b->vertex_count);
+    }
+}
+
 static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
                            uint32_t index_count, GLenum index_type, GLintptr *index_at)
 {
@@ -2346,11 +2363,7 @@ static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
 
     if (!nv)
         return 0;
-    if (perf_detail()) for (a = 0; a < NV2A_RAW_ATTRS; a++) if (conv & (1u << a)) {
-        PF_ADD(converted_attrs, 1); PF_ADD(converted_verts, nv);
-        unsigned type = b->regs ? b->regs[(0x1760 / 4) + a] & 7 : 7;
-        PF_ADD(converted_type[type], nv);
-    }
+    count_converted(b, conv);
     nrun = vertex_runs(b, run, of_run);
     for (i = 0; i < nrun; i++) {
         run[i].at = bytes;
@@ -3777,12 +3790,41 @@ static void q_drain(int invalidate, int visibility)
 
 static void q_sync(int invalidate) { if (!gl_gpu()) q_drain(invalidate,1); }
 
+/* Compact only CPU-converted attributes, keeping existing shaders and
+ * upload formats. Off by default until console acceptance. */
+static int queue_pack(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_QUEUE_PACK");
+        on = e && !strcmp(e, "1");
+        fprintf(stderr, "[MH-GL] compact converted queue attributes: %s (MANHUNT_GL_QUEUE_PACK)\n", on ? "on" : "off");
+    }
+    return on;
+}
+static void q_read_batch(const uint8_t *rec, size_t at, Nv2aRawBatch *bb)
+{
+    *bb = *(const Nv2aRawBatch *)(rec + at);
+    bb->regs = g_regs;
+    bb->vp_program = (const uint32_t (*)[4])g_prog;
+    bb->vp_consts = (const float (*)[4])g_consts;
+    for (unsigned a = 0; a < NV2A_RAW_ATTRS; a++)
+        if (bb->attr_direct & (1u << a))
+            bb->direct[a].ptr = rec + (uintptr_t)bb->direct[a].ptr;
+    bb->attrs = bb->attrs ? (const float *)(rec + (uintptr_t)bb->attrs) : NULL;
+    bb->indices = (const uint32_t *)(rec + (uintptr_t)bb->indices);
+}
+
 static void q_draw(const Nv2aRawBatch *b)
 {
     VRun run[NV2A_RAW_ATTRS];
     int of_run[NV2A_RAW_ATTRS];
     uint32_t nrun = vertex_runs(b, run, of_run), i, a, nreg, nprog = 0, nconst = 0;
     uint16_t conv = b->attr_present & (uint16_t)~b->attr_direct;
+    uint32_t slots[NV2A_RAW_ATTRS], nconv = 0;
+    int packed = queue_pack();
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) if (conv & (1u << a)) slots[nconv++] = a;
+    size_t attr_bytes = (size_t)b->vertex_count * (packed ? nconv : NV2A_RAW_ATTRS) * 16;
     size_t size, at, runs_at[NV2A_RAW_ATTRS], attrs_at = 0, idx_at, batch_at;
     Nv2aRawBatch *qb;
     uint8_t *rec;
@@ -3804,7 +3846,7 @@ static void q_draw(const Nv2aRawBatch *b)
     }
     if (conv) {
         attrs_at = size;
-        size += Q_ALIGN((size_t)b->vertex_count * NV2A_RAW_ATTRS * 16);
+        size += Q_ALIGN(attr_bytes);
     }
     idx_at = size;
     size += Q_ALIGN((size_t)b->index_count * 4);
@@ -3828,9 +3870,32 @@ static void q_draw(const Nv2aRawBatch *b)
         if (b->attr_direct & (1u << a))
             qb->direct[a].ptr = (const uint8_t *)(uintptr_t)
                 (runs_at[of_run[a]] + (size_t)(b->direct[a].ptr - run[of_run[a]].lo));
-    if (conv)
-        memcpy(rec + attrs_at, b->attrs, (size_t)b->vertex_count * NV2A_RAW_ATTRS * 16);
-    qb->attrs = (const float *)(uintptr_t)attrs_at;
+    if (conv) {
+        if (packed) {
+            if (nconv == NV2A_RAW_ATTRS) memcpy(rec + attrs_at, b->attrs, attr_bytes);
+            else for (uint32_t v = 0; v < b->vertex_count; v++)
+                for (i = 0; i < nconv; i++)
+                    memcpy(rec + attrs_at + ((size_t)v * nconv + i) * 16,
+                           b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slots[i]) * 4, 16);
+            /* Converted float4s use the existing native float attribute path.
+             * Direct guest attributes keep their original descriptors/bytes. */
+            for (i = 0; i < nconv; i++) {
+                a = slots[i];
+                qb->direct[a].ptr = (const uint8_t *)(uintptr_t)(attrs_at + i * 16);
+                qb->direct[a].type = 2; qb->direct[a].size = 4; qb->direct[a].stride = nconv * 16;
+            }
+            qb->attr_direct |= conv;
+            qb->attrs = NULL;
+            count_converted(b, conv);
+        } else {
+            memcpy(rec + attrs_at, b->attrs, attr_bytes);
+            qb->attrs = (const float *)(uintptr_t)attrs_at;
+        }
+        if (perf_detail()) {
+            PF_ADD(queue_attr_bytes, attr_bytes);
+            PF_ADD(queue_attr_saved_bytes, (size_t)b->vertex_count * NV2A_RAW_ATTRS * 16 - attr_bytes);
+        }
+    } else qb->attrs = NULL;
     memcpy(rec + idx_at, b->indices, (size_t)b->index_count * 4);
     qb->indices = (const uint32_t *)(uintptr_t)idx_at;
     ((QHdr *)rec)->size = (uint32_t)size;
@@ -3944,16 +4009,8 @@ static void *q_gl_thread(void *arg)
             }
             s_regs = g_regs;                    /* what clears/presents read */
             if (h->type == Q_DRAW) {
-                Nv2aRawBatch bb = *(const Nv2aRawBatch *)(rec + at);
-                uint32_t a;
-                bb.regs = g_regs;
-                bb.vp_program = (const uint32_t (*)[4])g_prog;
-                bb.vp_consts = (const float (*)[4])g_consts;
-                for (a = 0; a < NV2A_RAW_ATTRS; a++)
-                    if (bb.attr_direct & (1u << a))
-                        bb.direct[a].ptr = rec + (uintptr_t)bb.direct[a].ptr;
-                bb.attrs = (const float *)(rec + (uintptr_t)bb.attrs);
-                bb.indices = (const uint32_t *)(rec + (uintptr_t)bb.indices);
+                Nv2aRawBatch bb;
+                q_read_batch(rec, at, &bb);
                 gl_draw_raw(&bb);
             } else if (h->type == Q_CLEAR) {
                 const QClear *c = (const QClear *)(rec + at);

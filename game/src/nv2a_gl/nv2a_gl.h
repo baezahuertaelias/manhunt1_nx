@@ -21,6 +21,7 @@ typedef struct {
     uint64_t texs, tex_bytes, tex_ns, progs, prog_ns;
     uint64_t lookup_ns, upload_ns, uniform_ns, bind_ns, state_ns, submit_ns, other_ns;
     uint64_t maps, uniform_calls, uniform_bytes, texture_binds, converted_attrs, converted_verts;
+    uint64_t queue_attr_bytes, queue_attr_saved_bytes;
     uint64_t converted_type[8]; /* attribute vertices by NV097 storage type */
 } Nv2aGlPerf;
 void nv2a_gl_perf_read(Nv2aGlPerf *out);

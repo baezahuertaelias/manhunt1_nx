@@ -9,6 +9,7 @@ mkdir -p "$out"
 run() { local name="$1"; shift; if "$@" >"$out/$name.log" 2>&1; then printf 'PASS %s\n' "$name"; else cat "$out/$name.log"; return 1; fi; }
 run review-legacy env MANHUNT_GL_PERSISTENT=0 MANHUNT_GL_UBO=0 MANHUNT_GL_STATE_CACHE=0 bash tests/nv2a-gl-review/run.sh
 run review-new env MANHUNT_GL_PERSISTENT=1 MANHUNT_GL_UBO=1 MANHUNT_GL_STATE_CACHE=1 bash tests/nv2a-gl-review/run.sh
+run queue-pack bash tests/nv2a-gl-review/run-queue-pack.sh
 run streaming bash tests/nv2a-gl-review/run-streaming.sh
 run ubo bash tests/nv2a-gl-review/run-ubo.sh
 run ubo-real bash tests/nv2a-gl-review/run-ubo-real.sh
