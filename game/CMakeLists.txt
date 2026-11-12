@@ -31,6 +31,7 @@ set(MANHUNT_GAME_SOURCES
     src/xpp_input.c
     src/devmenu.c
     src/d3d_fence.c
+    src/d3d_kickoff.c
     src/dsound_hle.c
     src/audio_apu.c
     src/audio_sdl.c
