@@ -120,6 +120,11 @@ static _Atomic uint32_t s_nw_printed;
 
 static int nonfinite(uint32_t w) { return (w & 0x7f800000u) == 0x7f800000u; }
 
+/* A nonfinite word that came from float math. 0xFFFFFFFF is an integer -1 or
+ * an SSE compare mask, which run 20261112-104714-nanhunt kept flagging in
+ * struct fields and XMM lanes that never held a float. */
+static int float_nonfinite(uint32_t w) { return nonfinite(w) && w != 0xFFFFFFFFu; }
+
 static void nan_watch_add(uint32_t obj)
 {
     /* The main guest stack is reused constantly; watching it only reports
@@ -222,8 +227,10 @@ static void check_transform_args(uint32_t ret)
         return;
     for (int j = 0; j < 3; j++)
         if (bad_in < 0 && nonfinite(MEM32(in + 4u * (uint32_t)j))) bad_in = j;
+    /* Skip RwMatrix flags and pads (words 3, 7, 11, 15): the game keeps
+     * pointers and -1 there in good runs (run 20261112-104714-nanhunt). */
     for (int j = 0; j < 16; j++)
-        if (bad_m < 0 && nonfinite(MEM32(mtx + 4u * (uint32_t)j))) bad_m = j;
+        if (bad_m < 0 && (j & 3) != 3 && nonfinite(MEM32(mtx + 4u * (uint32_t)j))) bad_m = j;
     if (bad_in < 0 && bad_m < 0) {
         if (ret == 0x000DE5ABu || ret == 0x000DE5BFu) {
             nan_watch_add(in);
@@ -305,7 +312,8 @@ static void dump_site_args(uint32_t ret)
         args[k] = MEM32(g_esp + 4u * (k + 1));
         for (uint32_t j = 0; j < 4; j++) {
             w[k * 4 + j] = guest_data(args[k]) ? MEM32(args[k] + 4u * j) : 0;
-            if (guest_data(args[k]) && nonfinite(w[k * 4 + j])) bad = 1;
+            /* Only x, y, z: word 3 is a pad or another field. */
+            if (guest_data(args[k]) && j < 3 && float_nonfinite(w[k * 4 + j])) bad = 1;
         }
     }
     if (!bad) { memcpy(s_site_good[si], w, sizeof w); return; }
@@ -358,7 +366,7 @@ static void check_anim_step(uint32_t ret)
  * stack slots and XMM lanes with their values at its previous call. A slot
  * that changed into a NaN was produced between those two calls; the first
  * 40 distinct (previous call, this call, register) triples per register
- * file (x87, XMM) are reported; XMM also carries non-float copies.
+ * file (x87, XMM) are reported; XMM all-ones masks are skipped.
  * Stale or popped slots do not change, so they are not reported again. */
 static RECOMP_TLS uint64_t t_fp_prev[8];
 static RECOMP_TLS uint32_t t_xmm_prev[8][4];
@@ -385,7 +393,7 @@ static void nan_origin_check(uint32_t va, uint32_t ret)
             memcpy(w, x[r - 8]->f, sizeof w);
             for (int l = 0; l < 4 && lane < 0; l++)
                 if (t_regs_seen && w[l] != t_xmm_prev[r - 8][l] &&
-                    (w[l] & 0x7f800000u) == 0x7f800000u && (w[l] & 0x007FFFFFu))
+                    float_nonfinite(w[l]) && (w[l] & 0x007FFFFFu))
                     lane = l;
             memcpy(t_xmm_prev[r - 8], w, sizeof w);
             if (lane < 0) continue;
