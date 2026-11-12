@@ -2,9 +2,9 @@
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $launcher=Join-Path $root 'scripts/gpu-offload-run.ps1'
-$keys=@{streaming='MANHUNT_GL_PERSISTENT';ubo='MANHUNT_GL_UBO';state='MANHUNT_GL_STATE_CACHE';cmp='MANHUNT_GL_CMP';queue='MANHUNT_GL_QUEUE_PACK'}
+$keys=@{streaming='MANHUNT_GL_PERSISTENT';ubo='MANHUNT_GL_UBO';state='MANHUNT_GL_STATE_CACHE';cmp='MANHUNT_GL_CMP';queue='MANHUNT_GL_QUEUE_PACK';hrtf='MANHUNT_APU_FAST_HRTF';cs='MANHUNT_CS_CACHE'}
 $hash=$null
-foreach($mode in @('rollback','cmp','streaming','ubo','state','queue','all')) {
+foreach($mode in @('rollback','cmp','streaming','ubo','state','queue','hrtf','cs','all')) {
     $manifest=(& $launcher -Experiment $mode -DryRun) | ConvertFrom-Json
     foreach($path in $keys.Keys) {
         $on=[int]($mode -eq $path -or $mode -eq 'all')

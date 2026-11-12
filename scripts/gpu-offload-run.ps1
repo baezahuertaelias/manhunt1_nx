@@ -1,6 +1,6 @@
 # Controlled same-binary experiments. No SD configuration or save edits.
 param(
-    [ValidateSet('rollback','cmp','streaming','ubo','state','queue','all')]
+    [ValidateSet('rollback','cmp','streaming','ubo','state','queue','hrtf','cs','all')]
     [string]$Experiment = 'rollback',
     [switch]$Rollback,
     [switch]$EnableExperimentalGpuPaths,
@@ -19,14 +19,14 @@ if ($EnableExperimentalGpuPaths) {
 }
 if ($Rollback -and $Experiment -ne 'rollback') { throw 'Choose rollback or an experiment.' }
 $flags = @{}
-foreach ($name in @('cmp','streaming','ubo','state')) {
+foreach ($name in @('cmp','streaming','ubo','state','queue','hrtf','cs')) {
     $flags[$name] = [int]($Experiment -eq $name -or $Experiment -eq 'all')
 }
 $ambient = $AmbientLight.ToString([System.Globalization.CultureInfo]::InvariantCulture)
 $settings = @(
     'MANHUNT_PERF_LOG=2', 'RECOMP_GL_THREAD=1', 'MANHUNT_GPU_BACKEND=2', 'MANHUNT_GL_SYNC=gpu',
     "MANHUNT_GL_PERSISTENT=$($flags.streaming)", "MANHUNT_GL_UBO=$($flags.ubo)", "MANHUNT_GL_STATE_CACHE=$($flags.state)", "MANHUNT_GL_CMP=$($flags.cmp)",
-    "MANHUNT_GL_QUEUE_PACK=$([int]($Experiment -eq 'queue' -or $Experiment -eq 'all'))", "MANHUNT_AMBIENT_LIGHT=$ambient", 'RECOMP_RENDER_PROFILE=0', 'MANHUNT_GL_VALIDATE=1', 'MANHUNT_CPU_MHZ=1020', 'MANHUNT_GPU_MHZ=307',
+    "MANHUNT_GL_QUEUE_PACK=$($flags.queue)", "MANHUNT_APU_FAST_HRTF=$($flags.hrtf)", "MANHUNT_CS_CACHE=$($flags.cs)", "MANHUNT_AMBIENT_LIGHT=$ambient", 'RECOMP_RENDER_PROFILE=0', 'MANHUNT_GL_VALIDATE=1', 'MANHUNT_CPU_MHZ=1020', 'MANHUNT_GPU_MHZ=307',
     'MANHUNT_DUMP_SECS=0', 'MANHUNT_LOG_SYNC=0'
 )
 $manifest = [ordered]@{experiment=$Experiment;address=$Address;nro_sha256=(Get-FileHash -LiteralPath $nro -Algorithm SHA256).Hash.ToLower();arguments=$settings}
