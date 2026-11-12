@@ -111,17 +111,21 @@ static void check_intsec_args(uint32_t va)
  * first word, so the first call that sees one turned nonfinite brackets the
  * write between the previous call this thread made and this one. Logged once
  * per object with its last finite and its new contents. */
-#define NAN_WATCH 16u
+#define NAN_WATCH 48u
 static _Atomic uint32_t s_nw_obj[NAN_WATCH];
 static _Atomic uint32_t s_nw_state[NAN_WATCH];    /* 0 free, 1 watching, 2 reported */
 static uint32_t s_nw_last[NAN_WATCH][8];          /* racy snapshot; evidence only */
 static RECOMP_TLS uint32_t t_prev_va, t_prev_ret;
+static _Atomic uint32_t s_nw_printed;
 
 static int nonfinite(uint32_t w) { return (w & 0x7f800000u) == 0x7f800000u; }
 
 static void nan_watch_add(uint32_t obj)
 {
-    if (!guest_data(obj) || nonfinite(MEM32(obj)))
+    /* The main guest stack is reused constantly; watching it only reports
+     * unrelated frames (run 20261112-003951-all). */
+    if (!guest_data(obj) || nonfinite(MEM32(obj)) ||
+        (obj >= 0x00780000u && obj < 0x00F80000u))
         return;
     for (uint32_t i = 0; i < NAN_WATCH; i++)
         if (atomic_load_explicit(&s_nw_obj[i], memory_order_relaxed) == obj)
@@ -130,7 +134,8 @@ static void nan_watch_add(uint32_t obj)
         uint32_t expected = 0;
         if (atomic_compare_exchange_strong(&s_nw_state[i], &expected, 1)) {
             atomic_store_explicit(&s_nw_obj[i], obj, memory_order_relaxed);
-            fprintf(stderr, "[MH-NANWATCH] watching 0x%08X (slot %u)\n", obj, i);
+            if (atomic_fetch_add_explicit(&s_nw_printed, 1, memory_order_relaxed) < 64)
+                fprintf(stderr, "[MH-NANWATCH] watching 0x%08X (slot %u)\n", obj, i);
             return;
         }
     }
@@ -141,7 +146,8 @@ static void nan_watch_add(uint32_t obj)
     atomic_store_explicit(&s_nw_obj[i], obj, memory_order_relaxed);
     for (int j = 0; j < 8; j++) s_nw_last[i][j] = MEM32(obj + 4u * (uint32_t)j);
     atomic_store_explicit(&s_nw_state[i], 1, memory_order_relaxed);
-    fprintf(stderr, "[MH-NANWATCH] watching 0x%08X (slot %u, rotated)\n", obj, i);
+    if (atomic_fetch_add_explicit(&s_nw_printed, 1, memory_order_relaxed) < 64)
+        fprintf(stderr, "[MH-NANWATCH] watching 0x%08X (slot %u, rotated)\n", obj, i);
 }
 
 static void nan_watch_check(uint32_t va, uint32_t ret)
@@ -173,6 +179,47 @@ static void nan_watch_check(uint32_t va, uint32_t ret)
             len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(g_esp + 4u * s));
         fprintf(stderr, "%s\n", line);
     }
+}
+
+/* Run 20261112-003951-all: the watched query turned nonfinite inside
+ * RwV3dTransformPoints (0x001E3140 -> SSE 0x001E25E0, plain mul/add) called
+ * from 0x000DE570, which transforms each 0x38-byte element's two points by
+ * one matrix. Check that call's input point and matrix as it is made, and
+ * watch both while finite so a later run brackets their writer. */
+static void check_transform_args(uint32_t ret)
+{
+    static _Atomic uint32_t s_logged;
+    uint32_t out = MEM32(g_esp + 4), in = MEM32(g_esp + 8);
+    uint32_t count = MEM32(g_esp + 12), mtx = MEM32(g_esp + 16);
+    int bad_in = -1, bad_m = -1;
+    if (!guest_data(in) || !guest_data(mtx) || !guest_data(mtx + 32))
+        return;
+    for (int j = 0; j < 3; j++)
+        if (bad_in < 0 && nonfinite(MEM32(in + 4u * (uint32_t)j))) bad_in = j;
+    for (int j = 0; j < 16; j++)
+        if (bad_m < 0 && nonfinite(MEM32(mtx + 4u * (uint32_t)j))) bad_m = j;
+    if (bad_in < 0 && bad_m < 0) {
+        if (ret == 0x000DE5ABu || ret == 0x000DE5BFu) {
+            nan_watch_add(in);
+            nan_watch_add(mtx);
+        }
+        return;
+    }
+    if (atomic_fetch_add_explicit(&s_logged, 1, memory_order_relaxed) >= 16)
+        return;
+    char line[700];
+    int len = snprintf(line, sizeof line,
+                       "[MH-XFORMPTS] ret %08X out %08X in %08X count %u matrix %08X bad in %d matrix %d | in",
+                       ret, out, in, count, mtx, bad_in, bad_m);
+    for (int j = 0; j < 3 && len > 0 && (size_t)len < sizeof line; j++)
+        len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(in + 4u * (uint32_t)j));
+    len += snprintf(line + len, sizeof line - (size_t)len, " | matrix");
+    for (int j = 0; j < 16 && len > 0 && (size_t)len < sizeof line; j++)
+        len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(mtx + 4u * (uint32_t)j));
+    len += snprintf(line + len, sizeof line - (size_t)len, " | stack");
+    for (uint32_t s = 5; s < 17 && len > 0 && (size_t)len < sizeof line; s++)
+        len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(g_esp + 4u * s));
+    fprintf(stderr, "%s\n", line);
 }
 
 /* Every call site above 256 calls in the window: callee<-return address:count. */
@@ -247,6 +294,7 @@ void recomp_call_profile_hit(uint32_t va)
     {
         uint32_t ret = MEM32(g_esp);
         if (va == 0x000DCB90u) nan_watch_add(g_ecx);
+        if (va == 0x001E3140u) check_transform_args(ret);
         nan_watch_check(va, ret);
         t_prev_va = va;
         t_prev_ret = ret;
