@@ -15,7 +15,12 @@ set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/xboxrecomp" CACHE PATH "pa
 set(MANHUNT_GEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/gen" CACHE PATH "lifted C")
 # -O0 makes every guest register access a memory access, so gdb probes read
 # exact values (scripts/game-build.sh debug -> game/build/host-O0).
-set(MANHUNT_GEN_OPT "-O1" CACHE STRING "optimisation level for generated code")
+if(NINTENDO_SWITCH)
+    set(MANHUNT_GEN_OPT_DEFAULT "-O2")
+else()
+    set(MANHUNT_GEN_OPT_DEFAULT "-O1")
+endif()
+set(MANHUNT_GEN_OPT "${MANHUNT_GEN_OPT_DEFAULT}" CACHE STRING "optimisation level for generated code")
 
 add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 file(GLOB MANHUNT_GEN_SOURCES CONFIGURE_DEPENDS "${MANHUNT_GEN_DIR}/*.c")
@@ -57,6 +62,7 @@ if(NINTENDO_SWITCH)
         src/horizon_alloc.c
         src/d3d_tiled_lock.c
         src/widescreen.c
+        src/transform_trace.c
         src/nv2a_deko3d.c
         src/gl_host.c
         src/nv2a_gl/nv2a_gl.c
@@ -84,6 +90,8 @@ if(NINTENDO_SWITCH)
     target_link_options(manhunt PRIVATE -Wl,--wrap=sub_00295EC0)
     # MANHUNT_WIDESCREEN: 4:3 camera view windows widened (src/widescreen.c).
     target_link_options(manhunt PRIVATE -Wl,--wrap=sub_001E80A0)
+    # MANHUNT_TRANSFORM_TRACE: first invalid SetTransform source (src/transform_trace.c).
+    target_link_options(manhunt PRIVATE -Wl,--wrap=sub_0028DA30)
     set_source_files_properties(${MANHUNT_RUNTIME_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-w")
     find_program(MANHUNT_UAM uam HINTS "${DEVKITPRO}/tools/bin" REQUIRED)
     set(MANHUNT_ROMFS "${CMAKE_CURRENT_BINARY_DIR}/nv2a_romfs")
@@ -134,7 +142,13 @@ else()
     set_source_files_properties(src/main.c src/pad_script.c PROPERTIES COMPILE_OPTIONS "-O2;-Wall")
 endif()
 
-# Generated code: ~1.5M lines. -O1 keeps compile time and memory sane on the
-# 4-core host; warnings are the lifter's (unused labels etc.), not ours.
+# Generated code: ~1.5M lines. Switch uses -O2 for the CPU-bound game loop;
+# host bring-up keeps -O1. Warnings are the lifter's, not ours.
 set_source_files_properties(${MANHUNT_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "-w;${MANHUNT_GEN_OPT}")
+# Investigation builds only: count every lifted direct call (src/call_profile.c).
+option(MANHUNT_CALL_PROFILE "count lifted direct calls and print the hottest every 2 s" OFF)
+if(MANHUNT_CALL_PROFILE)
+    set_property(SOURCE ${MANHUNT_GEN_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS RECOMP_CALL_PROFILE)
+    target_sources(manhunt PRIVATE src/call_profile.c)
+endif()
 set_source_files_properties(${MANHUNT_GAME_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-Wall")

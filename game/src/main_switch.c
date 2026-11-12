@@ -1,4 +1,6 @@
 #include "audio_mmio.h"
+#include "audio_stats.h"
+#include "nxfps_shared.h"
 /*
  * Manhunt (Xbox) static recompilation: Horizon (Nintendo Switch) boot.
  *
@@ -42,6 +44,7 @@
 #include "xbox_memory_layout.h"
 #include "recomp_types.h"
 #include "nv2a_deko3d.h"
+#include "nv2a_gl/nv2a_gl.h"
 
 #define MANHUNT_ENTRY_POINT 0x001FE908u
 /* SD layout: everything lives in one folder next to the NRO.
@@ -292,9 +295,31 @@ static void wd_register(const char *name)
 {
     int i = __atomic_fetch_add(&s_wd_n, 1, __ATOMIC_SEQ_CST);
     if (i < WD_MAX) {
-        s_wd_name[i] = name;
         s_wd_h[i] = threadGetCurHandle();
+        __atomic_store_n(&s_wd_name[i], name, __ATOMIC_RELEASE);
     }
+}
+
+/* For threads started outside this file (the GL queue thread, SDL's audio
+ * thread): listed in the watchdog dump and the [perf] CPU report. */
+void manhunt_thread_register(const char *name)
+{
+    if (!strcmp(name, "apu") || !strcmp(name, "gl")) {
+        s32 priority = -1, core = -1;
+        u64 mask = 0;
+        svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+        svcGetThreadCoreMask(&core, &mask, CUR_THREAD_HANDLE);
+        printf("[MH-THREAD] %s priority 0x%x core %d mask 0x%llx\n",
+               name, priority, core, (unsigned long long)mask);
+        const char *boost = getenv("MANHUNT_APU_BOOST");
+        if (!strcmp(name, "apu") && (!boost || !strcmp(boost, "1")) && priority > 0x28) {
+            /* One step above the inherited worker priority, below watchdogs.
+             * MANHUNT_APU_BOOST=0 restores the inherited priority for A/B. */
+            Result rc = svcSetThreadPriority(CUR_THREAD_HANDLE, priority - 1);
+            printf("[MH-THREAD] apu boost 0x%x -> 0x%x rc 0x%x\n", priority, priority - 1, rc);
+        }
+    }
+    wd_register(name);
 }
 
 static void wd_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -321,8 +346,10 @@ static void wd_dump(void)
 {
     extern char __start__[];
     uintptr_t code = (uintptr_t)__start__;
-    int n = s_wd_n < WD_MAX ? s_wd_n : WD_MAX;
+    int registered = __atomic_load_n(&s_wd_n, __ATOMIC_SEQ_CST);
+    int n = registered < WD_MAX ? registered : WD_MAX;
     for (int i = 0; i < n; i++) {
+        if (!__atomic_load_n(&s_wd_name[i], __ATOMIC_ACQUIRE)) break;
         ThreadContext c;
         if (R_FAILED(svcSetThreadActivity(s_wd_h[i], ThreadActivity_Paused))) {
             wd_line("[MH-WD] %s: cannot pause", s_wd_name[i]);
@@ -469,6 +496,417 @@ static void auto_exit_start(void)
     printf("[MH-BOOT] auto exit: no thread could start\n");
 }
 
+/* ---- performance report -------------------------------------------------- */
+/* MANHUNT_PERF_LOG=N: every N seconds (1 means 2) one [perf] line says where a
+ * slow stretch of the game spends its time, to compare with a fast one:
+ *   fps, the longest frame and frames over 50 ms;
+ *   per frame: draws and vertices, and the executor's time split into GL draw
+ *     submission, clears, flip (of which swap: blocked on the GPU), and the
+ *     rest (game code, pushbuffer decode, audio register traffic);
+ *   textures uploaded and programs compiled in the period;
+ *   CPU use of each registered thread (100% = one core) and of each core;
+ *   CPU / GPU / memory clocks and the battery.
+ * The thread runs at high priority (the guest can starve a default-priority
+ * thread) and wakes once per period, so it costs nothing measurable. */
+static u64 thread_ticks(Handle h)
+{
+    u64 t = 0;
+    if (R_FAILED(svcGetInfo(&t, InfoType_ThreadTickCount, h, UINT64_MAX)))
+        return 0;
+    return t;
+}
+
+/* Idle ticks of one core: the kernel only reports the core the caller runs on,
+ * so the thread moves there first. 0 when it cannot (core 3 is the system's). */
+static int core_idle_ticks(int core, u64 *idle)
+{
+    if (R_FAILED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core)))
+        return 0;
+    svcSleepThread(0);
+    if (svcGetCurrentProcessorNumber() != (u32)core)
+        return 0;
+    return R_SUCCEEDED(svcGetInfo(idle, InfoType_IdleTickCount, INVALID_HANDLE, (u64)core));
+}
+
+static const PcvModuleId s_clk_mod[3] = {PcvModuleId_CpuBus, PcvModuleId_GPU, PcvModuleId_EMC};
+static ClkrstSession s_clk[3];
+static int s_clk_ok[3];
+static u32 s_clk_boot_hz[3];
+
+static void clocks_open(void)
+{
+    if (R_FAILED(clkrstInitialize()))
+        return;
+    for (int i = 0; i < 3; i++)
+        if (R_SUCCEEDED(clkrstOpenSession(&s_clk[i], s_clk_mod[i], 3))) {
+            s_clk_ok[i] = 1;
+            clkrstGetClockRate(&s_clk[i], &s_clk_boot_hz[i]);
+        }
+}
+
+static u32 clock_mhz(int i)
+{
+    u32 hz = 0;
+    if (s_clk_ok[i])
+        clkrstGetClockRate(&s_clk[i], &hz);
+    return hz / 1000000u;
+}
+
+/* MANHUNT_CPU_MHZ / MANHUNT_GPU_MHZ: run below the clock the system chose, to
+ * save battery where the frame rate has room. Only lowering is allowed, and
+ * the system's clocks come back at exit. The system may also reset them on its
+ * own (docking, for instance); the [perf] line shows the clocks in force. */
+static void clocks_restore(void)
+{
+    for (int i = 0; i < 2; i++)
+        if (s_clk_ok[i] && s_clk_boot_hz[i])
+            clkrstSetClockRate(&s_clk[i], s_clk_boot_hz[i]);
+}
+
+static void clocks_lower(void)
+{
+    static const char *keys[2] = {"MANHUNT_CPU_MHZ", "MANHUNT_GPU_MHZ"};
+    int changed = 0;
+    for (int i = 0; i < 2; i++) {
+        const char *e = getenv(keys[i]);
+        u32 hz = e ? (u32)atoi(e) * 1000000u : 0;
+        if (!hz || !s_clk_ok[i])
+            continue;
+        if (hz >= s_clk_boot_hz[i]) {
+            printf("[MH-BOOT] %s=%s ignored: not below the current %u MHz\n", keys[i], e,
+                   s_clk_boot_hz[i] / 1000000u);
+            continue;
+        }
+        Result rc = clkrstSetClockRate(&s_clk[i], hz);
+        printf("[MH-BOOT] %s: %u -> %u MHz (rc 0x%x, now %u MHz)\n", keys[i],
+               s_clk_boot_hz[i] / 1000000u, hz / 1000000u, rc, clock_mhz(i));
+        changed |= R_SUCCEEDED(rc);
+    }
+    if (changed)
+        atexit(clocks_restore);
+}
+
+static u8 *volatile s_nxfps;
+static volatile u32 s_nxfps_cleared;
+static int nxfps_list(char *out, size_t n);
+extern void mcpx_apu_perf_read(uint64_t out[7]);
+
+static void perf_main(void *arg)
+{
+    const u64 period = (u64)(intptr_t)arg * armGetSystemTickFreq();
+    u64 th_last[WD_MAX], idle_last[3] = {0}, t_last = armGetSystemTick();
+    int core_ok[3], seen = 0;
+    Nv2aGlPerf g_last, g;
+    ManhuntAudioStats a_last, a;
+    uint64_t apu_last[7], apu[7];
+    int psm_ok = R_SUCCEEDED(psmInitialize());
+
+    for (int c = 0; c < 3; c++)
+        core_ok[c] = core_idle_ticks(c, &idle_last[c]);
+    nv2a_gl_perf_read(&g_last);
+    manhunt_audio_stats(&a_last);
+    mcpx_apu_perf_read(apu_last);
+    for (;;) {
+        svcSleepThread((s64)armTicksToNs(period));
+        const u64 t = armGetSystemTick(), dt = t - t_last;
+        const double secs = (double)armTicksToNs(dt) / 1e9;
+        char b[1024];
+        int n = 0;
+#define PERF_PUT(...) do { if (n < (int)sizeof b) n += snprintf(b + n, sizeof b - (size_t)n, __VA_ARGS__); } while (0)
+        nv2a_gl_perf_read(&g);
+        {
+            const double fr = (double)(g.frames - g_last.frames);
+            const double per = fr > 0 ? fr : 1;
+            const double draw = (g.draw_ns - g_last.draw_ns) / per / 1e6;
+            const double clear = (g.clear_ns - g_last.clear_ns) / per / 1e6;
+            const double flip = (g.flip_ns - g_last.flip_ns) / per / 1e6;
+            const double swap = (g.swap_ns - g_last.swap_ns) / per / 1e6;
+            const double frame = secs * 1e3 / per;
+            double rest = frame - draw - clear - flip;
+            if (rest < 0)
+                rest = 0;
+            PERF_PUT("[perf] %.1fs fps %.1f max %.0fms slow %llu | per frame %.1fms: draws %.0f verts %.0f idx %.0f"
+                     " | gl draw %.1f clear %.1f flip %.1f (swap %.1f) rest %.1f ms"
+                     " | tex %llu %.1fMB %.0fms progs %llu %.0fms",
+                     secs, fr / secs, g.max_frame_ns / 1e6,
+                     (unsigned long long)(g.slow_frames - g_last.slow_frames), frame,
+                     (g.draws - g_last.draws) / per, (g.verts - g_last.verts) / per,
+                     (g.indices - g_last.indices) / per, draw, clear, flip, swap, rest,
+                     (unsigned long long)(g.texs - g_last.texs),
+                     (g.tex_bytes - g_last.tex_bytes) / 1048576.0, (g.tex_ns - g_last.tex_ns) / 1e6,
+                     (unsigned long long)(g.progs - g_last.progs), (g.prog_ns - g_last.prog_ns) / 1e6);
+        }
+        {
+            const double per = g.frames > g_last.frames ? (double)(g.frames - g_last.frames) : 1.0;
+#define GL_MS(f) ((g.f - g_last.f) / per / 1e6)
+#define GL_CALLS(f) ((g.f - g_last.f) / per)
+            printf("[perf-gl] lookup %.3f upload %.3f uniform %.3f bind %.3f state %.3f submit %.3f other %.3f ms"
+                   " | maps %.1f uniforms %.1f bytes %.0f binds %.1f convattrs %.1f convverts %.0f"
+                   " | types %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f | qattr %.0f qsaved %.0f\n",
+                   GL_MS(lookup_ns), GL_MS(upload_ns), GL_MS(uniform_ns), GL_MS(bind_ns), GL_MS(state_ns), GL_MS(submit_ns), GL_MS(other_ns),
+                   GL_CALLS(maps), GL_CALLS(uniform_calls), GL_CALLS(uniform_bytes), GL_CALLS(texture_binds), GL_CALLS(converted_attrs), GL_CALLS(converted_verts),
+                   GL_CALLS(converted_type[0]), GL_CALLS(converted_type[1]), GL_CALLS(converted_type[2]), GL_CALLS(converted_type[3]),
+                   GL_CALLS(converted_type[4]), GL_CALLS(converted_type[5]), GL_CALLS(converted_type[6]), GL_CALLS(converted_type[7]),
+                   GL_CALLS(queue_attr_bytes), GL_CALLS(queue_attr_saved_bytes));
+#undef GL_MS
+#undef GL_CALLS
+        }
+        g_last = g;
+        PERF_PUT(" | cpu");
+        {
+            /* Threads register as they start: a new one is reported from the next period. */
+            const int registered = __atomic_load_n(&s_wd_n, __ATOMIC_SEQ_CST);
+            const int nth = registered < WD_MAX ? registered : WD_MAX;
+            int i;
+            const char *name;
+            for (i = 0; i < nth && (name = __atomic_load_n(&s_wd_name[i], __ATOMIC_ACQUIRE)); i++) {
+                const u64 now = thread_ticks(s_wd_h[i]);
+                if (i >= seen)
+                    PERF_PUT(" %s new", name);
+                else
+                    PERF_PUT(" %s %.0f%%", name, (now - th_last[i]) * 100.0 / (double)dt);
+                th_last[i] = now;
+            }
+            seen = i;
+        }
+        PERF_PUT(" | cores");
+        for (int c = 0; c < 3; c++) {
+            u64 idle = 0;
+            if (core_ok[c] && core_idle_ticks(c, &idle)) {
+                PERF_PUT(" %.0f%%", 100.0 - (idle - idle_last[c]) * 100.0 / (double)dt);
+                idle_last[c] = idle;
+            } else {
+                PERF_PUT(" ?");
+            }
+        }
+        manhunt_audio_stats(&a);
+        if (a.active) {
+            PERF_PUT(" | audio q %u/%u (%.1fms) underruns %u (+%u) played %.0f/s",
+                     a.queued, a.capacity, a.queued / 48.0, a.underruns,
+                     a.underruns - a_last.underruns,
+                     (a.consumed - a_last.consumed) / secs);
+        } else {
+            PERF_PUT(" | audio off");
+        }
+        a_last = a;
+        mcpx_apu_perf_read(apu);
+        if (a.active) {
+            /* Wall time includes preemption and guest ISR/DPC work. Buckets
+             * identify where the worker waits/spends time, not pure CPU cost. */
+            PERF_PUT(" | apu %.0f frames/s wall ms/s wait %.0f vp %.0f dsp %.0f out %.0f irq %.0f handoff %.0f",
+                     (apu[0] - apu_last[0]) / secs,
+                     (apu[1] - apu_last[1]) / (secs * 1000),
+                     (apu[2] - apu_last[2]) / (secs * 1000),
+                     (apu[3] - apu_last[3]) / (secs * 1000),
+                     (apu[4] - apu_last[4]) / (secs * 1000),
+                     (apu[5] - apu_last[5]) / (secs * 1000),
+                     (apu[6] - apu_last[6]) / (secs * 1000));
+        }
+        memcpy(apu_last, apu, sizeof apu_last);
+        if (s_nxfps) {
+            char list[64];
+            nxfps_list(list, sizeof list);
+            PERF_PUT(" | smon cleared %u magics %s", (unsigned)s_nxfps_cleared, list);
+        }
+        PERF_PUT(" | clk cpu %u gpu %u emc %u MHz", clock_mhz(0), clock_mhz(1), clock_mhz(2));
+        if (psm_ok) {
+            u32 pct = 0;
+            PsmChargerType ch = PsmChargerType_Unconnected;
+            psmGetBatteryChargePercentage(&pct);
+            psmGetChargerType(&ch);
+            PERF_PUT(" | bat %u%% %s", pct, ch == PsmChargerType_Unconnected ? "on battery" : "charging");
+        }
+#undef PERF_PUT
+        printf("%s\n", b);
+        t_last = t;
+    }
+}
+
+/* ---- frame rate for Status Monitor (SaltyNX) ----------------------------- */
+/* Status Monitor's FPS comes from NX-FPS, SaltyNX's plugin, which hooks the
+ * title's eglSwapBuffers import. The Mesa linked into this NRO has no import
+ * to hook, so the port publishes the same block itself: SaltyNX reserves a
+ * range of its shared memory page (command 6) and hands out the page
+ * (command 7); Status Monitor finds the block by its magic and shows FPS
+ * while pluginActive keeps coming back after it clears it. The layout is
+ * Status Monitor's NxFpsSharedBlock (174 bytes, packed). Without SaltyNX the
+ * port is absent and nothing happens. MANHUNT_STATUS_FPS=0 turns it off. */
+static u8 *volatile s_nxfps;
+static SharedMemory s_nxfps_shm;
+static volatile u32 s_nxfps_cleared;    /* times a reader reset pluginActive: Status Monitor found us */
+
+/* Every NX-FPS magic in SaltyNX's page: Status Monitor takes the first, so a
+ * block below ours (stale, or SaltyNX's own) hides this one. */
+static int nxfps_list(char *out, size_t n)
+{
+    const u8 *page = s_nxfps ? (const u8 *)shmemGetAddr(&s_nxfps_shm) : NULL;
+    int len = 0;
+    if (!page)
+        return snprintf(out, n, "none");
+    out[0] = 0;
+    for (u32 off = 0; off + 4 <= 0x1000; off += 4) {
+        u32 m;
+        memcpy(&m, page + off, 4);
+        if (m == NXFPS_MAGIC && len < (int)n)
+            len += snprintf(out + len, n - (size_t)len, "%s0x%x%s", len ? "," : "", (unsigned)off,
+                            page + off == s_nxfps ? "(ours)" : "");
+    }
+    return len;
+}
+
+static void salty_fps_main(void *unused)
+{
+    Handle port, shm = INVALID_HANDLE;
+    Service s;
+    u64 offset = 0;
+    (void)unused;
+    if (R_FAILED(svcConnectToNamedPort(&port, "SaltySD"))) {
+        printf("[MH-BOOT] status monitor fps: SaltyNX not running\n");
+        return;
+    }
+    serviceCreate(&s, port);
+    Result rc = serviceDispatch(&s, 7, .in_send_pid = true,
+                               .out_handle_attrs = {SfOutHandleAttr_HipcCopy}, .out_handles = &shm);
+    serviceDispatch(&s, 0, .in_send_pid = true);    /* end the session, as Status Monitor does */
+    serviceClose(&s);
+    if (R_FAILED(rc) || shm == INVALID_HANDLE) {
+        if (shm != INVALID_HANDLE) svcCloseHandle(shm);
+        printf("[MH-BOOT] status monitor fps: no shared memory (rc 0x%x)\n", rc);
+        return;
+    }
+    shmemLoadRemote(&s_nxfps_shm, shm, 0x1000, Perm_Rw);
+    if (R_FAILED(rc = shmemMap(&s_nxfps_shm))) {
+        printf("[MH-BOOT] status monitor fps: map failed (rc 0x%x)\n", rc);
+        shmemClose(&s_nxfps_shm);
+        return;
+    }
+    u8 *page = shmemGetAddr(&s_nxfps_shm);
+    const int first = manhunt_nxfps_first(page, 0x1000);
+    if (first >= 0) {
+        /* Sphaira can load several NROs in the same title process. The old
+         * reservations survive; a new block would remain hidden behind the
+         * first. Reuse that block only when its producer timing is stationary.
+         * Preserve every control/resolution field owned by SaltyNX or overlays. */
+        u8 before[48], after[48];
+        manhunt_nxfps_timing(page + first, before);
+        svcSleepThread(500000000);
+        manhunt_nxfps_timing(page + first, after);
+        if (memcmp(before, after, sizeof before)) {
+            printf("[MH-BOOT] status monitor fps: first block 0x%x has a live producer; leaving it alone\n", first);
+            shmemClose(&s_nxfps_shm);
+            return;
+        }
+        offset = (u64)first;
+        printf("[MH-BOOT] status monitor fps: reusing stationary first block 0x%x\n", first);
+    } else if (first == -2) {
+        printf("[MH-BOOT] status monitor fps: first magic has an incomplete block\n");
+        shmemClose(&s_nxfps_shm);
+        return;
+    } else {
+        if (R_FAILED(rc = svcConnectToNamedPort(&port, "SaltySD"))) {
+            shmemClose(&s_nxfps_shm);
+            return;
+        }
+        serviceCreate(&s, port);
+        const struct { u64 size; u32 reserved[2]; } in = {NXFPS_SIZE, {0, 0}};
+        rc = serviceDispatchInOut(&s, 6, in, offset, .in_send_pid = true);
+        serviceDispatch(&s, 0, .in_send_pid = true);
+        serviceClose(&s);
+        if (R_FAILED(rc) || (offset & 3) || offset > 0x1000 - NXFPS_SIZE) {
+            printf("[MH-BOOT] status monitor fps: reserve failed (rc 0x%x, offset 0x%llx)\n",
+                   rc, (unsigned long long)offset);
+            shmemClose(&s_nxfps_shm);
+            return;
+        }
+        u8 *fresh = page + offset;
+        const u32 magic = NXFPS_MAGIC;
+        memset(fresh + 4, 0, NXFPS_SIZE - 4);
+        fresh[NXFPS_BUFFERS] = fresh[NXFPS_SET_BUFFERS] = fresh[NXFPS_ACTIVE_BUFFERS] = 2;
+        fresh[NXFPS_SIZE - 1] = 0xff; /* expectedSetBuffers = -1, like NX-FPS */
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        memcpy(fresh, &magic, 4);
+    }
+    u8 *b = page + offset;
+    s_nxfps = b;
+    char list[128];
+    nxfps_list(list, sizeof list);
+    printf("[MH-BOOT] status monitor fps: block at offset 0x%llx; magics in the page: %s\n",
+           (unsigned long long)offset, list);
+}
+
+/* The renderer calls this after every present (nv2a_gl.c). */
+void nv2a_host_frame_presented(uint32_t width, uint32_t height)
+{
+    static u64 last, second_start, frame;
+    static u32 ticks[10], in_second;
+    static u8 fps;
+    static unsigned at;
+    u8 *b = s_nxfps;
+    const u64 now = armGetSystemTick(), freq = armGetSystemTickFreq();
+    (void)width;
+    (void)height;
+    frame++;
+    if (last) {
+        ticks[at++ % 10] = (u32)(now - last);
+        in_second++;
+    }
+    last = now;
+    if (now - second_start >= freq) {
+        fps = (u8)(in_second > 255 ? 255 : in_second);
+        in_second = 0;
+        second_start = now;
+    }
+    if (!b)
+        return;
+    u64 sum = 0;
+    for (int i = 0; i < 10; i++)
+        sum += ticks[i];
+    const float avg = sum ? (float)freq * 10.0f / (float)sum : 0.0f;
+    const u8 on = 1;
+    b[NXFPS_FPS] = fps;
+    memcpy(b + NXFPS_AVG, &avg, 4);
+    memcpy(b + NXFPS_TICKS, ticks, sizeof ticks);
+    memcpy(b + NXFPS_FRAME, &frame, 8);
+    if (!b[NXFPS_ACTIVE])
+        s_nxfps_cleared++;
+    b[NXFPS_ACTIVE] = on;
+}
+
+static void salty_fps_start(void)
+{
+    const char *e = getenv("MANHUNT_STATUS_FPS");
+    if (e && *e == '0')
+        return;
+    /* Its own thread: the boot must not wait on another process's IPC. */
+    static Thread thread;
+    if (R_FAILED(threadCreate(&thread, salty_fps_main, NULL, NULL, 0x4000, 0x2C, -2))
+        || R_FAILED(threadStart(&thread)))
+        printf("[MH-BOOT] status monitor fps: no thread\n");
+}
+
+static void perf_start(void)
+{
+    salty_fps_start();
+    clocks_open();
+    clocks_lower();
+    const char *e = getenv("MANHUNT_PERF_LOG");
+    int secs = e ? atoi(e) : 0;
+    if (secs <= 0)
+        return;
+    if (secs == 1)
+        secs = 2;
+    static Thread thread;
+    static const int prios[] = {0x10, 0x18, 0x20, 0x2B};
+    for (unsigned i = 0; i < sizeof prios / sizeof prios[0]; i++) {
+        if (R_SUCCEEDED(threadCreate(&thread, perf_main, (void *)(intptr_t)secs, NULL, 0x10000, prios[i], -2))
+            && R_SUCCEEDED(threadStart(&thread))) {
+            printf("[MH-BOOT] perf report every %d s\n", secs);
+            return;
+        }
+    }
+    printf("[MH-BOOT] perf report: no thread could start\n");
+}
+
 /* ---- crash report ------------------------------------------------------- */
 /* libnx runs this on a CPU exception (data abort, bad instruction, ...) in the
  * faulting process, on the exception stack below. It writes where the fault
@@ -555,6 +993,14 @@ static void config_init(void)
         {"RECOMP_TITLE_KEVENTS", "1"}, {"RECOMP_VBLANK", "paced"},
         {"RECOMP_DISPATCH_GATE", "1"}, {"RECOMP_FLIP_PACING", "1"},
         {"MANHUNT_DUMP_SECS", "15"},
+        /* Accepted on the console 2026-11-11/12 (reports/SWITCH_RUN_2026-11-11.md):
+         * GL upload/state paths, APU history window, critical-section resolver
+         * cache, contiguous reuse. Each takes =0 in manhunt.env or as an
+         * argument to restore the original path. */
+        {"MANHUNT_GL_PERSISTENT", "1"}, {"MANHUNT_GL_UBO", "1"},
+        {"MANHUNT_GL_STATE_CACHE", "1"}, {"MANHUNT_GL_CMP", "1"},
+        {"MANHUNT_GL_QUEUE_PACK", "1"}, {"MANHUNT_APU_FAST_HRTF", "1"},
+        {"MANHUNT_CS_CACHE", "1"}, {"MANHUNT_CONTIG_RECLAIM", "1"},
     };
     for (size_t i = 0; i < sizeof defaults / sizeof defaults[0]; i++)
         setenv(defaults[i][0], defaults[i][1], 1);
@@ -677,6 +1123,7 @@ static void *guest_main(void *xbe_arg)
     pthread_t dumper;
     pthread_create(&dumper, NULL, frame_dumper, NULL);
     pthread_detach(dumper);
+    perf_start();
 
     printf("[MH-BOOT] entry 0x%08X esp=0x%08X\n", MANHUNT_ENTRY_POINT, g_esp);
     xbe_entry_point();
@@ -684,7 +1131,7 @@ static void *guest_main(void *xbe_arg)
     return NULL;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     struct { void *data; size_t size; } xbe;
     pthread_t guest;
@@ -693,6 +1140,16 @@ int main(void)
     log_init();
     printf("[MH-BOOT] start (Horizon) game_dir=%s\n", GAME_DIR);
     config_init();
+    /* KEY=VALUE arguments override manhunt.env: "nxlink manhunt.nro KEY=VALUE ..."
+     * runs a test configuration without touching the card. */
+    for (int i = 1; i < argc; i++) {
+        char *eq = strchr(argv[i], '=');
+        if (!eq || eq == argv[i])
+            continue;
+        *eq = 0;
+        setenv(argv[i], eq + 1, 1);
+        printf("[MH-BOOT] argument %s=%s\n", argv[i], eq + 1);
+    }
     if (__nxlink_host.s_addr && R_SUCCEEDED(socketInitializeDefault()))
         s_nx_sock = nxlinkStdio();        /* started by "nxlink -s": keep its stream */
     tcp_log_connect();

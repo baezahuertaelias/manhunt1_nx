@@ -14,5 +14,18 @@
     ]
   },
   "why": "LEVEL-LOAD-001: repeated unresolved runtime ICALL target 0x0005C620 during level load; original pointer at .rdata VA 0x002AAFF4. Entry follows jump-table bytes misaligned by the linear sweep; bounded decode from push ebx at 0x0005C620 through ret 4 at 0x0005C699 ends exclusively at 0x0005C69C."
+},
+{
+  "add": {
+    "start": "0x0006F9E0",
+    "end": "0x0006FA3B",
+    "section": ".text",
+    "num_instructions": 30,
+    "calls_to": [
+      "0x0006E2B0", "0x0006F440", "0x0006D070", "0x0006F800",
+      "0x0004F710", "0x00050A20", "0x0006D9C0", "0x0006D610"
+    ]
+  },
+  "why": "FIGHT-PERF-001: unresolved runtime ICALL target 0x0006F9E0, 100-200 times a second in the level's fights (console runs fight-a and perf, 2026-11-10); original pointer in a vtable at .rdata VA 0x002AB790. Entry follows jump-table bytes after sub_0006F800 (ends 0x0006F9BB) and NOP padding; bounded decode from push esi at 0x0006F9E0 through the tail jmp 0x0006D610 and pop esi; ret at 0x0006FA3A ends exclusively at 0x0006FA3B."
 }
 ]

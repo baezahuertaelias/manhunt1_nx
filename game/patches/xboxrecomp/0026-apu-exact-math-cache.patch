@@ -1,0 +1,88 @@
+--- /dev/null
++++ b/src/apu/apu_math_cache.h
+@@ -0,0 +1,47 @@
++/* Exact value caches for the Switch's CPU-bound voice mixer. */
++#ifndef MANHUNT_APU_MATH_CACHE_H
++#define MANHUNT_APU_MATH_CACHE_H
++#include <math.h>
++#include <stdint.h>
++#include <string.h>
++#if defined(__SWITCH__) || defined(MANHUNT_APU_MATH_CACHE_TEST)
++#include <pthread.h>
++static pthread_once_t apu_volume_once = PTHREAD_ONCE_INIT;
++static float apu_volume_table[4096];
++static void apu_volume_init(void)
++{
++    for (unsigned v = 0; v < 4095; ++v)
++        apu_volume_table[v] = powf(10.0f, v / (64.0f * -20.0f));
++    apu_volume_table[4095] = 0.0f;
++}
++static inline float apu_attenuation_cached(uint16_t volume)
++{
++    pthread_once(&apu_volume_once, apu_volume_init);
++    return apu_volume_table[volume & 0xFFF];
++}
++static inline float apu_pow2_cached(float exponent)
++{
++    /* Pitch and filter cutoffs often repeat across voices and frames. The
++     * key is the exact input float, not a quantized pitch or approximation. */
++    typedef struct { uint32_t key; float value; unsigned valid; } Entry;
++    static _Thread_local Entry cache[256];
++    uint32_t key;
++    memcpy(&key, &exponent, 4);
++    unsigned slot = ((key >> 12) ^ (key >> 20) ^ key) & 255;
++    Entry *entry = &cache[slot];
++    if (!entry->valid || entry->key != key) {
++        entry->value = powf(2.0f, exponent);
++        entry->key = key;
++        entry->valid = 1;
++    }
++    return entry->value;
++}
++#else
++static inline float apu_attenuation_cached(uint16_t volume)
++{
++    volume &= 0xFFF;
++    return volume == 0xFFF ? 0.0f : powf(10.0f, volume / (64.0f * -20.0f));
++}
++static inline float apu_pow2_cached(float exponent) { return powf(2.0f, exponent); }
++#endif
++#endif
+--- a/src/apu/apu_vp.c
++++ b/src/apu/apu_vp.c
+@@ -22,6 +22,7 @@
+ #include "apu_state.h"
+ #include "apu.h"
+ #include "fpconv.h"
++#include "apu_math_cache.h"
+
+ /* #define DEBUG_MCPX */
+
+@@ -99,8 +100,7 @@
+
+ static float attenuate(uint16_t vol)
+ {
+-    vol &= 0xFFF;
+-    return (vol == 0xFFF) ? 0.0f : powf(10.0f, vol / (64.0f * -20.0f));
++    return apu_attenuation_cached(vol);
+ }
+
+ /* ============================================================
+@@ -1441,7 +1441,7 @@
+                                          NV_PAVS_VOICE_TAR_PITCH_LINK_PITCH);
+     int8_t ps = (int8_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_ENV0,
+                                         NV_PAVS_VOICE_CFG_ENV0_EF_PITCHSCALE);
+-    float rate = 1.0f / powf(2.0f, (p + ps * 32 * ef_value) / 4096.0f);
++    float rate = 1.0f / apu_pow2_cached((p + ps * 32 * ef_value) / 4096.0f);
+     dbg->rate = rate;
+
+     /* Step amplitude envelope */
+@@ -1555,7 +1555,7 @@
+             int16_t fc = (int16_t)voice_get_mask(
+                 d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
+                 NV_PAVS_VOICE_TAR_FCA_FC0);
+-            float fc_f = clampf(powf(2, fc / 4096.0f), 0.003906f, 1.0f);
++            float fc_f = clampf(apu_pow2_cached(fc / 4096.0f), 0.003906f, 1.0f);
+             uint16_t q = (uint16_t)voice_get_mask(
+                 d, v, NV_PAVS_VOICE_TAR_FCA + (ch % channels) * 4,
+                 NV_PAVS_VOICE_TAR_FCA_FC1);

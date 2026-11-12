@@ -1,0 +1,72 @@
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -196,6 +196,8 @@
+      * and equal direct[] pointers read the same vertex bytes, so a back end
+      * may reuse what it uploaded for the first (instancing). */
+     uint32_t        vtx_epoch;
++    /* RAW_LIGHTING: bit 0 shader lighting, bit 1 flip normals, bit 2 valid diffuse array. */
++    uint32_t        lighting;
+ } Nv2aRawBatch;
+
+ /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */
+@@ -265,6 +267,7 @@
+  * RECOMP_GL_DIRECT=0 turns it off at run time. */
+ #define NV2A_BACKEND_RAW_DIRECT 0x1u
+ #define NV2A_BACKEND_DEFERRED_RAM 0x2u
++#define NV2A_BACKEND_RAW_LIGHTING 0x4u
+
+ static inline int nv2a_backend_contract_valid(const Nv2aBackend *b)
+ {
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -3354,7 +3354,7 @@
+     Nv2aRawBatch rb;
+     uint32_t lo = 0xFFFFFFFFu, hi = 0, i, a, nv;
+     uint16_t present = 0, direct = 0;
+-    int lit;
++    int lit, shader_lit = 0;
+
+     for (i = 0; i < s_gpu.idx_count; i++) {
+         if (s_gpu.idx[i] < lo) lo = s_gpu.idx[i];
+@@ -3390,7 +3390,22 @@
+     /* The same test lit_color() and ffp_vertex() make. Lit colours go up as converted attributes, which are copied
+      * fresh for every draw, so nothing reuses one batch's colours for another. */
+     lit = batch_is_ffp() && !batch_uses_program() && s_reg[0x0314 / 4] && s_gpu.attr[2].size && raw_light_on();
+-    if (lit) {
++    if (lit && (s_backend->flags & NV2A_BACKEND_RAW_LIGHTING)) {
++        float sample[4];
++        const VertexAttr *ca = color_attr();
++        const uint32_t cm = s_reg[0x0298 / 4];
++        const int uses_vc = ((cm >> 2) & 3) == 1 || ((cm >> 4) & 3) == 1;
++        /* Endpoint fetches validate the same contiguous arrays as lit_color.
++         * Unusual colour slots keep the original CPU path. */
++        shader_lit = (present & 5) == 5 && (!uses_vc || ca == &s_gpu.attr[3])
++            && fetch_attr(&s_gpu.attr[0], lo, sample) && fetch_attr(&s_gpu.attr[0], hi, sample)
++            && fetch_attr(&s_gpu.attr[2], lo, sample) && fetch_attr(&s_gpu.attr[2], hi, sample);
++        if (shader_lit) {
++            int vc = fetch_attr(ca, lo, sample) && fetch_attr(ca, hi, sample);
++            rb.lighting = 1u | (ffp_flip_normals() ? 2u : 0u) | (vc ? 4u : 0u);
++        }
++    }
++    if (lit && !shader_lit) {
+         direct &= (uint16_t)~(1u << 3);
+         rb.attr_direct = direct;
+     }
+@@ -3399,7 +3414,7 @@
+          * normals, arrays that run off their buffer). Most batches have
+          * nothing left here. */
+         uint16_t conv = present & (uint16_t)~direct;
+-        if (lit)
++        if (lit && !shader_lit)
+             conv &= (uint16_t)~(1u << 3);       /* filled below */
+         for (a = 0; conv && a < NV2A_RAW_ATTRS; a++) {
+             if (!(conv & (1u << a)))
+@@ -3418,7 +3433,7 @@
+             }
+         }
+     }
+-    if (lit) {
++    if (lit && !shader_lit) {
+         const int timed = nv2a_profile_enabled();
+         const uint64_t t0 = timed ? xbox_HostNowNs() : 0;
+         for (i = 0; i < nv; i++) {

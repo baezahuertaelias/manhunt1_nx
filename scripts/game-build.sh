@@ -69,7 +69,7 @@ if [ "$variant" = switch ]; then
     --mount "type=bind,src=$root,dst=/repo" -w /repo/game "$DEVKITA64_IMAGE" bash -c '
 set -euo pipefail
 cmake -S . -B build/switch -G "Unix Makefiles" -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake \
-  -DCMAKE_BUILD_TYPE=Release > build/logs/cmake-switch.log
+  -DCMAKE_BUILD_TYPE=Release -DMANHUNT_GEN_OPT=-O2 > build/logs/cmake-switch.log
 if ! make -C build/switch -k -j'"$CPUS"' > build/logs/build-switch.log 2>&1; then tail -60 build/logs/build-switch.log; exit 1; fi
 ls -la build/switch/manhunt.nro'
 fi

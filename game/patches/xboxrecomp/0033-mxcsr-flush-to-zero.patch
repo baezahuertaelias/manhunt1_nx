@@ -1,0 +1,53 @@
+--- a/templates/runtime/recomp_types.h
++++ b/templates/runtime/recomp_types.h
+@@ -294,6 +294,27 @@
+  * flags (bits 0-5) are not modelled and read as clear, as the x87 status
+  * word's exception byte is not. */
+ extern RECOMP_TLS uint32_t g_mxcsr;
++
++/* LDMXCSR. Flush-to-zero (bit 15) and denormals-are-zero (bit 6) change
++ * results, so they reach the host: RenderWare's SSE setup sets FTZ, and its
++ * normalize relies on it. A tiny vector's squared length flushes to zero and
++ * the masked rsqrt gives a zero vector; kept as a denormal it gives
++ * 0 * inf = NaN (Manhunt's hunter position). AArch64 FPCR.FZ (bit 24) flushes
++ * both inputs and outputs; it is per thread, as MXCSR is. */
++static inline void recomp_ldmxcsr(uint32_t value) {
++    g_mxcsr = value;
++    int flush = (value & 0x8040u) != 0;
++#if defined(__aarch64__)
++    uint64_t fpcr;
++    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
++    uint64_t want = flush ? (fpcr | (1ull << 24)) : (fpcr & ~(1ull << 24));
++    if (want != fpcr) __asm__ volatile("msr fpcr, %0" : : "r"(want));
++#elif defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
++    _mm_setcsr((_mm_getcsr() & ~0x8040u) | (value & 0x8040u));
++#else
++    (void)flush;
++#endif
++}
+ /* x87 precision control (control word bits 8-9). The stack is double-backed,
+  * which matches PC=53 and is close enough for PC=64, but PC=24 -- what the
+  * Xbox runs with -- rounds every arithmetic result to float. A title that
+--- a/tools/recomp/lifter.py
++++ b/tools/recomp/lifter.py
+@@ -1746,7 +1746,8 @@
+                 return self._unimplemented(insn, m)
+             if m == "stmxcsr":
+                 return [f"MEM32({_fmt_mem(ops[0])}) = g_mxcsr; /* stmxcsr {insn.op_str} */"]
+-            return [f"g_mxcsr = MEM32({_fmt_mem(ops[0])}); /* ldmxcsr {insn.op_str} */"]
++            # FTZ/DAZ change results, so the load also reaches the host FPU.
++            return [f"recomp_ldmxcsr(MEM32({_fmt_mem(ops[0])})); /* ldmxcsr {insn.op_str} */"]
+ 
+         # ── FPU ──
+         if m.startswith("f"):
+--- a/tools/recomp/test_lifter_mxcsr.py
++++ b/tools/recomp/test_lifter_mxcsr.py
+@@ -47,7 +47,7 @@
+             Lifter().lift_instruction(
+                 _insn("ldmxcsr", "dword ptr [esp + 4]",
+                       [Operand(type="mem", mem_base="esp", mem_disp=4, mem_size=4)])),
+-            ["g_mxcsr = MEM32(esp + 4); /* ldmxcsr dword ptr [esp + 4] */"],
++            ["recomp_ldmxcsr(MEM32(esp + 4)); /* ldmxcsr dword ptr [esp + 4] */"],
+         )
+ 
+     def test_neither_changes_eflags(self):

@@ -17,6 +17,11 @@ int main(void)
     pull(NULL, (Uint8 *)result, 7000 * FRAME_BYTES);
     assert(!memcmp(result, samples, 7000 * FRAME_BYTES));
     assert(xa2_samples_played() == 7000);
+    ManhuntAudioStats stats;
+    manhunt_audio_stats(&stats);
+    assert(stats.active && stats.capacity == CAPACITY);
+    assert(stats.queued == CAPACITY - 7000 && stats.consumed == 7000);
+    assert(stats.underruns == 0);
     assert(xa2_submit_samples(samples, 7000)); /* ring wraps */
     pull(NULL, (Uint8 *)result, CAPACITY * FRAME_BYTES);
     assert(!memcmp(result, samples + 7000 * 2, (CAPACITY - 7000) * FRAME_BYTES));
@@ -26,6 +31,9 @@ int main(void)
     pull(NULL, (Uint8 *)result, 32);
     for (int i = 0; i < 16; ++i) assert(!result[i]);
     assert(xa2_underruns() == 1);
+    manhunt_audio_stats(&stats);
+    assert(stats.queued == 0 && stats.underruns == 1);
+    assert(stats.consumed == 7000 + CAPACITY); /* inserted silence is excluded */
     pull(NULL, (Uint8 *)result, 32);
     assert(xa2_underruns() == 1);
     assert(xa2_submit_samples(samples, 1));
@@ -33,6 +41,8 @@ int main(void)
     pull(NULL, (Uint8 *)result, 32);
     assert(xa2_underruns() == 1);
     xa2_shutdown();
+    manhunt_audio_stats(&stats);
+    assert(!stats.active && !stats.queued && !stats.consumed && !stats.underruns);
     assert(!xa2_is_active() && !xa2_submit_samples(samples, 1));
     assert(xa2_init());
     assert(xa2_submit_samples(samples, 512));

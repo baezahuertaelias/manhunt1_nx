@@ -1,0 +1,43 @@
+--- a/src/kernel/kernel_rtl.c
++++ b/src/kernel/kernel_rtl.c
+@@ -269,6 +269,20 @@
+         return NULL;
+     home = (size_t)((key >> 4) % XBOX_CS_TABLE_SIZE);
+ 
++    /* Slots are never deleted or moved. A pointer obtained under the table
++     * lock remains valid for this process, so hot guest locks need not take
++     * the global table rwlock again. This caches the resolver only: the real
++     * recursive guest mutex is still acquired and released on every call. */
++    static RECOMP_TLS struct { uintptr_t key; CRITICAL_SECTION *cs; } cache[8];
++    static RECOMP_TLS int cache_enabled = -1;
++    if (cache_enabled < 0) {
++        const char *e = getenv("MANHUNT_CS_CACHE");
++        cache_enabled = e && *e == '1'; /* opt-in pending console acceptance */
++    }
++    size_t cached = ((key >> 4) ^ (key >> 12)) & 7u;
++    if (cache_enabled && cache[cached].key == key)
++        return cache[cached].cs;
++
+     /* Shared pass first: after start-up almost every call finds an existing
+      * entry, and taking the table exclusively for each of those would put a
+      * global serialisation point in front of the title's own locks. */
+@@ -279,8 +293,10 @@
+         if (slot->key == 0) break;
+     }
+     ReleaseSRWLockShared(&g_cs_table_lock);
+-    if (found)
++    if (found) {
++        if (cache_enabled) { cache[cached].key = key; cache[cached].cs = found; }
+         return found;
++    }
+ 
+     AcquireSRWLockExclusive(&g_cs_table_lock);
+     for (i = 0; i < XBOX_CS_TABLE_SIZE; i++) {
+@@ -303,6 +319,7 @@
+                  "critical-section table full at %d entries; further locks "
+                  "are unprotected", XBOX_CS_TABLE_SIZE);
+     }
++    if (found && cache_enabled) { cache[cached].key = key; cache[cached].cs = found; }
+     return found;
+ }
+ 

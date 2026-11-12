@@ -10,3 +10,7 @@ ulimit -c 0
 cc -std=c11 -Wall -Wextra -Werror -pthread -I"$root/game/build/xboxrecomp/src/apu" \
  "$root/tests/audio-apu/test_sdl.c" $(pkg-config --cflags --libs sdl2) -o "$out/sdl"
 "$out/sdl"
+cc -std=c11 -O2 -ffp-contract=off -Wall -Wextra -Werror -pthread \
+ -I"$root/game/build/xboxrecomp/src/apu" \
+ "$root/tests/audio-apu/test_math_cache.c" -lm -o "$out/math-cache"
+"$out/math-cache"

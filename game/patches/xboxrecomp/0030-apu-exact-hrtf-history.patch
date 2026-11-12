@@ -1,0 +1,81 @@
+--- /dev/null
++++ b/src/apu/apu_hrtf_fast.h
+@@ -0,0 +1,49 @@
++/* Exact HRTF convolution with a frame-local mirrored circular history.
++ * Smoothing, interpolation and accumulation order match apu_state.h. No
++ * persistent cache, coefficient approximation, tap or voice is omitted. */
++#ifndef MANHUNT_APU_HRTF_FAST_H
++#define MANHUNT_APU_HRTF_FAST_H
++static inline void hrtf_filter_process_fast(HrtfFilter *f, float in[][2], float out[][2])
++{
++    float history[2][HRTF_BUFLEN * 2];
++    if (!(fabsf(f->itd_cur) <= HRTF_MAX_DELAY_SAMPLES) ||
++        !(fabsf(f->itd_tar) <= HRTF_MAX_DELAY_SAMPLES) ||
++        f->buf_pos < 0 || f->buf_pos >= HRTF_BUFLEN) {
++        hrtf_filter_process(f, in, out);
++        return;
++    }
++    for (int ch = 0; ch < 2; ch++) {
++        memcpy(history[ch], f->ch[ch].buf, sizeof f->ch[ch].buf);
++        memcpy(history[ch] + HRTF_BUFLEN, f->ch[ch].buf, sizeof f->ch[ch].buf);
++    }
++    for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
++        hrtf_filter_step_parameters(f);
++        for (int ch = 0; ch < 2; ch++) {
++            float *buf = history[ch];
++            float *coeff = f->ch[ch].hrir_coeff_cur;
++            buf[f->buf_pos] = buf[f->buf_pos + HRTF_BUFLEN] = in[n][ch];
++            float d = f->itd_cur * (ch == 0 ? +1.0f : -1.0f);
++            if (d < 0.0f) d = 0.0f;
++            int di = (int)d;
++            float dfrac = d - di;
++            /* 31 taps + maximum 42 samples of delay fit the 73-sample
++             * history; the extra mirror also covers the fractional tap. */
++            const float *at = buf + f->buf_pos + HRTF_BUFLEN - di;
++            float acc = 0.0f;
++            if (dfrac > 0.0f) {
++                for (int k = 0; k < HRTF_NUM_TAPS; k++) {
++                    float s = at[-k] * (1 - dfrac) + at[-k - 1] * dfrac;
++                    acc += coeff[k] * s;
++                }
++            } else {
++                for (int k = 0; k < HRTF_NUM_TAPS; k++)
++                    acc += coeff[k] * at[-k];
++            }
++            out[n][ch] = acc;
++        }
++        if (++f->buf_pos == HRTF_BUFLEN) f->buf_pos = 0;
++    }
++    for (int ch = 0; ch < 2; ch++)
++        memcpy(f->ch[ch].buf, history[ch], sizeof f->ch[ch].buf);
++}
++#endif
+--- a/src/apu/apu_state.h
++++ b/src/apu/apu_state.h
+@@ -285,6 +285,8 @@
+     }
+ }
+ 
++#include "apu_hrtf_fast.h"
++
+ /* ============================================================
+  * ADPCM Decoder - from vp/adpcm.h
+  * ============================================================ */
+--- a/src/apu/apu_vp.c
++++ b/src/apu/apu_vp.c
+@@ -1581,7 +1581,14 @@
+             (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
+                                      NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
+         if (hrtf_handle != HRTF_NULL_HANDLE) {
+-            hrtf_filter_process(&d->vp.filters[v].hrtf, samples, samples);
++            static int fast_hrtf = -1;
++            if (fast_hrtf < 0) {
++                fast_hrtf = apu_env_on("MANHUNT_APU_FAST_HRTF");
++                fprintf(stderr, "[APU] exact HRTF convolution: %s (MANHUNT_APU_FAST_HRTF)\n",
++                        fast_hrtf ? "contiguous history" : "original ring");
++            }
++            if (fast_hrtf) hrtf_filter_process_fast(&d->vp.filters[v].hrtf, samples, samples);
++            else hrtf_filter_process(&d->vp.filters[v].hrtf, samples, samples);
+         }
+     }
+ 

@@ -165,6 +165,35 @@ static void fenced_real_test(void)
     puts("PASS real GL fenced raw draw/publish boundaries, clean CPU edits and render-target feedback");
     clear_only_present_test();cpu_only_present_test();
 }
+/* Full shader assembly + direct CMP queue copy + combined ring submission.
+ * Alternating CMP and float batches must reset the program's decode mask. */
+static void packed_cmp_draw_test(void)
+{
+    Nv2aSurface sf=surface(8,8,32);
+    Nv2aRenderState rs={0};
+    if(queued_mode)q_clear(&sf,&rs,0xf0,0,0);else gl_clear(&sf,&rs,0xf0,0,0);
+    float attrs[3*64]={0}; const float pos[6]={0,0,8,0,0,8};
+    uint32_t indices[3]={0,1,2}, packed[3]={1023,1023,1023};
+    for(unsigned i=0;i<3;i++) {attrs[i*64]=pos[i*2];attrs[i*64+1]=pos[i*2+1];attrs[i*64+3]=1;}
+    regs[0x288/4]=4;regs[0x28c/4]=0x14<<8;regs[0x1e70/4]=0;regs[0x1b0c/4]=0;
+    Nv2aRawBatch b={0};b.surface=sf;b.regs=regs;b.prim=5;b.vertex_count=b.index_count=3;
+    b.indices=indices;b.attrs=attrs;b.attr_present=9;b.attr_direct=8;
+    b.direct[3].ptr=(const uint8_t *)packed;b.direct[3].type=6;b.direct[3].size=3;b.direct[3].stride=4;
+    for(int pass=0;pass<5;pass++) {
+        for(int i=0;i<3;i++)packed[i]=(pass%2)?(1023u<<11):1023;
+        if(queued_mode)q_draw(&b);else gl_draw_raw(&b);
+        complete(); assert(color_ram(&sf)[9]==((pass%2)?0xff00ff00u:0xffff0000u));
+        if(queued_mode)q_flip();else gl_flip();
+    }
+    triangle(sf,0,0,0,8,0,0,8);complete();assert(color_ram(&sf)[9]==0xffff0000);
+    Nv2aGlPerf perf;nv2a_gl_perf_read(&perf);
+    if(perf_detail()) {
+        uint64_t sum=perf.lookup_ns+perf.upload_ns+perf.uniform_ns+perf.bind_ns+perf.state_ns+perf.submit_ns+perf.other_ns;
+        assert(sum<=perf.draw_ns && sum>=perf.draw_ns*9/10);
+        assert(perf.submit_ns && perf.uniform_calls && perf.maps);
+    }
+    puts("PASS real GL direct CMP production shaders/queue, alternating colors, float reset, segmented streaming and profiling sum");
+}
 int main(int argc,char **argv)
 {
 #if defined(__linux__)
@@ -175,16 +204,17 @@ int main(int argc,char **argv)
         setenv("MANHUNT_GL_SYNC","fenced",1);
         if(strstr(argv[1],"queued")){queued_mode=s_q_on=1;assert(q_start());}
         else assert(ready());
-        fenced_real_test();puts("PASS experimental fenced ownership synthetic proof; arbitrary unsynchronized CPU access and hardware performance UNVERIFIED");
+        fenced_real_test();packed_cmp_draw_test();puts("PASS experimental fenced ownership synthetic proof; arbitrary unsynchronized CPU access and hardware performance UNVERIFIED");
         fflush(stdout);_Exit(0);
     }
     if(argc>1){
-        queued_mode=s_q_on=1;assert(q_start());clear_only_present_test();cpu_only_present_test();
+        queued_mode=s_q_on=1;assert(q_start());clear_only_present_test();cpu_only_present_test();packed_cmp_draw_test();
         puts("PASS real GL queued draw/sync/presentation returns after consuming guest RAM");
         fflush(stdout);_Exit(0);
     }
     assert(ready());
     clear_only_present_test();clear_depth_test();linear_color_formats_test();draw_sample_test();render_target_feedback_test();wide_reset_test();cpu_only_present_test();
+    packed_cmp_draw_test();
     puts("PASS real GL production-path synthetic suite; gameplay/hardware parity UNVERIFIED");
     return 0;
 }
