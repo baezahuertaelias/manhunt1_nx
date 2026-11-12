@@ -62,6 +62,49 @@ static void site_hit(uint32_t fn, uint32_t ret)
     atomic_fetch_add_explicit(&s_site_count[i], 1, memory_order_relaxed);
 }
 
+/* Intersection inputs. At the hook the caller has pushed its arguments and
+ * return address, so arg k is MEM32(g_esp + 4k). 0x000E2F50 is called as
+ * (query, element) from the loop at 0x000DC8B0, whose query floats are
+ * compared with a frame position; 0x000E2430's layout is unknown. For both,
+ * the first eight floats behind each of the first two pointer arguments are
+ * checked. The first nonfinite input names the call site and the guest stack;
+ * nothing is repaired. */
+static int guest_data(uint32_t p)
+{
+    return (p >= 0x00010000u && p + 32u <= 0x04000000u) ||
+           (p >= 0x80000000u && p + 32u <= 0x84000000u);
+}
+
+static void check_intsec_args(uint32_t va)
+{
+    static _Atomic uint32_t s_bad, s_logged;
+    uint32_t ret = MEM32(g_esp);
+    for (uint32_t k = 1; k <= 2; k++) {
+        uint32_t p = MEM32(g_esp + 4u * k), w[8];
+        int bad = -1;
+        if (!guest_data(p)) continue;
+        for (int j = 0; j < 8; j++) {
+            w[j] = MEM32(p + 4u * (uint32_t)j);
+            if (bad < 0 && (w[j] & 0x7f800000u) == 0x7f800000u) bad = j;
+        }
+        if (bad < 0) continue;
+        uint32_t n = atomic_fetch_add_explicit(&s_bad, 1, memory_order_relaxed) + 1;
+        if ((n & (n - 1)) != 0 || atomic_fetch_add_explicit(&s_logged, 1, memory_order_relaxed) >= 24)
+            return;                                       /* log occurrences 1, 2, 4, 8, ... */
+        char line[512];
+        int len = snprintf(line, sizeof line,
+                           "[MH-INTSEC] nonfinite #%u fn %08X<-%08X arg%u 0x%08X float %d:",
+                           n, va, ret, k, p, bad);
+        for (int j = 0; j < 8 && len > 0 && (size_t)len < sizeof line; j++)
+            len += snprintf(line + len, sizeof line - (size_t)len, " %08X", w[j]);
+        len += snprintf(line + len, sizeof line - (size_t)len, " | stack");
+        for (uint32_t s = 3; s < 19 && len > 0 && (size_t)len < sizeof line; s++)
+            len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(g_esp + 4u * s));
+        fprintf(stderr, "%s\n", line);
+        return;
+    }
+}
+
 /* Every call site above 256 calls in the window: callee<-return address:count. */
 static void dump_sites(void)
 {
@@ -132,7 +175,11 @@ void recomp_call_profile_hit(uint32_t va)
     }
     atomic_fetch_add_explicit(&s_count[i], 1, memory_order_relaxed);
     for (uint32_t w = 0; w < WATCH; w++)
-        if (va == k_watch[w]) { site_hit(va, MEM32(g_esp)); break; }
+        if (va == k_watch[w]) {
+            site_hit(va, MEM32(g_esp));
+            if (va == 0x000E2F50u || va == 0x000E2430u) check_intsec_args(va);
+            break;
+        }
 
     if ((atomic_fetch_add_explicit(&s_hits, 1, memory_order_relaxed) & 0xFFFFu) == 0 &&
         !atomic_flag_test_and_set(&s_dumping)) {
