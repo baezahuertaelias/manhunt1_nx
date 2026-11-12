@@ -186,6 +186,32 @@ static void nan_watch_check(uint32_t va, uint32_t ret)
  * from 0x000DE570, which transforms each 0x38-byte element's two points by
  * one matrix. Check that call's input point and matrix as it is made, and
  * watch both while finite so a later run brackets their writer. */
+/* Matrices used by 0x000DE570's collision transforms (the hunter's among
+ * them). The velocity watch below only follows objects whose frame is one of
+ * these, so ordinary moving props cannot rotate the hunter out of the slots. */
+#define ENTITY_MTX 32u
+static _Atomic uint32_t s_entity_mtx[ENTITY_MTX];
+
+static void remember_entity_matrix(uint32_t mtx)
+{
+    for (uint32_t i = 0; i < ENTITY_MTX; i++) {
+        uint32_t cur = atomic_load_explicit(&s_entity_mtx[i], memory_order_relaxed);
+        if (cur == mtx) return;
+        if (!cur) {
+            uint32_t expected = 0;
+            if (atomic_compare_exchange_strong(&s_entity_mtx[i], &expected, mtx) || expected == mtx)
+                return;
+        }
+    }
+}
+
+static int is_entity_matrix(uint32_t mtx)
+{
+    for (uint32_t i = 0; i < ENTITY_MTX; i++)
+        if (atomic_load_explicit(&s_entity_mtx[i], memory_order_relaxed) == mtx) return 1;
+    return 0;
+}
+
 static void check_transform_args(uint32_t ret)
 {
     static _Atomic uint32_t s_logged;
@@ -205,6 +231,7 @@ static void check_transform_args(uint32_t ret)
              * pos at +0x30) kept a finite rotation while pos went 0xFFC00000,
              * so watch the position x, not word 0. */
             nan_watch_add(mtx + 0x30u);
+            remember_entity_matrix(mtx);
         }
         return;
     }
@@ -223,6 +250,33 @@ static void check_transform_args(uint32_t ret)
     for (uint32_t s = 5; s < 17 && len > 0 && (size_t)len < sizeof line; s++)
         len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(g_esp + 4u * s));
     fprintf(stderr, "%s\n", line);
+}
+
+/* Run 20261112-005348-all: the hunter matrix position turned 0xFFC00000 in
+ * 0x00169370, a per-object step: if (obj+0x34) { tmp = obj+0x28 (velocity)
+ * scaled by the float at 0x309F28 (dt); frame (obj+8) matrix pos (+0x30) +=
+ * tmp }. Log a nonfinite velocity or dt at that call and watch every
+ * object's velocity while finite, to bracket its writer. */
+static void check_velocity_step(void)
+{
+    static _Atomic uint32_t s_logged;
+    uint32_t obj = g_ecx, dt = MEM32(0x309F28u);
+    if (!guest_data(obj) || !MEM32(obj + 0x34u))
+        return;
+    uint32_t v[3] = { MEM32(obj + 0x28u), MEM32(obj + 0x2Cu), MEM32(obj + 0x30u) };
+    if (!nonfinite(v[0]) && !nonfinite(v[1]) && !nonfinite(v[2]) && !nonfinite(dt)) {
+        if (is_entity_matrix(MEM32(obj + 8u)))
+            nan_watch_add(obj + 0x28u);
+        return;
+    }
+    if (atomic_fetch_add_explicit(&s_logged, 1, memory_order_relaxed) < 16)
+        fprintf(stderr, "[MH-VELSTEP] obj %08X ret %08X velocity %08X %08X %08X dt %08X | obj+0..+0x40:"
+                " %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                obj, MEM32(g_esp), v[0], v[1], v[2], dt,
+                MEM32(obj), MEM32(obj + 4), MEM32(obj + 8), MEM32(obj + 12),
+                MEM32(obj + 16), MEM32(obj + 20), MEM32(obj + 24), MEM32(obj + 28),
+                MEM32(obj + 32), MEM32(obj + 36), MEM32(obj + 40), MEM32(obj + 44),
+                MEM32(obj + 48), MEM32(obj + 52), MEM32(obj + 56), MEM32(obj + 60));
 }
 
 /* Every call site above 256 calls in the window: callee<-return address:count. */
@@ -298,6 +352,7 @@ void recomp_call_profile_hit(uint32_t va)
         uint32_t ret = MEM32(g_esp);
         if (va == 0x000DCB90u) nan_watch_add(g_ecx);
         if (va == 0x001E3140u) check_transform_args(ret);
+        if (va == 0x00169370u) check_velocity_step();
         nan_watch_check(va, ret);
         t_prev_va = va;
         t_prev_ret = ret;
