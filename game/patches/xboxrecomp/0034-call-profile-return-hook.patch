@@ -1,0 +1,19 @@
+--- a/templates/runtime/recomp_types.h
++++ b/templates/runtime/recomp_types.h
+@@ -1174,11 +1174,12 @@
+         recomp_abi_violation_log((va), _ab, _as, _ad, _ap); \
+ } while(0)
+ #elif defined(RECOMP_CALL_PROFILE)
+-/* Opt-in profiling: every direct call reports its target to the project, which
+- * keeps the counts (a project defines recomp_call_profile_hit). Diffing the counts
+- * of two situations shows which functions one of them runs and the other does not. */
++/* Opt-in profiling: every direct call reports its target before it runs and
++ * its return after (a project defines both hooks), so a project can keep call
++ * counts or a shadow call stack to sample for a time profile. */
+ void recomp_call_profile_hit(uint32_t va);
+-#define RECOMP_ABI_CALL(va, fn) do { recomp_call_profile_hit(va); (fn)(); } while(0)
++void recomp_call_profile_ret(void);
++#define RECOMP_ABI_CALL(va, fn) do { recomp_call_profile_hit(va); (fn)(); recomp_call_profile_ret(); } while(0)
+ #else
+ #define RECOMP_ABI_CALL(va, fn) (fn)()
+ #endif

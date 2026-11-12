@@ -1,0 +1,17 @@
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -4234,6 +4234,14 @@
+     return c;
+ }
+ 
++/* Whether a flip is held right now, without polling it (no release). For a
++ * title-side KickOff replacement that acknowledges the PFB flush itself
++ * except while the ack loop withholds it for a flip. */
++int nv2a_pb_exec_flip_held(void)
++{
++    return __atomic_load_n(&s_flip_hold.held, __ATOMIC_ACQUIRE);
++}
++
+ /* Once per pass of the ack loop: 1 while a flip is held. */
+ int nv2a_pb_exec_flip_poll(void)
+ {
