@@ -279,6 +279,48 @@ static void check_velocity_step(void)
                 MEM32(obj + 48), MEM32(obj + 52), MEM32(obj + 56), MEM32(obj + 60));
 }
 
+/* Run 20261112-005919-all: the hunter physics object's velocity (+0x28) went
+ * from zero to 0xFFC00000 through SetVelocity (0x001691C0) called from the
+ * movement update 0x000BC610, whose vector is V3dAdd (0x00020950) of a local
+ * and entity data, after RwV3dTransformVectors (0x001E31D0) on two paths.
+ * At those call sites, dump the first three pointer arguments' first four
+ * floats the first times any is nonfinite, with the last finite dump of the
+ * same site, so one failing run shows which input goes bad first. */
+static const uint32_t k_trace_sites[] = {
+    0x000BC7CFu, 0x000BC867u,   /* RwV3dTransformVectors(out, in, count, matrix) */
+    0x000BC8DAu,                /* V3dAdd(out, a, b) */
+    0x000BC98Cu, 0x000BC9BBu,   /* SetVelocity(this=ecx, v) */
+};
+#define TRACE_SITES (sizeof k_trace_sites / sizeof k_trace_sites[0])
+static uint32_t s_site_good[TRACE_SITES][12];   /* racy snapshot; evidence only */
+static _Atomic uint32_t s_site_bad_logs[TRACE_SITES];
+
+static void dump_site_args(uint32_t ret)
+{
+    uint32_t si = 0, w[12], args[3];
+    int bad = 0;
+    while (si < TRACE_SITES && k_trace_sites[si] != ret) si++;
+    if (si == TRACE_SITES) return;
+    for (uint32_t k = 0; k < 3; k++) {
+        args[k] = MEM32(g_esp + 4u * (k + 1));
+        for (uint32_t j = 0; j < 4; j++) {
+            w[k * 4 + j] = guest_data(args[k]) ? MEM32(args[k] + 4u * j) : 0;
+            if (guest_data(args[k]) && nonfinite(w[k * 4 + j])) bad = 1;
+        }
+    }
+    if (!bad) { memcpy(s_site_good[si], w, sizeof w); return; }
+    if (atomic_fetch_add_explicit(&s_site_bad_logs[si], 1, memory_order_relaxed) >= 4) return;
+    char line[700];
+    int len = snprintf(line, sizeof line, "[MH-MOVE] ret %08X ecx %08X args %08X %08X %08X | now",
+                       ret, g_ecx, args[0], args[1], args[2]);
+    for (int j = 0; j < 12 && len > 0 && (size_t)len < sizeof line; j++)
+        len += snprintf(line + len, sizeof line - (size_t)len, " %08X", w[j]);
+    len += snprintf(line + len, sizeof line - (size_t)len, " | last finite");
+    for (int j = 0; j < 12 && len > 0 && (size_t)len < sizeof line; j++)
+        len += snprintf(line + len, sizeof line - (size_t)len, " %08X", s_site_good[si][j]);
+    fprintf(stderr, "%s\n", line);
+}
+
 /* Every call site above 256 calls in the window: callee<-return address:count. */
 static void dump_sites(void)
 {
@@ -353,6 +395,7 @@ void recomp_call_profile_hit(uint32_t va)
         if (va == 0x000DCB90u) nan_watch_add(g_ecx);
         if (va == 0x001E3140u) check_transform_args(ret);
         if (va == 0x00169370u) check_velocity_step();
+        if (ret >= 0x000BC610u && ret < 0x000BCA00u) dump_site_args(ret);
         nan_watch_check(va, ret);
         t_prev_va = va;
         t_prev_ret = ret;
