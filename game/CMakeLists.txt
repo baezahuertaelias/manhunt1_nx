@@ -62,6 +62,7 @@ if(NINTENDO_SWITCH)
         src/horizon_alloc.c
         src/d3d_tiled_lock.c
         src/widescreen.c
+        src/transform_trace.c
         src/nv2a_deko3d.c
         src/gl_host.c
         src/nv2a_gl/nv2a_gl.c
@@ -89,6 +90,8 @@ if(NINTENDO_SWITCH)
     target_link_options(manhunt PRIVATE -Wl,--wrap=sub_00295EC0)
     # MANHUNT_WIDESCREEN: 4:3 camera view windows widened (src/widescreen.c).
     target_link_options(manhunt PRIVATE -Wl,--wrap=sub_001E80A0)
+    # MANHUNT_TRANSFORM_TRACE: first invalid SetTransform source (src/transform_trace.c).
+    target_link_options(manhunt PRIVATE -Wl,--wrap=sub_0028DA30)
     set_source_files_properties(${MANHUNT_RUNTIME_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-w")
     find_program(MANHUNT_UAM uam HINTS "${DEVKITPRO}/tools/bin" REQUIRED)
     set(MANHUNT_ROMFS "${CMAKE_CURRENT_BINARY_DIR}/nv2a_romfs")
