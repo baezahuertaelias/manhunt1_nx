@@ -105,6 +105,20 @@ normally): the same functions also run in normal play, from the same sites
 not fault-specific; a call-site comparison of a failing run in the same
 scene is still needed. The earlier NaN-position hypothesis is unproven.
 
+### Defaults
+
+On the owner's decision (2026-11-12), the Switch build now defaults
+`MANHUNT_GL_PERSISTENT`, `MANHUNT_GL_UBO`, `MANHUNT_GL_STATE_CACHE`,
+`MANHUNT_GL_CMP`, `MANHUNT_GL_QUEUE_PACK`, `MANHUNT_APU_FAST_HRTF`,
+`MANHUNT_CS_CACHE` and `MANHUNT_CONTIG_RECLAIM` to 1 in `config_init`
+(`game/src/main_switch.c`). `manhunt.env` or a `KEY=0` argument restores
+each original path; `scripts/gpu-offload-run.ps1 -Rollback` passes all of
+them as 0. The shared runtime's own defaults are unchanged, so its
+regression suites keep testing the original behaviour. Basis: six console
+sessions with the options on, ~25 vs ~15 FPS in heavy scenes, no audio
+underruns, and the open hunter/black-screen fault also present with every
+option off.
+
 ### Host reproduction
 
 The host build (`build/host`, current tree plus the uncommitted host GL

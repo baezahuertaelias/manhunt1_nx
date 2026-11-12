@@ -993,6 +993,14 @@ static void config_init(void)
         {"RECOMP_TITLE_KEVENTS", "1"}, {"RECOMP_VBLANK", "paced"},
         {"RECOMP_DISPATCH_GATE", "1"}, {"RECOMP_FLIP_PACING", "1"},
         {"MANHUNT_DUMP_SECS", "15"},
+        /* Accepted on the console 2026-11-11/12 (reports/SWITCH_RUN_2026-11-11.md):
+         * GL upload/state paths, APU history window, critical-section resolver
+         * cache, contiguous reuse. Each takes =0 in manhunt.env or as an
+         * argument to restore the original path. */
+        {"MANHUNT_GL_PERSISTENT", "1"}, {"MANHUNT_GL_UBO", "1"},
+        {"MANHUNT_GL_STATE_CACHE", "1"}, {"MANHUNT_GL_CMP", "1"},
+        {"MANHUNT_GL_QUEUE_PACK", "1"}, {"MANHUNT_APU_FAST_HRTF", "1"},
+        {"MANHUNT_CS_CACHE", "1"}, {"MANHUNT_CONTIG_RECLAIM", "1"},
     };
     for (size_t i = 0; i < sizeof defaults / sizeof defaults[0]; i++)
         setenv(defaults[i][0], defaults[i][1], 1);
