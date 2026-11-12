@@ -75,6 +75,18 @@ single passing run does not establish a fix: either the fault is intermittent
 or it depends on layout/timing (for example an uninitialized read). Next: the
 same build again, then an A/B with `2823cd24…` (`-Nro`).
 
+`20261111-234749-all` (same NRO `a8b1ec1d…` again): the owner reports the
+hunter did not appear and FPS fell. Draws stayed at ~336/frame and GL draw time
+at ~12 ms, while guest "rest" time rose from ~12 ms to 42–48 ms per frame
+(38 to 16 FPS) at log line ~17703. No NaN modelview and no 960-draw episode
+before the session ended. So the fault is **intermittent with an identical
+binary**; layout is rejected. The first symptom is extra guest CPU work when
+the hunter should spawn; the NaN/black state followed later in earlier runs.
+
+A `MANHUNT_CALL_PROFILE=ON` build (`build/switch-prof`, `src/call_profile.c`)
+prints the 24 most-called lifted functions every 2 s, to name the code that
+starts running at the rise.
+
 Expected discriminators: with reuse on, `kept=` stays 0 and `arena exhausted`
 should not appear before the fight. If the black screen persists without
 exhaustion, the allocation hypothesis is rejected and the new vertex-program

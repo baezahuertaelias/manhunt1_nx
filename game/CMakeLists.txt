@@ -145,4 +145,10 @@ endif()
 # Generated code: ~1.5M lines. Switch uses -O2 for the CPU-bound game loop;
 # host bring-up keeps -O1. Warnings are the lifter's, not ours.
 set_source_files_properties(${MANHUNT_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "-w;${MANHUNT_GEN_OPT}")
+# Investigation builds only: count every lifted direct call (src/call_profile.c).
+option(MANHUNT_CALL_PROFILE "count lifted direct calls and print the hottest every 2 s" OFF)
+if(MANHUNT_CALL_PROFILE)
+    set_property(SOURCE ${MANHUNT_GEN_SOURCES} APPEND PROPERTY COMPILE_DEFINITIONS RECOMP_CALL_PROFILE)
+    target_sources(manhunt PRIVATE src/call_profile.c)
+endif()
 set_source_files_properties(${MANHUNT_GAME_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-Wall")
