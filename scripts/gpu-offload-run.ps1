@@ -7,11 +7,13 @@ param(
     [ValidateScript({ $_ -eq -1 -or ($_ -ge 0 -and $_ -le 1) })]
     [double]$AmbientLight = -1,
     [string]$Address = '192.168.1.107',
+    [string]$Nro,                       # an earlier build for A/B; default is the current build
+
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$nro = Join-Path $repo 'game/build/switch/manhunt.nro'
+$nro = if ($Nro) { (Resolve-Path -LiteralPath $Nro).Path } else { Join-Path $repo 'game/build/switch/manhunt.nro' }
 if (!(Test-Path -LiteralPath $nro)) { throw "Build missing: $nro" }
 if ($EnableExperimentalGpuPaths) {
     if ($PSBoundParameters.ContainsKey('Experiment')) { throw 'Choose Experiment or EnableExperimentalGpuPaths.' }

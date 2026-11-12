@@ -54,6 +54,27 @@ candidate for the black screen, **not yet proven**.
   constant rows may legitimately be nonfinite; this is evidence, not proof.
 - `scripts/gpu-offload-run.ps1` gains a `contig` selection, included in `all`.
 
+## Follow-up runs
+
+`20261111-232620-all` (NRO `2823cd24…`, contiguous reuse on): no arena
+exhaustion (473 frees reused, `kept=0`), yet the 3D world went black already
+in the hiding tutorial (owner screenshot at 3:23, 7.2 FPS, HUD visible) and
+stayed black through the court fight. NV2A modelview methods carried
+`0xFFC00000`. Contiguous exhaustion is therefore **rejected** as the cause.
+No `MH-GL-NONFINITE` vertex-program line appeared.
+
+The owner's intro screenshot shows the whole 512×512 paletted font atlas drawn
+1:1 at the top-left for a frame before the first movie; cause not identified.
+
+`20261111-233659-all` (NRO `a8b1ec1d…`, adds the `SetTransform` probe):
+the owner fought the hunter and progressed without the black screen or the
+FPS drop. No `0xFFC00000` modelview, no 7 FPS/960-draw episode. The probe
+never ran (not even its banner), so SetTransform is not the gameplay matrix
+path. The only other difference from the failing build is code layout, so a
+single passing run does not establish a fix: either the fault is intermittent
+or it depends on layout/timing (for example an uninitialized read). Next: the
+same build again, then an A/B with `2823cd24…` (`-Nro`).
+
 Expected discriminators: with reuse on, `kept=` stays 0 and `arena exhausted`
 should not appear before the fight. If the black screen persists without
 exhaustion, the allocation hypothesis is rejected and the new vertex-program
