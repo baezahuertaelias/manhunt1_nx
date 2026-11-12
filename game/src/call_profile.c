@@ -201,7 +201,10 @@ static void check_transform_args(uint32_t ret)
     if (bad_in < 0 && bad_m < 0) {
         if (ret == 0x000DE5ABu || ret == 0x000DE5BFu) {
             nan_watch_add(in);
-            nan_watch_add(mtx);
+            /* Run 20261112-004702-all: this matrix (RwMatrix: right, up, at,
+             * pos at +0x30) kept a finite rotation while pos went 0xFFC00000,
+             * so watch the position x, not word 0. */
+            nan_watch_add(mtx + 0x30u);
         }
         return;
     }
