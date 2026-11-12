@@ -1,0 +1,135 @@
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -4098,6 +4098,7 @@
+ static uint32_t g_contig_high = CONTIG_PAGE;   /* high-water mark, bytes */
+ static uint32_t g_contig_first_free = 1;       /* no free page below this */
+ static uint32_t g_contig_allocs, g_contig_frees;
++static uint32_t g_contig_kept;                 /* frees answered without reuse */
+ static uint32_t g_contig_peak_pages;
+ static DWORD    g_contig_t0;
+ static volatile LONG g_contig_lock;
+@@ -4128,12 +4129,12 @@
+         return;
+     last_pages = g_contig_pages_in_use;
+     fprintf(stderr, "  [CONTIG] t=%.1fs %s 0x%08X %u KB: in use %u KB, "
+-            "peak %u KB, high-water %u KB (allocs=%u frees=%u)\n",
++            "peak %u KB, high-water %u KB (allocs=%u frees=%u kept=%u)\n",
+             (GetTickCount() - g_contig_t0) / 1000.0, what, va,
+             pages * (CONTIG_PAGE / 1024),
+             g_contig_pages_in_use * (CONTIG_PAGE / 1024),
+             g_contig_peak_pages * (CONTIG_PAGE / 1024),
+-            g_contig_high / 1024, g_contig_allocs, g_contig_frees);
++            g_contig_high / 1024, g_contig_allocs, g_contig_frees, g_contig_kept);
+     fflush(stderr);
+ }
+ 
+@@ -4242,10 +4243,10 @@
+         }
+         fprintf(stderr, "  [CONTIG] arena exhausted (%u requested, align %u, "
+                 "phys 0x%08X..0x%08X; %u of %u KB in use, largest free run "
+-                "%u KB)\n", size, alignment, phys_lo, phys_hi,
++                "%u KB; %u frees kept without reuse)\n", size, alignment, phys_lo, phys_hi,
+                 g_contig_pages_in_use * (CONTIG_PAGE / 1024),
+                 (unsigned)(CONTIG_USABLE * (CONTIG_PAGE / 1024)),
+-                best * (CONTIG_PAGE / 1024));
++                best * (CONTIG_PAGE / 1024), g_contig_kept);
+         fflush(stderr);
+     }
+     contig_unlock();
+@@ -4290,7 +4291,24 @@
+     contig_unlock();
+ }
+ 
+-/* Release a block (RECOMP_HEAP_RECLAIM only). Returns 1 if va is in the
++/* Contiguous reuse alone: MANHUNT_CONTIG_RECLAIM=1 gives freed blocks back
++ * to this arena without RECOMP_HEAP_RECLAIM's general-heap changes, which
++ * move every later heap address. Manhunt frees and reallocates streaming and
++ * texture blocks as it plays; kept, they fill the window within half a
++ * minute and every later request is refused. Off until console acceptance. */
++static int contig_reclaim_enabled(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("MANHUNT_CONTIG_RECLAIM");
++        on = xbox_HeapReclaimEnabled() || (e && *e == '1');
++        fprintf(stderr, "  [CONTIG] freed blocks: %s (MANHUNT_CONTIG_RECLAIM)\n",
++                on ? "reused" : "kept");
++    }
++    return on;
++}
++
++/* Release a block (RECOMP_HEAP_RECLAIM or MANHUNT_CONTIG_RECLAIM). Returns 1 if va is in the
+  * window, 0 if this arena never handed it out -- the caller decides whether
+  * that is someone else's. */
+ int xbox_ContiguousFree(uint32_t va)
+@@ -4303,8 +4321,12 @@
+         return 0;
+     /* Ours, but kept: without RECOMP_HEAP_RECLAIM contiguous memory is never
+      * reused, and 1 stops the caller handing it to the general heap. */
+-    if (!xbox_HeapReclaimEnabled())
++    if (!contig_reclaim_enabled()) {
++        contig_lock();
++        g_contig_kept++;
++        contig_unlock();
+         return 1;
++    }
+     first = (va - XBOX_CONTIG_BASE) / CONTIG_PAGE;
+ 
+     contig_lock();
+--- a/tests/memory_regressions/CMakeLists.txt
++++ b/tests/memory_regressions/CMakeLists.txt
+@@ -14,6 +14,7 @@
+ # flipped inside a run.
+ add_test(NAME memory_regressions_default COMMAND memory_regressions_test default ${XBE})
+ add_test(NAME memory_regressions_heap_reclaim COMMAND memory_regressions_test heap-reclaim ${XBE})
++add_test(NAME memory_regressions_contig_reclaim COMMAND memory_regressions_test contig-reclaim ${XBE})
+ add_test(NAME memory_regressions_contig_avoid_image COMMAND memory_regressions_test contig-avoid-image ${XBE})
+ add_test(NAME memory_regressions_ext_vma COMMAND memory_regressions_test ext-vma ${XBE})
+ add_test(NAME memory_regressions_ext_vma_128 COMMAND memory_regressions_test ext-vma-128 ${XBE})
+--- a/tests/memory_regressions/test_main.c
++++ b/tests/memory_regressions/test_main.c
+@@ -30,6 +30,10 @@
+  *      test report pages ask for exactly that, and a bump pointer refused
+  *      every one -- and a request for a range above the pointer lands in it.
+  *
++ *   contig-reclaim  MANHUNT_CONTIG_RECLAIM=1. Check 6 reuses a freed
++ *                 contiguous block while the general-heap checks keep the
++ *                 default behaviour.
++ *
+  *   ext-vma       RECOMP_EXT_VMA=1. A title that reserves a specific address
+  *                 above the RAM mirrors gets it, can commit inside it and use
+  *                 the memory, is told the truth when it asks, and is refused
+@@ -187,13 +191,14 @@
+     int ext128 = !strcmp(mode, "ext-vma-128");
+     int ext = ext128 || !strcmp(mode, "ext-vma");
+     int avoid = !strcmp(mode, "contig-avoid-image");
++    int contig = !strcmp(mode, "contig-reclaim");
+     size_t xbe_len = 0;
+     unsigned char *xbe;
+     char d[160];
+     int i;
+ 
+     setvbuf(stdout, NULL, _IONBF, 0);
+-    if (!reclaim && !ext && !avoid && strcmp(mode, "default")) {
++    if (!reclaim && !ext && !avoid && !contig && strcmp(mode, "default")) {
+         printf("unknown mode '%s'\n", mode);
+         return 2;
+     }
+@@ -203,6 +208,8 @@
+         set_env("RECOMP_EXT_VMA", "1");
+     if (avoid)
+         set_env("RECOMP_CONTIG_AVOID_IMAGE", "1");
++    if (contig)
++        set_env("MANHUNT_CONTIG_RECLAIM", "1");
+     if (ext128)
+         xbox_SetTotalRam(XBOX_DEVKIT_RAM);
+ 
+@@ -330,7 +337,7 @@
+ 
+         snprintf(d, sizeof d, "free said %d", xbox_ContiguousFree(c1));
+         c2 = xbox_ContiguousAlloc(0x20000, 4096);
+-        if (reclaim) {
++        if (reclaim || contig) {
+             char d2[160];
+             snprintf(d2, sizeof d2, "%s, got 0x%08X, expected 0x%08X", d, c2, c1);
+             check(c1 && c2 == c1, "a freed contiguous block is reused", d2);

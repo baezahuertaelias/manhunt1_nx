@@ -110,17 +110,43 @@ static void validate_frame(void)
 }
 static void validate_transform(const Nv2aRawBatch *b)
 {
-    static unsigned logged;
-    if (!gl_validation() || logged >= 8 || b->xform != 1) return;
-    for (unsigned i = 0; i < 16; i++) {
-        uint32_t bits;
-        memcpy(&bits, &b->composite[i], 4);
-        if ((bits & 0x7f800000u) != 0x7f800000u) continue;
-        logged++;
-        fprintf(stderr, "[MH-GL-NONFINITE] incoming fixed transform component %u bits %08X"
-                " verts %u indices %u prog_gen %u const_gen %u lighting %u\n",
-                i, bits, b->vertex_count, b->index_count, b->vp_prog_gen, b->vp_const_gen, b->lighting);
-        break;
+    static unsigned logged, vp_logged;
+    if (!gl_validation()) return;
+    if (b->xform == 1 && logged < 8) {
+        for (unsigned i = 0; i < 16; i++) {
+            uint32_t bits;
+            memcpy(&bits, &b->composite[i], 4);
+            if ((bits & 0x7f800000u) != 0x7f800000u) continue;
+            logged++;
+            fprintf(stderr, "[MH-GL-NONFINITE] incoming fixed transform component %u bits %08X"
+                    " verts %u indices %u prog_gen %u const_gen %u lighting %u\n",
+                    i, bits, b->vertex_count, b->index_count, b->vp_prog_gen, b->vp_const_gen, b->lighting);
+            break;
+        }
+    }
+    /* Vertex-program draws (skinned characters) take their matrices from the
+     * constant registers, which the fixed check above never sees. Report the
+     * first nonfinite constant row; a title may legitimately leave unused
+     * rows as anything, so this is evidence, not proof of a bad draw. Each
+     * row is reported once, so rows left nonfinite from boot cannot use up
+     * the budget before the fight. */
+    if (b->xform == 2 && vp_logged < 32 && b->vp_consts) {
+        static uint8_t seen[256];
+        for (unsigned r = 0; r < b->vp_const_count && r < 256; r++) {
+            if (seen[r]) continue;
+            for (unsigned c = 0; c < 4; c++) {
+                uint32_t bits;
+                memcpy(&bits, &b->vp_consts[r][c], 4);
+                if ((bits & 0x7f800000u) != 0x7f800000u) continue;
+                seen[r] = 1;
+                vp_logged++;
+                fprintf(stderr, "[MH-GL-NONFINITE] vertex-program constant row %u component %u bits %08X"
+                        " verts %u indices %u prog_gen %u const_gen %u start %u\n",
+                        r, c, bits, b->vertex_count, b->index_count, b->vp_prog_gen, b->vp_const_gen,
+                        b->vp_start);
+                return;
+            }
+        }
     }
 }
 
