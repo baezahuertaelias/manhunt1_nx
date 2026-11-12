@@ -321,6 +321,39 @@ static void dump_site_args(uint32_t ret)
     fprintf(stderr, "%s\n", line);
 }
 
+/* Run 20261112-012211-all: the NaN velocity input is the frame displacement
+ * 0x000BC610 measures around an animation update: before = frame position
+ * (RwFrameGetLTM 0x001E62F0, ret 0x000BC672), then the icall
+ * [[edi]+0x50](edi), then after (ret 0x000BC69E). A NaN after passes its
+ * |d| <= 1 test (unordered compare) and is stored. Compare the frame's
+ * modelling position (frame+0x40, written by the animation; the LTM is only
+ * synced inside the call) at both hooks and report the first update that
+ * turns it nonfinite, with the animation object and its +0x50 target. */
+static RECOMP_TLS uint32_t t_anim_frame, t_anim_before[3];
+
+static void check_anim_step(uint32_t ret)
+{
+    static _Atomic uint32_t s_logged;
+    uint32_t frame = MEM32(g_esp + 4);
+    if (!guest_data(frame) || !guest_data(frame + 0x40u)) return;
+    uint32_t p[3] = { MEM32(frame + 0x40u), MEM32(frame + 0x44u), MEM32(frame + 0x48u) };
+    if (ret == 0x000BC672u) {
+        t_anim_frame = frame;
+        memcpy(t_anim_before, p, sizeof p);
+        return;
+    }
+    if (frame != t_anim_frame) return;
+    int before_bad = nonfinite(t_anim_before[0]) || nonfinite(t_anim_before[1]) || nonfinite(t_anim_before[2]);
+    int after_bad = nonfinite(p[0]) || nonfinite(p[1]) || nonfinite(p[2]);
+    if (!after_bad || atomic_fetch_add_explicit(&s_logged, 1, memory_order_relaxed) >= 8) return;
+    uint32_t anim = g_edi, vt = guest_data(anim) ? MEM32(anim) : 0;
+    fprintf(stderr, "[MH-ANIMSEED] frame %08X %s | before %08X %08X %08X after %08X %08X %08X |"
+            " anim %08X vtable %08X +0x50 -> %08X\n",
+            frame, before_bad ? "already nonfinite before the update" : "turned nonfinite by the update",
+            t_anim_before[0], t_anim_before[1], t_anim_before[2], p[0], p[1], p[2],
+            anim, vt, guest_data(vt) ? MEM32(vt + 0x50u) : 0);
+}
+
 /* Every call site above 256 calls in the window: callee<-return address:count. */
 static void dump_sites(void)
 {
@@ -396,6 +429,7 @@ void recomp_call_profile_hit(uint32_t va)
         if (va == 0x001E3140u) check_transform_args(ret);
         if (va == 0x00169370u) check_velocity_step();
         if (ret >= 0x000BC610u && ret < 0x000BCA00u) dump_site_args(ret);
+        if (va == 0x001E62F0u && (ret == 0x000BC672u || ret == 0x000BC69Eu)) check_anim_step(ret);
         nan_watch_check(va, ret);
         t_prev_va = va;
         t_prev_ret = ret;
