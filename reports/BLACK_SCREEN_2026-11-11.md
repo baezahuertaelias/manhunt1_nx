@@ -1,6 +1,14 @@
 # Black-screen investigation — 2026-11-11
 
-Status: root cause and fix **not yet established**. No NaN clamping, draw dropping, or fallback camera has been added.
+Status: **root cause found and fixed** (2026-11-12, patch `0033-mxcsr-flush-to-zero.patch`). See "Resolution" below. The sections after it are the original investigation notes.
+
+## Resolution (2026-11-12)
+
+- **Cause:** RenderWare's SSE setup (`0x001EB770`) does `ldmxcsr` with FTZ (`| 0x8000`). The recompiler stored MXCSR as guest state and never applied it to the host. RenderWare's 2D normalize (`0x001E2FF0`) relies on FTZ. With it, a tiny vector's squared length flushes to 0 and the `cmpltss` mask zeroes the result. On Switch the length stayed denormal, the emulated `rsqrtss` flushed that input and returned infinity, and `0 * inf` gave NaN.
+- **Path:** run `20261112-105706-nanhunt` traced the first new NaNs to the window between the two `0x001E2FF0` calls in `0x0009D5xx`. From there the NaN went to the movement input `(dx/dt, 0, dz/dt)` built at `0x000BC83B`, then `SetVelocity`, then the hunter's matrix position, the collision intersection queries and the NV2A modelview.
+- **Fix:** `LDMXCSR` lifts to `recomp_ldmxcsr`, which also sets AArch64 `FPCR.FZ` (bit 24), or the host MXCSR FTZ/DAZ bits, per thread.
+- **Verified:** run `20261112-111253-ftz`: the hunter came back in the hiding tutorial, and the NaN probes logged nothing during gameplay. Only the usual three x87 hits at boot remained. The fault was intermittent, so this is one passing run.
+- **Still open:** the intro font-atlas flash, which is unrelated.
 
 ## Observed evidence
 
