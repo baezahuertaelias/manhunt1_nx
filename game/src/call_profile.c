@@ -105,6 +105,76 @@ static void check_intsec_args(uint32_t va)
     }
 }
 
+/* Writer search. The first nonfinite intersection input was the `this`
+ * (ecx) of 0x000DCB90, called per entity from 0x000DA7A4. Objects seen there
+ * while still finite are watched; every lifted call then re-reads their
+ * first word, so the first call that sees one turned nonfinite brackets the
+ * write between the previous call this thread made and this one. Logged once
+ * per object with its last finite and its new contents. */
+#define NAN_WATCH 16u
+static _Atomic uint32_t s_nw_obj[NAN_WATCH];
+static _Atomic uint32_t s_nw_state[NAN_WATCH];    /* 0 free, 1 watching, 2 reported */
+static uint32_t s_nw_last[NAN_WATCH][8];          /* racy snapshot; evidence only */
+static RECOMP_TLS uint32_t t_prev_va, t_prev_ret;
+
+static int nonfinite(uint32_t w) { return (w & 0x7f800000u) == 0x7f800000u; }
+
+static void nan_watch_add(uint32_t obj)
+{
+    if (!guest_data(obj) || nonfinite(MEM32(obj)))
+        return;
+    for (uint32_t i = 0; i < NAN_WATCH; i++)
+        if (atomic_load_explicit(&s_nw_obj[i], memory_order_relaxed) == obj)
+            return;
+    for (uint32_t i = 0; i < NAN_WATCH; i++) {
+        uint32_t expected = 0;
+        if (atomic_compare_exchange_strong(&s_nw_state[i], &expected, 1)) {
+            atomic_store_explicit(&s_nw_obj[i], obj, memory_order_relaxed);
+            fprintf(stderr, "[MH-NANWATCH] watching 0x%08X (slot %u)\n", obj, i);
+            return;
+        }
+    }
+    /* Full: rotate, so an entity created late (the hunter) is still watched. */
+    static _Atomic uint32_t s_rr;
+    uint32_t i = atomic_fetch_add_explicit(&s_rr, 1, memory_order_relaxed) % NAN_WATCH;
+    atomic_store_explicit(&s_nw_state[i], 0, memory_order_relaxed);
+    atomic_store_explicit(&s_nw_obj[i], obj, memory_order_relaxed);
+    for (int j = 0; j < 8; j++) s_nw_last[i][j] = MEM32(obj + 4u * (uint32_t)j);
+    atomic_store_explicit(&s_nw_state[i], 1, memory_order_relaxed);
+    fprintf(stderr, "[MH-NANWATCH] watching 0x%08X (slot %u, rotated)\n", obj, i);
+}
+
+static void nan_watch_check(uint32_t va, uint32_t ret)
+{
+    static _Atomic uint32_t s_ticks;
+    int refresh = (atomic_fetch_add_explicit(&s_ticks, 1, memory_order_relaxed) & 255u) == 0;
+    for (uint32_t i = 0; i < NAN_WATCH; i++) {
+        if (atomic_load_explicit(&s_nw_state[i], memory_order_relaxed) != 1) continue;
+        uint32_t obj = atomic_load_explicit(&s_nw_obj[i], memory_order_relaxed);
+        if (!obj) continue;
+        if (!nonfinite(MEM32(obj))) {
+            if (refresh)
+                for (int j = 0; j < 8; j++) s_nw_last[i][j] = MEM32(obj + 4u * (uint32_t)j);
+            continue;
+        }
+        uint32_t expected = 1;
+        if (!atomic_compare_exchange_strong(&s_nw_state[i], &expected, 2)) continue;
+        char line[640];
+        int len = snprintf(line, sizeof line,
+                           "[MH-NANWATCH] 0x%08X nonfinite between %08X(ret %08X) and %08X(ret %08X) | was",
+                           obj, t_prev_va, t_prev_ret, va, ret);
+        for (int j = 0; j < 8 && len > 0 && (size_t)len < sizeof line; j++)
+            len += snprintf(line + len, sizeof line - (size_t)len, " %08X", s_nw_last[i][j]);
+        len += snprintf(line + len, sizeof line - (size_t)len, " | now");
+        for (int j = 0; j < 8 && len > 0 && (size_t)len < sizeof line; j++)
+            len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(obj + 4u * (uint32_t)j));
+        len += snprintf(line + len, sizeof line - (size_t)len, " | stack");
+        for (uint32_t s = 1; s < 13 && len > 0 && (size_t)len < sizeof line; s++)
+            len += snprintf(line + len, sizeof line - (size_t)len, " %08X", MEM32(g_esp + 4u * s));
+        fprintf(stderr, "%s\n", line);
+    }
+}
+
 /* Every call site above 256 calls in the window: callee<-return address:count. */
 static void dump_sites(void)
 {
@@ -174,6 +244,13 @@ void recomp_call_profile_hit(uint32_t va)
         }
     }
     atomic_fetch_add_explicit(&s_count[i], 1, memory_order_relaxed);
+    {
+        uint32_t ret = MEM32(g_esp);
+        if (va == 0x000DCB90u) nan_watch_add(g_ecx);
+        nan_watch_check(va, ret);
+        t_prev_va = va;
+        t_prev_ret = ret;
+    }
     for (uint32_t w = 0; w < WATCH; w++)
         if (va == k_watch[w]) {
             site_hit(va, MEM32(g_esp));
