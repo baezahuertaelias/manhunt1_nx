@@ -354,6 +354,65 @@ static void check_anim_step(uint32_t ret)
             anim, vt, guest_data(vt) ? MEM32(vt + 0x50u) : 0);
 }
 
+/* Broad NaN-origin search: on every lifted call, compare this thread's x87
+ * stack slots and XMM lanes with their values at its previous call. A slot
+ * that changed into a NaN was produced between those two calls; the first
+ * 40 distinct (previous call, this call, register) triples per register
+ * file (x87, XMM) are reported; XMM also carries non-float copies.
+ * Stale or popped slots do not change, so they are not reported again. */
+static RECOMP_TLS uint64_t t_fp_prev[8];
+static RECOMP_TLS uint32_t t_xmm_prev[8][4];
+static RECOMP_TLS int t_regs_seen;
+
+static void nan_origin_check(uint32_t va, uint32_t ret)
+{
+    static _Atomic uint32_t s_logged_fp, s_logged_xmm;
+    static _Atomic uint32_t s_keys[128];
+    RecompXmm *x[8] = { &g_xmm0, &g_xmm1, &g_xmm2, &g_xmm3, &g_xmm4, &g_xmm5, &g_xmm6, &g_xmm7 };
+    for (int r = 0; r < 16; r++) {
+        int fp = r < 8;
+        int lane = -1;
+        uint64_t now64 = 0;
+        if (fp) {
+            memcpy(&now64, &g_fp_stack[r], sizeof now64);
+            int is_nan = (now64 & 0x7FF0000000000000ull) == 0x7FF0000000000000ull &&
+                         (now64 & 0x000FFFFFFFFFFFFFull);
+            int changed = t_regs_seen && now64 != t_fp_prev[r];
+            t_fp_prev[r] = now64;
+            if (!is_nan || !changed) continue;
+        } else {
+            uint32_t w[4];
+            memcpy(w, x[r - 8]->f, sizeof w);
+            for (int l = 0; l < 4 && lane < 0; l++)
+                if (t_regs_seen && w[l] != t_xmm_prev[r - 8][l] &&
+                    (w[l] & 0x7f800000u) == 0x7f800000u && (w[l] & 0x007FFFFFu))
+                    lane = l;
+            memcpy(t_xmm_prev[r - 8], w, sizeof w);
+            if (lane < 0) continue;
+        }
+        uint32_t key = (t_prev_va * 31u) ^ (va * 7u) ^ (uint32_t)r ^ 0x5bd1e995u;
+        int fresh = 1;
+        for (int i = 0; i < 128 && fresh; i++) {
+            uint32_t cur = atomic_load_explicit(&s_keys[i], memory_order_relaxed);
+            if (cur == key) fresh = 0;
+            else if (!cur) {
+                uint32_t expected = 0;
+                if (atomic_compare_exchange_strong(&s_keys[i], &expected, key)) break;
+                if (expected == key) fresh = 0;
+            }
+        }
+        if (!fresh || atomic_fetch_add_explicit(fp ? &s_logged_fp : &s_logged_xmm, 1,
+                                                memory_order_relaxed) >= 40) continue;
+        if (fp)
+            fprintf(stderr, "[MH-NANORIGIN] x87 slot %d (top %d) NaN %016llX between %08X(ret %08X) and %08X(ret %08X)\n",
+                    r, g_fp_top, (unsigned long long)now64, t_prev_va, t_prev_ret, va, ret);
+        else
+            fprintf(stderr, "[MH-NANORIGIN] xmm%d lane %d NaN %08X between %08X(ret %08X) and %08X(ret %08X)\n",
+                    r - 8, lane, t_xmm_prev[r - 8][lane], t_prev_va, t_prev_ret, va, ret);
+    }
+    t_regs_seen = 1;
+}
+
 /* Every call site above 256 calls in the window: callee<-return address:count. */
 static void dump_sites(void)
 {
@@ -431,6 +490,7 @@ void recomp_call_profile_hit(uint32_t va)
         if (ret >= 0x000BC610u && ret < 0x000BCA00u) dump_site_args(ret);
         if (va == 0x001E62F0u && (ret == 0x000BC672u || ret == 0x000BC69Eu)) check_anim_step(ret);
         nan_watch_check(va, ret);
+        nan_origin_check(va, ret);
         t_prev_va = va;
         t_prev_ret = ret;
     }
