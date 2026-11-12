@@ -87,6 +87,34 @@ A `MANHUNT_CALL_PROFILE=ON` build (`build/switch-prof`, `src/call_profile.c`)
 prints the 24 most-called lifted functions every 2 s, to name the code that
 starts running at the rise.
 
+### Call-profile runs
+
+`20261111-235506-all` (profile build, fault reproduced): guest "rest" rose
+from ~14 to ~48 ms/frame at log line ~17070 with ~336 draws. From that
+window on, functions in the RenderWare intersection region
+(`tool/intsec/rtintsec.c` per the identification inventory: `0x000E2F50`,
+`0x000E2430`; neighbours `0x000DC770`, `0x000D9D20`, `0x000D9620`,
+`0x000DCDA0`, `0x00186280`) appear in the top 24, and two synthetic thunk
+slots `0xFE000000`/`0xFE000004` at ~12k calls per 2 s.
+
+`20261112-000138-all` (profile build with call sites, hunter appeared
+normally): the same functions also run in normal play, from the same sites
+(`0x000DC770` from `0x000DD72C`/`0x000DD415`, `0x000D9D20` from
+`0x000DC79C`, `0x000E2F50` from `0x000DC8DB`), at roughly half the count
+(`0x000DC770` ~21k vs 40–47k per 2 s). Their presence alone is therefore
+not fault-specific; a call-site comparison of a failing run in the same
+scene is still needed. The earlier NaN-position hypothesis is unproven.
+
+### Host reproduction
+
+The host build (`build/host`, current tree plus the uncommitted host GL
+wiring in `main.c`/`CMakeLists.txt`) crashes during boot with both
+`MANHUNT_GPU_BACKEND=2` and the default renderer: `BlockOnTime: fence 11 not
+reached in 250 ms`, then SIGSEGV with guest `eax=0x0029D8CC` (logs
+`game/build/logs/run-host1.log`, `run-host2.log`). Host reproduction of the
+hunter fault needs that bring-up first; the uncommitted host wiring is left
+out of the branch.
+
 Expected discriminators: with reuse on, `kept=` stays 0 and `arena exhausted`
 should not appear before the fight. If the black screen persists without
 exhaustion, the allocation hypothesis is rejected and the new vertex-program
