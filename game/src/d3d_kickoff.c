@@ -83,6 +83,10 @@ void sub_00292500(void)
         s_waits++;
     }
 
+    /* Publish the push-buffer words the guest wrote before PUT: the executor
+     * thread reads them once it sees the new PUT. The ack RMWs above do not
+     * order these plain stores on AArch64. No code on x86. */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
     MEM32(MEM32(dev + 0x1C20) + 0x40) = put & 0x0FFFFFFFu;
     if (MEM32(D3D_KICK_IDLE)) {
         uint32_t nv = MEM32(d3d + 0x934);
