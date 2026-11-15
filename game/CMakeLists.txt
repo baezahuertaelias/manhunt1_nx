@@ -64,6 +64,7 @@ if(NINTENDO_SWITCH)
         src/d3d_tiled_lock.c
         src/widescreen.c
         src/transform_trace.c
+        src/movie_trace.c
         src/nv2a_deko3d.c
         src/gl_host.c
         src/nv2a_gl/nv2a_gl.c
@@ -89,6 +90,8 @@ if(NINTENDO_SWITCH)
     # No tiled aperture on Horizon: D3DLOCK_TILED locks get the contiguous
     # alias (src/d3d_tiled_lock.c).
     target_link_options(manhunt PRIVATE -Wl,--wrap=sub_00295EC0)
+    # Movie/file-open trace (src/movie_trace.c).
+    target_link_options(manhunt PRIVATE -Wl,--wrap=xbox_NtCreateFile)
     # MANHUNT_WIDESCREEN: 4:3 camera view windows widened (src/widescreen.c).
     target_link_options(manhunt PRIVATE -Wl,--wrap=sub_001E80A0)
     # MANHUNT_TRANSFORM_TRACE: first invalid SetTransform source (src/transform_trace.c).

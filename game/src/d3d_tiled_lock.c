@@ -58,8 +58,12 @@ void __wrap_sub_00295EC0(void)
         abort();
     }
     MEM32(out + 4) = p - (TILED_BASE - CONTIG_BASE);
-    if (atomic_fetch_add_explicit(&s_logged, 1, memory_order_relaxed) < 4) {
-        fprintf(stderr, "[MH-D3D] tiled lock 0x%08X -> 0x%08X (no tiled aperture on Horizon)\n",
-                p, p - (TILED_BASE - CONTIG_BASE));
+    {
+        /* One line per movie frame would flood the log: the first 8, then
+         * every 30th. The count shows whether the decoder keeps running. */
+        unsigned n = atomic_fetch_add_explicit(&s_logged, 1, memory_order_relaxed);
+        if (n < 8 || n % 30 == 0)
+            fprintf(stderr, "[MH-D3D] movie lock #%u 0x%08X -> 0x%08X (no tiled aperture on Horizon)\n",
+                    n, p, p - (TILED_BASE - CONTIG_BASE));
     }
 }
