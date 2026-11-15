@@ -56,8 +56,8 @@ static void fill_from(PadState *p, ManhuntPad *out)
     if (h & HidNpadButton_StickR) out->buttons |= MH_PAD_RTHUMB;
     out->analog[MH_A]     = analog(h, HidNpadButton_A);   /* by label: right */
     out->analog[MH_B]     = analog(h, HidNpadButton_B);   /* by label: bottom */
-    out->analog[MH_X]     = analog(h, HidNpadButton_Y);   /* left */
-    out->analog[MH_Y]     = analog(h, HidNpadButton_X);   /* top */
+    out->analog[MH_X]     = analog(h, HidNpadButton_X);   /* by label: top */
+    out->analog[MH_Y]     = analog(h, HidNpadButton_Y);   /* by label: left */
     out->analog[MH_BLACK] = analog(h, HidNpadButton_R);
     out->analog[MH_WHITE] = analog(h, HidNpadButton_L);
     out->analog[MH_LT]    = analog(h, HidNpadButton_ZL);
