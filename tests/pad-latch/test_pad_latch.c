@@ -11,6 +11,7 @@
 
 volatile u64 g_test_buttons;
 int manhunt_pad_script(ManhuntPad *out) { (void)out; return 0; }
+void manhunt_quit_request(void) { }
 void manhunt_pad_sample(ManhuntPad *out);
 
 static int fails;

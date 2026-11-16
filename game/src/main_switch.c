@@ -53,6 +53,7 @@
  *   <base>/manhunt.env                    optional KEY=VALUE config
  * (The old Eden scripts used sdmc:/manhunt; override with -DMANHUNT_SD_BASE=.) */
 #include "sd_layout.h"
+#include "pad.h"
 #define GUEST_THREAD_STACK (64u << 20)
 
 extern RECOMP_TLS uint32_t g_esp;
@@ -474,6 +475,42 @@ static void auto_exit_main(void *arg)
     const Result rc = appletRestartProgram(NULL, 0);
     svcSleepThread(5000000000ll);
     exit_note("auto exit, restart did not end the process", (int)rc);
+    svcExitProcess();
+}
+
+/* Controller quit (ZL + ZR + Plus + Minus held, quit_combo.h): leave the game
+ * and, where the console allows it, come back to the homebrew menu (Sphaira)
+ * instead of ending the whole takeover session, which is what HOME -> Close
+ * Software does and why Sphaira's FTP and netloader are gone afterwards.
+ * MANHUNT_QUIT_MODE:
+ *   restart (default)  appletRestartProgram: restarts the program, which under
+ *                      hbloader's title takeover reloads the menu. Falls back
+ *                      to process exit if it returns.
+ *   return             exit(0), the way a homebrew NRO normally hands back to
+ *                      the loader. Guest threads are still running, so this may
+ *                      fault on the way out; the fault handler then ends the process.
+ *   process            svcExitProcess: back to the Home menu.
+ * Which of these returns to Sphaira is UNVERIFIED on the console. Every step
+ * is logged ([MH-EXIT]) so a run shows how far it got. */
+void manhunt_quit_request(void)
+{
+    static int entered;
+    const char *m = getenv("MANHUNT_QUIT_MODE");
+    if (__atomic_exchange_n(&entered, 1, __ATOMIC_SEQ_CST))
+        return;
+    exit_note("quit combo held, leaving the game", 0);
+    if (s_logfp)
+        fsync(fileno(s_logfp));
+    if (m && !strcmp(m, "process"))
+        svcExitProcess();
+    if (m && !strcmp(m, "return")) {
+        exit(0);
+    }
+    {
+        const Result rc = appletRestartProgram(NULL, 0);
+        svcSleepThread(3000000000ll);
+        exit_note("quit: the program restart did not end the process, exiting it", (int)rc);
+    }
     svcExitProcess();
 }
 

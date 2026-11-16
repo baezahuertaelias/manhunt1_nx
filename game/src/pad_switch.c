@@ -18,10 +18,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <switch.h>
 
 #include "pad.h"
+#include "quit_combo.h"
 
 static PadState s_pad;                 /* configured on the first game poll */
 static int s_pad_ready;
@@ -83,7 +85,18 @@ static void *pad_poller(void *unused)
     PadState p;
     ManhuntPad cur, prev;
     int logged = 0, first = 1;
+    int quit_held = 0, quit_hold_ms = MANHUNT_QUIT_HOLD_DEFAULT_MS, quit_on = 1;
+    struct timespec quit_last;
     (void)unused;
+    clock_gettime(CLOCK_MONOTONIC, &quit_last);
+    {
+        const char *c = getenv("MANHUNT_QUIT_COMBO");
+        const char *h = getenv("MANHUNT_QUIT_HOLD_MS");
+        if (c && c[0] == '0' && !c[1])
+            quit_on = 0;
+        if (h && atoi(h) >= 500)
+            quit_hold_ms = atoi(h);
+    }
 
     padInitializeDefault(&p);
     memset(&prev, 0, sizeof prev);
@@ -103,6 +116,18 @@ static void *pad_poller(void *unused)
             logged++;
             printf("[MH-PAD] buttons=0x%04x analog=0x%02x connected=%d\n", cur.buttons, analog_mask(&cur),
                    (int)padIsConnected(&p));
+        }
+        {
+            /* Real elapsed time, not 4 ms a loop: guest threads can starve this one. */
+            struct timespec now;
+            long dt;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            dt = (now.tv_sec - quit_last.tv_sec) * 1000L + (now.tv_nsec - quit_last.tv_nsec) / 1000000L;
+            quit_last = now;
+            if (dt < 0) dt = 0;
+            if (dt > 1000) dt = 1000;
+            if (quit_on && manhunt_quit_combo_step(&cur, &quit_held, (int)dt, quit_hold_ms))
+                manhunt_quit_request();
         }
         prev = cur;
         svcSleepThread(4000000ll);
