@@ -129,8 +129,13 @@ Set these in `manhunt.env`, one per line.
 | `MANHUNT_GAMMA` | on | Applies the title's gamma ramp at present |
 | `MANHUNT_DEVMENU` | off | `1` opens Rockstar's developer menu with L3+R3 |
 | `MANHUNT_FPS_OVERLAY` | off | `1` draws the frame rate on screen |
+| `MANHUNT_QUIT_COMBO` | on | Hold ZL + ZR + Plus + Minus for 1.5 s to leave the game; `0` turns it off. See below |
+| `MANHUNT_QUIT_HOLD_MS` | 1500 | How long to hold the quit combo (500 or more) |
+| `MANHUNT_QUIT_MODE` | `restart` | How the quit combo ends the game: `restart`, `return` or `process` |
 | `MANHUNT_LOG_FILE` | off | Path of a log file on the card |
 | `MANHUNT_SD_BASE` | `/switch/manhunt1_nx` | Application folder; `game/` is appended for game data |
+
+**Quitting.** Hold ZL + ZR + Plus + Minus for 1.5 seconds. The aim is to leave the game and land back in Sphaira instead of ending the whole takeover session, as HOME then Close Software does, which also takes Sphaira's FTP and netloader away. `MANHUNT_QUIT_MODE` picks the method: `restart` (default) restarts the program, which under the homebrew loader's title takeover reloads the menu; `return` exits the way a normal homebrew app does; `process` ends the process and returns to the Home menu. Which of them lands in Sphaira is UNVERIFIED on the console. Each step is logged as `[MH-EXIT]`.
 
 **In `gpu` mode** rendered pixels are not copied back to guest memory, and CPU writes into a render target are not picked up. No problem from this has been seen in Manhunt, but whether the title ever reads a rendered surface back is UNVERIFIED. If you suspect this, compare with `MANHUNT_GL_SYNC=strict`.
 
