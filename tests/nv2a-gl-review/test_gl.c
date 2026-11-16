@@ -163,6 +163,17 @@ static void widescreen_classification_test(void)
      * new program: classification uses only the immutable program allowlist. */
     for(unsigned i=0;i<8;i++){b.tex_va[0]=0x10000u+i*0x1000u;assert(!wide_prog_2d(world));}
     assert(!wide_prog_2d(0));
+    /* In a level frame a HUD draw squeezes about the nearest screen edge. */
+    s_wide_level=1;
+    attrs[0]=48;attrs[64]=165;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==0);
+    attrs[0]=510;attrs[64]=592;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==640);
+    attrs[0]=280;attrs[64]=360;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==320);
+    attrs[0]=0;attrs[64]=640;wide_2d(&b,&s,hud,out);assert(out[0]==0&&out[1]==0);
+    wide_2d(&b,&s,movie,out);assert(out[0]==.75f&&out[1]==320);
+    /* Not a level frame (menu, movie): the centred 4:3 block, as before. */
+    s_wide_level=0;
+    attrs[0]=48;attrs[64]=165;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==320);
+    s_wide_level=1;attrs[0]=20;attrs[64]=100;
     s.w=320;wide_2d(&b,&s,hud,out);assert(out[0]==0&&out[1]==0);
     s.w=640;fake_widescreen=0;wide_2d(&b,&s,movie,out);assert(out[0]==0&&out[1]==0);
     assert(!wide_prog_2d(hud));

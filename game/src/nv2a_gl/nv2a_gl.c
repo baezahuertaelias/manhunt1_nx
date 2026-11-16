@@ -2585,6 +2585,26 @@ static int wide_target(const Nv2aRawBatch *b, const GlSurf *s)
            (float)s->h / (b->aa_sy > 0 ? b->aa_sy : 1.0f) == 480.0f;
 }
 
+/* In-level HUD placement. Run 40's capture of a level frame shows the HUD as
+ * separate small draws in two clusters (left, x 48..165; right, x 498..592)
+ * and each text string as one draw. Squeezing all of them about the centre
+ * left the HUD as a 4:3 block in the middle of a 16:9 screen. During a level
+ * (the previous frame had 300 or more draws on the 640x480 target) a 2D draw
+ * is squeezed about the screen edge nearest to its own centre instead: the
+ * left edge, the right edge, or the middle for what is centred (crosshair,
+ * subtitles, prompts). Menus and movies are not level frames and stay
+ * centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
+static int s_wide_level;
+static int wide_hud_edges(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_WIDE_HUD");
+        on = !(e && e[0] == '0' && !e[1]);
+    }
+    return on;
+}
+
 static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float out[2])
 {
     float minx, maxx, w = (float)s->w;
@@ -2596,6 +2616,13 @@ static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float
         return;
     out[0] = 0.75f;
     out[1] = w * 0.5f;
+    if (s_wide_level && wide_hud_edges()) {
+        float cx = (minx + maxx) * 0.5f;
+        if (cx < w * 0.28f)
+            out[1] = 0.0f;
+        else if (cx > w * 0.72f)
+            out[1] = w;
+    }
 }
 
 /* Xbox D3D draws pre-transformed (screen-space) vertices through a small
@@ -3347,6 +3374,7 @@ static void gl_flip_work(void)
         fprintf(stderr, "[MH-WIDE-DRAW] capture %u, frame %u (previous frame had %u draws)\n",
                 s_wide_dumps, s_frame + 1, s_wide_frame_draws);
     }
+    s_wide_level = s_wide_frame_draws >= 300;
     s_wide_frame_draws = 0;
     s_frame++;
     {
