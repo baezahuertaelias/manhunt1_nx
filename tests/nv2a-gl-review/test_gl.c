@@ -148,6 +148,15 @@ static void shader_modes_test(void)
 }
 static void widescreen_classification_test(void)
 {
+    /* Level detection hysteresis: menus at 37..41 draws never switch it on or
+     * flip it; a level frame at 90 does; a dip to 30 keeps it; 24 ends it. */
+    assert(!wide_level_next(0,0)&&!wide_level_next(0,41)&&!wide_level_next(0,49));
+    assert(wide_level_next(0,50)&&wide_level_next(0,90)&&wide_level_next(0,997));
+    assert(wide_level_next(1,30)&&wide_level_next(1,25)&&!wide_level_next(1,24)&&!wide_level_next(1,0));
+    {int lv=0;unsigned menu[]={37,40,41,39,38,41,40};
+     for(unsigned i=0;i<7;i++){lv=wide_level_next(lv,menu[i]);assert(lv==0);}
+     lv=wide_level_next(lv,90);assert(lv==1);
+     lv=wide_level_next(lv,40);assert(lv==1);}
     const uint64_t hud=0x43720A569E4D3893ull,movie=0xBA9E387C24FCECE1ull;
     const uint64_t overlay=0xD7829B66D519BE47ull,world=0x1122334455667788ull;
     GlSurf s={0};Nv2aRawBatch b={0};float attrs[2*64]={0},out[2];

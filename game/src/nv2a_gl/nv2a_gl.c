@@ -2589,13 +2589,22 @@ static int wide_target(const Nv2aRawBatch *b, const GlSurf *s)
  * separate small draws in two clusters (left, x 48..165; right, x 498..592)
  * and each text string as one draw. Squeezing all of them about the centre
  * left the HUD as a 4:3 block in the middle of a 16:9 screen. During a level
- * (the previous frame had WIDE_LEVEL_DRAWS or more draws on the 640x480 target) a 2D draw
+ * (the previous frame had enough draws on the 640x480 target, see wide_level_next) a 2D draw
  * is squeezed about the screen edge nearest to its own centre instead: the
  * left edge, the right edge, or the middle for what is centred (crosshair,
  * subtitles, prompts). Menus and movies are not level frames and stay
  * centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
-#define WIDE_LEVEL_DRAWS 40u
+/* Level detection with hysteresis. Menus and loading screens draw 0 to 41
+ * (console run, frames 391 to 841: they sat on 37 to 41 and a single
+ * threshold flipped every frame or two); a level averages about 90 and a
+ * busy one 900. On at 50 or more, off below 25. */
+#define WIDE_LEVEL_ON_DRAWS  50u
+#define WIDE_LEVEL_OFF_DRAWS 25u
 static int s_wide_level;
+static int wide_level_next(int level, unsigned draws)
+{
+    return level ? draws >= WIDE_LEVEL_OFF_DRAWS : draws >= WIDE_LEVEL_ON_DRAWS;
+}
 static int wide_hud_edges(void)
 {
     static int on = -1;
@@ -3404,12 +3413,11 @@ static void gl_flip_work(void)
                 s_wide_dumps, s_frame + 1, s_wide_frame_draws);
     }
     {
-        /* A level frame has well over WIDE_LEVEL_DRAWS draws on the 640x480
-         * target (the Scrap level averages about 90, busier scenes 900); a
-         * menu has about 10 and a movie 1 or 2. The first transitions are
+        /* The Scrap level averages about 90 draws on the 640x480 target, busier
+         * scenes 900; a menu has up to about 41 and a movie 1 or 2. The first transitions are
          * logged so a run shows whether the HUD anchoring was on. */
         static unsigned s_logged;
-        int lvl = s_wide_frame_draws >= WIDE_LEVEL_DRAWS;
+        int lvl = wide_level_next(s_wide_level, s_wide_frame_draws);
         if (lvl != s_wide_level && xbox_video_widescreen() && s_logged++ < 24)
             fprintf(stderr, "[MH-WIDE] frame %u: %s (%u draws on the target)\n",
                     s_frame, lvl ? "level, HUD anchored to the edges" : "not a level, HUD centred",
