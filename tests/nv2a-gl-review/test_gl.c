@@ -170,11 +170,22 @@ static void widescreen_classification_test(void)
     attrs[0]=280;attrs[64]=360;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==320);
     attrs[0]=0;attrs[64]=640;wide_2d(&b,&s,hud,out);assert(out[0]==0&&out[1]==0);
     wide_2d(&b,&s,movie,out);assert(out[0]==.75f&&out[1]==320);
+    /* Thresholds: 28% of 640 is 179.2, 72% is 460.8 (centres, not edges). */
+    attrs[0]=170;attrs[64]=186;wide_2d(&b,&s,hud,out);assert(out[1]==0);      /* cx 178 */
+    attrs[0]=172;attrs[64]=190;wide_2d(&b,&s,hud,out);assert(out[1]==320);    /* cx 181 */
+    attrs[0]=450;attrs[64]=470;wide_2d(&b,&s,hud,out);assert(out[1]==320);    /* cx 460 */
+    attrs[0]=452;attrs[64]=472;wide_2d(&b,&s,hud,out);assert(out[1]==640);    /* cx 462 */
+    /* Anti-aliased target (surface 1280x960, aa 2): a right-hand HUD at
+     * x 498..592 in 640 coordinates must still anchor right. */
+    {Nv2aRawBatch ba=b;GlSurf sa=s;sa.w=1280;sa.h=960;ba.aa_sx=ba.aa_sy=2;
+     attrs[0]=498;attrs[64]=592;wide_2d(&ba,&sa,hud,out);assert(out[1]==1280);
+     attrs[0]=49;attrs[64]=164;wide_2d(&ba,&sa,hud,out);assert(out[1]==0);}
     /* Not a level frame (menu, movie): the centred 4:3 block, as before. */
     s_wide_level=0;
     attrs[0]=48;attrs[64]=165;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==320);
     s_wide_level=1;attrs[0]=20;attrs[64]=100;
     s.w=320;wide_2d(&b,&s,hud,out);assert(out[0]==0&&out[1]==0);
+    s_wide_level=0;
     s.w=640;fake_widescreen=0;wide_2d(&b,&s,movie,out);assert(out[0]==0&&out[1]==0);
     assert(!wide_prog_2d(hud));
     puts("PASS widescreen immutable allowlist, reused addresses, full movie/HUD/overlay bounds and off/target resets");

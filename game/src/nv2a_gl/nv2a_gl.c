@@ -2617,10 +2617,14 @@ static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float
     out[0] = 0.75f;
     out[1] = w * 0.5f;
     if (s_wide_level && wide_hud_edges()) {
+        /* wide_xrange gives xform 1 in scaled pixels (aa_sx applied) and
+         * xform 0 and 2 as the draw's own 640-wide coordinates, so the
+         * thresholds are taken against the width in the same units. */
+        float lw = (b->xform != 1 && b->aa_sx > 0.0f) ? w / b->aa_sx : w;
         float cx = (minx + maxx) * 0.5f;
-        if (cx < w * 0.28f)
+        if (cx < lw * 0.28f)
             out[1] = 0.0f;
-        else if (cx > w * 0.72f)
+        else if (cx > lw * 0.72f)
             out[1] = w;
     }
 }
