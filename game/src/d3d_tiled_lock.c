@@ -23,10 +23,12 @@
  * in another object file (recomp_0057.c, recomp_dispatch.c), so all of them
  * reach this wrapper.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #include "recomp_types.h"
 
@@ -36,6 +38,8 @@
 #define RAM_BYTES       0x04000000u
 
 extern void __real_sub_00295EC0(void);
+/* Audio frames played so far (audio_sdl.c); absent in the host test. */
+extern uint64_t xa2_samples_played(void) __attribute__((weak));
 
 void __wrap_sub_00295EC0(void)
 {
@@ -63,7 +67,13 @@ void __wrap_sub_00295EC0(void)
          * every 30th. The count shows whether the decoder keeps running. */
         unsigned n = atomic_fetch_add_explicit(&s_logged, 1, memory_order_relaxed);
         if (n < 8 || n % 30 == 0)
-            fprintf(stderr, "[MH-D3D] movie lock #%u 0x%08X -> 0x%08X (no tiled aperture on Horizon)\n",
-                    n, p, p - (TILED_BASE - CONTIG_BASE));
+        {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            fprintf(stderr, "[MH-D3D] movie lock #%u 0x%08X -> 0x%08X (no tiled aperture on Horizon) wall=%llu ms audio=%llu ms\n",
+                    n, p, p - (TILED_BASE - CONTIG_BASE),
+                    (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)ts.tv_nsec / 1000000ull,
+                    xa2_samples_played ? (unsigned long long)(xa2_samples_played() / 48u) : 0ull);
+        }
     }
 }

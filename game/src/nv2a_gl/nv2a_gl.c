@@ -2585,6 +2585,38 @@ static int wide_target(const Nv2aRawBatch *b, const GlSurf *s)
            (float)s->h / (b->aa_sy > 0 ? b->aa_sy : 1.0f) == 480.0f;
 }
 
+/* In-level HUD placement. Run 40's capture of a level frame shows the HUD as
+ * separate small draws in two clusters (left, x 48..165; right, x 498..592)
+ * and each text string as one draw. Squeezing all of them about the centre
+ * left the HUD as a 4:3 block in the middle of a 16:9 screen. During a level
+ * (the previous frame had WIDE_LEVEL_DRAWS or more draws on the 640x480 target) a 2D draw
+ * is squeezed about the screen edge nearest to its own centre instead: the
+ * left edge, the right edge, or the middle for what is centred (crosshair,
+ * subtitles, prompts). Menus and movies are not level frames and stay
+ * centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
+#define WIDE_LEVEL_DRAWS 40u
+static int s_wide_level;
+static int wide_hud_edges(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_WIDE_HUD");
+        on = !(e && e[0] == '0' && !e[1]);
+    }
+    return on;
+}
+
+/* 0 crop (default), 1 stretch, 2 bars. */
+static int wide_movie_mode(void)
+{
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("MANHUNT_WIDE_MOVIE");
+        mode = (e && !strcmp(e, "stretch")) ? 1 : (e && !strcmp(e, "bars")) ? 2 : 0;
+    }
+    return mode;
+}
+
 static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float out[2])
 {
     float minx, maxx, w = (float)s->w;
@@ -2594,8 +2626,32 @@ static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float
         return;
     if (minx <= 2.0f && maxx >= w - 2.0f && vkey != 0xBA9E387C24FCECE1ull)
         return;
+    if (vkey == 0xBA9E387C24FCECE1ull) {
+        /* A movie is 4:3. MANHUNT_WIDE_MOVIE: crop (default) scales it to the
+         * full width and lets the top and bottom run off the target, so it
+         * fills the 16:9 screen undistorted (the surface is shown at 16:9, so
+         * x stays and y grows by 4/3 about the middle row); stretch fills the
+         * width and stretches it, nothing lost; bars keeps the centred 4:3
+         * picture. A negative scale in out[0] means y (see gl_vsh.c). */
+        switch (wide_movie_mode()) {
+        case 0:  out[0] = -4.0f / 3.0f; out[1] = (float)s->h * 0.5f; return;
+        case 1:  return;
+        default: break;
+        }
+    }
     out[0] = 0.75f;
     out[1] = w * 0.5f;
+    if (s_wide_level && wide_hud_edges()) {
+        /* wide_xrange gives xform 1 in scaled pixels (aa_sx applied) and
+         * xform 0 and 2 as the draw's own 640-wide coordinates, so the
+         * thresholds are taken against the width in the same units. */
+        float lw = (b->xform != 1 && b->aa_sx > 0.0f) ? w / b->aa_sx : w;
+        float cx = (minx + maxx) * 0.5f;
+        if (cx < lw * 0.28f)
+            out[1] = 0.0f;
+        else if (cx > lw * 0.72f)
+            out[1] = w;
+    }
 }
 
 /* Xbox D3D draws pre-transformed (screen-space) vertices through a small
@@ -3346,6 +3402,19 @@ static void gl_flip_work(void)
         s_wide_dump_ff = 0;
         fprintf(stderr, "[MH-WIDE-DRAW] capture %u, frame %u (previous frame had %u draws)\n",
                 s_wide_dumps, s_frame + 1, s_wide_frame_draws);
+    }
+    {
+        /* A level frame has well over WIDE_LEVEL_DRAWS draws on the 640x480
+         * target (the Scrap level averages about 90, busier scenes 900); a
+         * menu has about 10 and a movie 1 or 2. The first transitions are
+         * logged so a run shows whether the HUD anchoring was on. */
+        static unsigned s_logged;
+        int lvl = s_wide_frame_draws >= WIDE_LEVEL_DRAWS;
+        if (lvl != s_wide_level && xbox_video_widescreen() && s_logged++ < 24)
+            fprintf(stderr, "[MH-WIDE] frame %u: %s (%u draws on the target)\n",
+                    s_frame, lvl ? "level, HUD anchored to the edges" : "not a level, HUD centred",
+                    s_wide_frame_draws);
+        s_wide_level = lvl;
     }
     s_wide_frame_draws = 0;
     s_frame++;

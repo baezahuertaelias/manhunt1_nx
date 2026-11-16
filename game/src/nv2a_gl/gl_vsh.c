@@ -446,6 +446,7 @@ const char *nv2a_gl_vsh_prelude_mode(int ubo)
     "    float w = abs(oPos.w) < 1e-6 ? 1e-6 : oPos.w;\n" \
     "    vec3 s = vec3(oPos.xy * u_aa, oPos.z);\n" \
     "    if (u_wide.x > 0.0) s.x = u_wide.y + (s.x - u_wide.y) * u_wide.x;\n" \
+    "    else if (u_wide.x < 0.0) s.y = u_wide.y + (s.y - u_wide.y) * -u_wide.x;\n" \
     "    gl_Position = nv2a_clip(s * w, w);\n" \
     "    vD0 = clamp(oD0, 0.0, 1.0); vD1 = clamp(oD1, 0.0, 1.0);\n" \
     "    vT0 = oT0; vT1 = oT1; vT2 = oT2; vT3 = oT3; vFog = oFog.x;\n" \
@@ -456,7 +457,7 @@ const char *nv2a_gl_vsh_main_program(void)
     if (nv2a_shader_vk)
         return NV2A_VSH_MAIN("    nv2a_ib = gl_InstanceIndex * 192;\n", "");
     /* Vulkan has u_wide in the uniform block. */
-    return NV2A_VSH_MAIN("", "uniform vec2 u_wide;      /* widescreen 2D: x scale, centre (0: off) */\n");
+    return NV2A_VSH_MAIN("", "uniform vec2 u_wide;      /* widescreen 2D: x scale (<0: y scale -x), centre (0: off) */\n");
 }
 
 /* Mirrors the runtime's lit_color, including its current local/spot model.
@@ -511,10 +512,10 @@ const char *nv2a_gl_vsh_fixed(void)
 {
     /* Vulkan: u_xform is a member of the prelude's uniform block. */
     static const char decl[] = "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
-                               "uniform vec2 u_wide;      /* widescreen 2D: x scale, centre (0: off) */\n";
+                               "uniform vec2 u_wide;      /* widescreen 2D: x scale (<0: y scale -x), centre (0: off) */\n";
     static const char body[] =
         "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
-        "uniform vec2 u_wide;      /* widescreen 2D: x scale, centre (0: off) */\n"
+        "uniform vec2 u_wide;      /* widescreen 2D: x scale (<0: y scale -x), centre (0: off) */\n"
         "#ifndef NV2A_DIFFUSE\n#define NV2A_DIFFUSE v3\n#endif\n"
         "void main() {\n"
         "    if (u_xform == 1) {\n"
@@ -524,11 +525,13 @@ const char *nv2a_gl_vsh_fixed(void)
         "        vec3 sw = clip.xyz + u_vpoff.xyz * w;\n"
         "        sw.xy *= u_aa;\n"
         "        if (u_wide.x > 0.0) sw.x = u_wide.y * w + (sw.x - u_wide.y * w) * u_wide.x;\n"
+        "        else if (u_wide.x < 0.0) sw.y = u_wide.y * w + (sw.y - u_wide.y * w) * -u_wide.x;\n"
         "        gl_Position = nv2a_clip(sw, w);\n"
         "    } else {\n"
         "        float w = (v0.w > 0.0) ? 1.0 / v0.w : 1.0;\n"
         "        vec3 p = v0.xyz;\n"
         "        if (u_wide.x > 0.0) p.x = u_wide.y + (p.x - u_wide.y) * u_wide.x;\n"
+        "        else if (u_wide.x < 0.0) p.y = u_wide.y + (p.y - u_wide.y) * -u_wide.x;\n"
         "        gl_Position = nv2a_clip(p * w, w);\n"
         "    }\n"
         "    vD0 = clamp(NV2A_DIFFUSE, 0.0, 1.0); vD1 = clamp(v4, 0.0, 1.0);\n"

@@ -30,4 +30,8 @@ void manhunt_pad_sample(ManhuntPad *out);
 /* MANHUNT_PAD_SCRIPT player (pad_script.c): 1 if a script is configured. */
 int manhunt_pad_script(ManhuntPad *out);
 
+/* Called from the pad poller thread when the quit combo has been held
+ * (quit_combo.h). Switch: implemented in main_switch.c; never returns. */
+void manhunt_quit_request(void);
+
 #endif

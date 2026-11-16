@@ -10,11 +10,13 @@
  *
  * Linked with -Wl,--wrap=xbox_NtCreateFile. Observation only.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdatomic.h>
+#include <time.h>
 
 #include "kernel.h"
 
@@ -53,8 +55,13 @@ NTSTATUS __stdcall __wrap_xbox_NtCreateFile(
     }
     if (n < 64 || (int)st < 0 || has_ci(name, ".xmv") || has_ci(name, ".bik") ||
         has_ci(name, ".wmv") || has_ci(name, "movie") || has_ci(name, "video"))
-        fprintf(stderr, "[MH-FILE] #%u open '%s' access=0x%X disp=%u opts=0x%X -> status=0x%08X\n",
+    {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        fprintf(stderr, "[MH-FILE] wall=%llu ms #%u open '%s' access=0x%X disp=%u opts=0x%X -> status=0x%08X\n",
+                (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)ts.tv_nsec / 1000000ull,
                 n, name, (unsigned)DesiredAccess, (unsigned)CreateDisposition,
                 (unsigned)CreateOptions, (unsigned)st);
+    }
     return st;
 }
