@@ -31,6 +31,7 @@ ENV = """RECOMP_SPAN_4G=1
 MANHUNT_GPU_BACKEND=2
 MANHUNT_AUDIO_APU=1
 MANHUNT_WIDESCREEN=1
+MANHUNT_LANGUAGE=spanish
 """
 
 INSTALL = """Manhunt for Nintendo Switch (recompiled), version {version}

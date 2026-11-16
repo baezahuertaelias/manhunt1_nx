@@ -101,6 +101,7 @@ RECOMP_SPAN_4G=1
 MANHUNT_GPU_BACKEND=2
 MANHUNT_AUDIO_APU=1
 MANHUNT_WIDESCREEN=1
+MANHUNT_LANGUAGE=spanish
 ```
 
 Leave out `RECOMP_GL_DUMP` when playing: it saves a frame to the card and freezes the game each time.
@@ -126,6 +127,7 @@ Set these in `manhunt.env`, one per line.
 | `MANHUNT_AUDIO_APU` | off | `1` starts the audio emulator |
 | `MANHUNT_AUDIO_FRAMES` | 2048 on Switch | SDL period, 256 to 2048, powers of two |
 | `MANHUNT_WIDESCREEN` | off | `1` for 16:9; needs `MANHUNT_GPU_BACKEND=2` |
+| `MANHUNT_LANGUAGE` | `english` | Console language the title reads: `english`, `japanese`, `german`, `french`, `spanish`, `italian`, or 1 to 6. Whether Manhunt switches its text and voices by this setting is UNVERIFIED |
 | `MANHUNT_GAMMA` | on | Applies the title's gamma ramp at present |
 | `MANHUNT_DEVMENU` | off | `1` opens Rockstar's developer menu with L3+R3 |
 | `MANHUNT_FPS_OVERLAY` | off | `1` draws the frame rate on screen |
