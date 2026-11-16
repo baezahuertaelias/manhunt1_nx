@@ -154,7 +154,8 @@ static void widescreen_classification_test(void)
     s.w=640;s.h=480;b.attrs=attrs;b.vertex_count=2;b.xform=2;
     attrs[0]=0;attrs[64]=640;fake_widescreen=1;
     assert(wide_prog_2d(hud)&&wide_prog_2d(movie)&&wide_prog_2d(overlay));
-    wide_2d(&b,&s,movie,out);assert(out[0]==.75f&&out[1]==320);
+    /* Movie, default crop: y scaled 4/3 about the middle row, x untouched. */
+    s.h=480;wide_2d(&b,&s,movie,out);assert(out[0]<-1.33f&&out[0]>-1.34f&&out[1]==240);
     wide_2d(&b,&s,hud,out);assert(out[0]==0&&out[1]==0);
     wide_2d(&b,&s,overlay,out);assert(out[0]==0&&out[1]==0);
     attrs[0]=20;attrs[64]=100;
