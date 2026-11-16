@@ -2589,11 +2589,12 @@ static int wide_target(const Nv2aRawBatch *b, const GlSurf *s)
  * separate small draws in two clusters (left, x 48..165; right, x 498..592)
  * and each text string as one draw. Squeezing all of them about the centre
  * left the HUD as a 4:3 block in the middle of a 16:9 screen. During a level
- * (the previous frame had 300 or more draws on the 640x480 target) a 2D draw
+ * (the previous frame had WIDE_LEVEL_DRAWS or more draws on the 640x480 target) a 2D draw
  * is squeezed about the screen edge nearest to its own centre instead: the
  * left edge, the right edge, or the middle for what is centred (crosshair,
  * subtitles, prompts). Menus and movies are not level frames and stay
  * centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
+#define WIDE_LEVEL_DRAWS 40u
 static int s_wide_level;
 static int wide_hud_edges(void)
 {
@@ -3402,7 +3403,19 @@ static void gl_flip_work(void)
         fprintf(stderr, "[MH-WIDE-DRAW] capture %u, frame %u (previous frame had %u draws)\n",
                 s_wide_dumps, s_frame + 1, s_wide_frame_draws);
     }
-    s_wide_level = s_wide_frame_draws >= 300;
+    {
+        /* A level frame has well over WIDE_LEVEL_DRAWS draws on the 640x480
+         * target (the Scrap level averages about 90, busier scenes 900); a
+         * menu has about 10 and a movie 1 or 2. The first transitions are
+         * logged so a run shows whether the HUD anchoring was on. */
+        static unsigned s_logged;
+        int lvl = s_wide_frame_draws >= WIDE_LEVEL_DRAWS;
+        if (lvl != s_wide_level && xbox_video_widescreen() && s_logged++ < 24)
+            fprintf(stderr, "[MH-WIDE] frame %u: %s (%u draws on the target)\n",
+                    s_frame, lvl ? "level, HUD anchored to the edges" : "not a level, HUD centred",
+                    s_wide_frame_draws);
+        s_wide_level = lvl;
+    }
     s_wide_frame_draws = 0;
     s_frame++;
     {
