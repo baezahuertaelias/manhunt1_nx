@@ -134,6 +134,20 @@ Set these in `manhunt.env`, one per line.
 
 **In `gpu` mode** rendered pixels are not copied back to guest memory, and CPU writes into a render target are not picked up. No problem from this has been seen in Manhunt, but whether the title ever reads a rendered surface back is UNVERIFIED. If you suspect this, compare with `MANHUNT_GL_SYNC=strict`.
 
+## Texture tools
+
+Two offline helpers for working with the game's art. They run on your own game files and write only where you point them; the output is game art and must never be committed (write it under `game/build/`, which is ignored).
+
+```sh
+python3 tools/txd_extract.py assets/manhunt1_xbe game/build/textures
+python3 tools/upscale_textures.py game/build/textures game/build/textures-4x --scale 4 --only menu/
+```
+
+- `tools/txd_extract.py` reads the Xbox `.TXD` files (5,564 of the game's 5,612 textures: DXT1, DXT3, DXT5, 8-bit paletted and 32-bit, unswizzled) and writes PNGs plus a `manifest.json` with each texture's size, format and the SHA-256 of its stored bytes. Standard library only; about 0.1 s per texture, so a full run takes several minutes. The 48 older-layout textures are reported and skipped.
+- `tools/upscale_textures.py` runs a local upscaler you install (default `realesrgan-ncnn-vulkan`) over those PNGs, keeping the layout and manifest, and can be stopped and restarted. Nothing is uploaded. The upscaler step itself is UNVERIFIED here: it was tested against a stub, not a real model.
+
+The renderer does not load upscaled textures yet. Doing that on the console is limited by memory: a 4x texture costs 16x as much.
+
 ## Repository layout
 
 | Path | Contents |
@@ -143,6 +157,7 @@ Set these in `manhunt.env`, one per line.
 | `game/patches/xboxrecomp/` | Patches applied to the pinned runtime |
 | `infra/` | Container definitions |
 | `scripts/` | Build, emulator and console helpers |
+| `tools/` | Offline texture extraction and upscaling helpers |
 | `tests/` | Focused tests and proofs |
 | `analysis/` | Executable analysis helpers |
 | `reports/ASSET_MANIFEST.sha256` | Hashes of the expected input files, used by `scripts/switch-boot-proof.sh` |
