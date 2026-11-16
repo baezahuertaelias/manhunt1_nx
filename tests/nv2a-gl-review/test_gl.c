@@ -170,7 +170,8 @@ static void widescreen_classification_test(void)
     attrs[0]=510;attrs[64]=592;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==640);
     attrs[0]=280;attrs[64]=360;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==320);
     attrs[0]=0;attrs[64]=640;wide_2d(&b,&s,hud,out);assert(out[0]==0&&out[1]==0);
-    wide_2d(&b,&s,movie,out);assert(out[0]==.75f&&out[1]==320);
+    /* A movie at level is still the crop case, never edge-anchored. */
+    wide_2d(&b,&s,movie,out);assert(out[0]<-1.33f&&out[0]>-1.34f&&out[1]==240);
     /* Thresholds: 28% of 640 is 179.2, 72% is 460.8 (centres, not edges). */
     attrs[0]=170;attrs[64]=186;wide_2d(&b,&s,hud,out);assert(out[1]==0);      /* cx 178 */
     attrs[0]=172;attrs[64]=190;wide_2d(&b,&s,hud,out);assert(out[1]==320);    /* cx 181 */
