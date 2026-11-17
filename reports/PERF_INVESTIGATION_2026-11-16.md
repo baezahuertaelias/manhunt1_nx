@@ -121,11 +121,28 @@ Host: all 13 GL suites in `tests/gpu-offload/run.sh` pass. The audio suite does 
 
 Session 2 ended in the intro, so `samestate` is still unmeasured in gameplay.
 
+### Session 3: heavy gameplay, docked (2026-11-17)
+
+Launched from the SD card with `MANHUNT_PERF_LOG=2`, `RECOMP_GL_THREAD=1` and `MANHUNT_DUMP_SECS=0` added to `manhunt.env` (the original is kept as `manhunt.env.pre-perf`). The run lasted about 11 min, 322 `[perf]` periods, charging. Clocks were CPU 1020, GPU 768, EMC 1600 MHz throughout. Evidence: `game/build/hw-test/perf-play/20261117-114928-sd`.
+
+- **`samestate` was 0.0 in every period**, menus included. No draw left GL state exactly as the previous draw did. Every change to the counter is guarded by an actual change (the state-cache early-out, the per-uniform compares, the constants UBO keyed by `vp_const_gen`). So the most likely cause is that each object draw brings its own vertex constants, such as the transform matrices. Merging consecutive draws as they are would combine nothing. Merging would need each draw's constants in one buffer, indexed per draw: a much larger change.
+- **A faster GPU did not help.** At 2.5x the GPU clock and a faster memory clock, frame rate at a given draw count was no better than session 1 at 307 MHz:
+
+  | Draws per frame | Periods | FPS | GL draw | Swap |
+  |---|---:|---:|---:|---:|
+  | 100–299 (avg 173) | 160 | 67.8 | 7.3 ms | 1.5 ms |
+  | 300–599 (avg 427) | 125 | 40.9 | 14.6 ms | 1.7 ms |
+  | 600+ (avg 705) | 32 | 31.1 | 21.8 ms | 1.6 ms |
+
+  The cost is still about 0.03 ms of CPU per draw. Gameplay is limited by the CPU: the driver's per-draw work on the GL thread, the guest and the APU each take most of a core, at 1020 MHz.
+
 ### Open
 
-1. **Measure `samestate` in a heavy gameplay scene.** If it is a large share of the draws, merge consecutive same-state draws (one index buffer, base vertex). If it is small, look at per-draw costs instead: vertex attributes are re-pointed with `glVertexAttribPointer` on every draw, and the driver validates those again.
-2. **Compare clocks.** `MANHUNT_GPU_MHZ` can only lower the clock, so a run at higher clocks has to be docked. Swap was only 1.6–2.5 ms per frame, which suggests the GPU is not the limit.
-3. **Audio (item 6)** still uses most of a core.
+1. **Per-draw CPU cost in the driver.** Two things could be tested:
+   - Vertex attributes are re-pointed with `glVertexAttribPointer` on every draw, so Mesa revalidates the vertex layout each time. Keeping the pointers fixed and using a base vertex where the layout repeats would avoid that.
+   - The constants UBO uploads all 3,072 bytes whenever `vp_const_gen` changes, which appears to be every draw. Uploading only the rows that changed, or only `vp_const_count`, would cut that.
+2. **CPU clock.** The CPU was at 1020 MHz in every run. This report does not cover raising it.
+3. **Audio (item 6)** still uses most of a core (APU 84–89% in session 3).
 
 ## Not covered here
 
