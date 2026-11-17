@@ -136,13 +136,22 @@ Launched from the SD card with `MANHUNT_PERF_LOG=2`, `RECOMP_GL_THREAD=1` and `M
 
   The cost is still about 0.03 ms of CPU per draw. Gameplay is limited by the CPU: the driver's per-draw work on the GL thread, the guest and the APU each take most of a core, at 1020 MHz.
 
+### Changes made after session 3 (commit `d50e5fc`)
+
+- **Kept attribute pointers.** An interleaved draw (one source run, one stride, nothing converted) with the same layout as the previous draw is placed a whole number of vertices after it in the same ring buffer. It keeps the attribute pointers and draws with `glDrawElementsBaseVertex`, so Mesa has no vertex arrays to validate again. The pointers are set again when the layout changes, the buffer is replaced, or the ring wraps to an earlier offset. `MANHUNT_GL_BASE_VERTEX=0` restores the old path. `[perf-gl]` counts these draws as `kept`.
+- **Same-content constants.** `vp_const_gen` moves on every constant write, including rewrites of the same values. Constants identical to the bound range are no longer uploaded again (3 KB each). `[perf-gl]` counts these as `constreuse`.
+
+Host: all GL suites and the llvmpipe rendering suite pass. A new streaming contract covers placement, the base vertex, re-pointing on a layout change, and ring wrap. **Not yet measured on the console.**
+
+## Decisions
+
+- **The CPU clock stays at the system's setting** (owner, 2026-11-17). The port does not raise it. `MANHUNT_CPU_MHZ` and `MANHUNT_GPU_MHZ` can only lower clocks, and that stays as is. Performance work has to reduce CPU work instead.
+
 ### Open
 
-1. **Per-draw CPU cost in the driver.** Two things could be tested:
-   - Vertex attributes are re-pointed with `glVertexAttribPointer` on every draw, so Mesa revalidates the vertex layout each time. Keeping the pointers fixed and using a base vertex where the layout repeats would avoid that.
-   - The constants UBO uploads all 3,072 bytes whenever `vp_const_gen` changes, which appears to be every draw. Uploading only the rows that changed, or only `vp_const_count`, would cut that.
-2. **CPU clock.** The CPU was at 1020 MHz in every run. This report does not cover raising it.
-3. **Audio (item 6)** still uses most of a core (APU 84–89% in session 3).
+1. **Measure `d50e5fc` on the console** in the same heavy scene as session 3. Compare the `kept` and `constreuse` counts and the upload, uniform and submit times.
+2. **Other per-draw CPU cost in the driver.** `glDrawElements` is still about 8–10 ms a frame in heavy scenes.
+3. **Audio (item 6)** still uses most of a core (APU 84–89% in session 3). Ideas: NEON for the HRTF and the voice mixer, and core pinning.
 
 ## Not covered here
 
