@@ -285,6 +285,55 @@ static void pf_bind_texture(GLenum target, GLuint tex)
 #define glUniform2fv pf_uniform2fv
 #define glUniform1i pf_uniform1i
 #define glUniform1f pf_uniform1f
+/* Manhunt port addition (MANHUNT_PERF_LOG): would merging draws pay? Every GL
+ * call that changes what a draw sees -- program, uniforms, textures and their
+ * contents or sampling, fixed state, framebuffer, constant attributes,
+ * queries -- bumps s_gl_change; a draw that finds it unchanged since the
+ * previous draw (same surface, primitive, index size and vertex layout) is
+ * counted as same_state_draws: it could have gone out in the same call. */
+static uint32_t s_gl_change;
+static void pf_bump_texture(GLenum target, GLuint tex) { s_gl_change++; pf_bind_texture(target, tex); }
+static void pf_use_program(GLuint p) { s_gl_change++; p_glUseProgram(p); }
+static void pf_clear(GLbitfield m) { s_gl_change++; p_glClear(m); }
+static void pf_bind_framebuffer(GLenum t, GLuint fb) { s_gl_change++; p_glBindFramebuffer(t, fb); }
+static void pf_blit_framebuffer(GLint a, GLint b, GLint c, GLint d, GLint e, GLint f, GLint g, GLint h,
+                                GLbitfield m, GLenum fl)
+{ s_gl_change++; p_glBlitFramebuffer(a, b, c, d, e, f, g, h, m, fl); }
+static void pf_tex_parameteri(GLenum t, GLenum n, GLint v) { s_gl_change++; p_glTexParameteri(t, n, v); }
+static void pf_tex_image(GLenum t, GLint l, GLint f, GLsizei w, GLsizei h, GLint b, GLenum fm, GLenum ty,
+                         const void *d)
+{ s_gl_change++; p_glTexImage2D(t, l, f, w, h, b, fm, ty, d); }
+static void pf_tex_sub_image(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum fm, GLenum ty,
+                             const void *d)
+{ s_gl_change++; p_glTexSubImage2D(t, l, x, y, w, h, fm, ty, d); }
+static void pf_compressed_tex_image(GLenum t, GLint l, GLenum f, GLsizei w, GLsizei h, GLint b, GLsizei n,
+                                    const void *d)
+{ s_gl_change++; p_glCompressedTexImage2D(t, l, f, w, h, b, n, d); }
+static void pf_vertex_attrib4f(GLuint a, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
+{ s_gl_change++; p_glVertexAttrib4f(a, x, y, z, w); }
+static void pf_begin_query(GLenum t, GLuint q) { s_gl_change++; p_glBeginQuery(t, q); }
+#undef glBindTexture
+#undef glUseProgram
+#undef glClear
+#undef glBindFramebuffer
+#undef glBlitFramebuffer
+#undef glTexParameteri
+#undef glTexImage2D
+#undef glTexSubImage2D
+#undef glCompressedTexImage2D
+#undef glVertexAttrib4f
+#undef glBeginQuery
+#define glBindTexture pf_bump_texture
+#define glUseProgram pf_use_program
+#define glClear pf_clear
+#define glBindFramebuffer pf_bind_framebuffer
+#define glBlitFramebuffer pf_blit_framebuffer
+#define glTexParameteri pf_tex_parameteri
+#define glTexImage2D pf_tex_image
+#define glTexSubImage2D pf_tex_sub_image
+#define glCompressedTexImage2D pf_compressed_tex_image
+#define glVertexAttrib4f pf_vertex_attrib4f
+#define glBeginQuery pf_begin_query
 static GLuint        s_cur_prog;         /* what glUseProgram last got */
 static void state_dirty(void);
 /* Last sampler state set on a GL texture (bind_stage). */
@@ -898,6 +947,30 @@ static uint32_t swizzle_index(uint32_t u, uint32_t v, uint32_t w, uint32_t h)
  * SET_TEXTURE_PALETTE (offset in the upper bits, length code in [3:2]:
  * 256, 128, 64 or 32 entries). The executor's decoder has no palette state,
  * so this format is decoded here. */
+/* Linear 4:2:2 YUV (0x24 YUY2: Y0 U Y1 V; 0x25 UYVY: U Y0 V Y1) to A8R8G8B8.
+ * The backend sampler's BT.601 maths exactly (nv2a_pb_exec.c, sample_tex), so
+ * both paths give the same colour; w is even. */
+static uint8_t yuv_clamp(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+static void yuv422_decode(const uint8_t *src, uint32_t w, uint32_t h, uint32_t pitch,
+                          uint32_t yoff, uint32_t *out)
+{
+    uint32_t x, y;
+
+    for (y = 0; y < h; y++) {
+        const uint8_t *g = src + (size_t)y * pitch;
+        uint32_t *o = out + (size_t)y * w;
+        for (x = 0; x < w; x += 2, g += 4) {
+            int cu = (int)g[1 - yoff] - 128, cv = (int)g[3 - yoff] - 128;
+            int dr = 409 * cv + 128, dg = -100 * cu - 208 * cv + 128, db = 516 * cu + 128;
+            int c0 = 298 * ((int)g[yoff] - 16), c1 = 298 * ((int)g[2 + yoff] - 16);
+            o[x]     = 0xFF000000u | (uint32_t)yuv_clamp((c0 + dr) >> 8) << 16
+                     | (uint32_t)yuv_clamp((c0 + dg) >> 8) << 8 | yuv_clamp((c0 + db) >> 8);
+            o[x + 1] = 0xFF000000u | (uint32_t)yuv_clamp((c1 + dr) >> 8) << 16
+                     | (uint32_t)yuv_clamp((c1 + dg) >> 8) << 8 | yuv_clamp((c1 + db) >> 8);
+        }
+    }
+}
+
 static uint32_t s_palette_reg, s_palette_va;   /* stage being bound */
 static const Nv2aRawBatch *s_batch;          /* draw being executed */
 
@@ -1130,6 +1203,27 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         s_decode_cap = (size_t)w * h;
         s_decode = (uint32_t *)malloc(s_decode_cap * 4);
     }
+    if (s_decode && (color == 0x24 || color == 0x25) && w && !(w & 1) && pitch >= w * 2
+        && ram_span(va, (size_t)pitch * h)) {
+        /* Manhunt port addition: 4:2:2 YUV, how the intro and cutscene movies
+         * hand over each frame. Through the backend's sampler (one call per
+         * texel) and a fresh allocation it cost ~57 ms a frame on the console,
+         * 16 FPS for every movie. Same BT.601 integer maths as the sampler,
+         * two texels per chroma pair, into the storage the texture already has. */
+        yuv422_decode((const uint8_t *)xbox_GetMemoryOffset() + va, w, h, pitch,
+                      color == 0x24 ? 0u : 1u, s_decode);
+        bind_tex(t->tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        if (t->bytes == w * h * 4)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h,
+                            GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        else
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                         GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        tex_account(t, w * h * 4);
+        gl_step_done("texture upload");
+        return t->tex;
+    }
     memset(&nt, 0, sizeof nt);
     nt.offset = va; nt.width = w; nt.height = h; nt.pitch = pitch; nt.color = color;
     nt.addr_u = nt.addr_v = 1;
@@ -1301,6 +1395,7 @@ static GLintptr ubo_align(GLintptr at)
 static void ubo_put(GLuint binding, const void *data, GLsizeiptr size)
 {
     GLintptr at = ubo_align(s_ubo.off);
+    s_gl_change++;
     glBufferSubData(GL_UNIFORM_BUFFER, at, size, data);
     glBindBufferRange(GL_UNIFORM_BUFFER, binding, s_ubo.buf, at, size);
     s_ubo.off = at + size;
@@ -1989,6 +2084,7 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
     want.cm = cm;
     if (s_st_valid && !memcmp(&want, &s_st, sizeof want))
         return;
+    s_gl_change++;
     if (state_cache_enabled()) {
         const int valid = s_st_valid;
         const GlState old = s_st;
@@ -3230,6 +3326,23 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                 s_vis_scale[s_vis_head % GL_VIS_QUERIES] =
                     (float)((double)s->w * s->h / ((double)s->pw * s->ph));
                 glBeginQuery(GL_SAMPLES_PASSED, s_vis_q[s_vis_head % GL_VIS_QUERIES]);
+            }
+            if (perf_detail()) {
+                /* Vertex layout: which attributes, and each direct one's
+                 * storage; the offsets may differ (one buffer could hold both). */
+                static uint32_t last_change, last_frame, last_layout;
+                static const GlSurf *last_s;
+                static GLenum last_mode, last_type;
+                uint32_t layout = b->attr_present * 2654435761u ^ b->attr_direct;
+                for (a = 0; a < NV2A_RAW_ATTRS; a++)
+                    if (b->attr_direct & (1u << a))
+                        layout = (layout ^ (b->direct[a].type | b->direct[a].size << 8
+                                            | b->direct[a].stride << 16)) * 16777619u;
+                if (s_gl_change == last_change && s == last_s && s_frame == last_frame
+                    && mode == last_mode && idx_type == last_type && layout == last_layout)
+                    PF_ADD(same_state_draws, 1);
+                last_change = s_gl_change; last_s = s; last_frame = s_frame;
+                last_mode = mode; last_type = idx_type; last_layout = layout;
             }
             PF_STAGE(other_ns);
             glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);

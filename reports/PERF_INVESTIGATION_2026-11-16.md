@@ -1,8 +1,8 @@
 # Performance investigation — 2026-11-16
 
-Branch: `perf/investigation`. Nothing in the code was changed; this is a report.
+Branch: `perf/investigation`.
 
-**Status: UNVERIFIED on the console.** No hardware logs were available, so the ranking below comes from reading the code and from compiling one lifted chunk on the host. Only code size and compile time were measured. No frame rate was measured.
+**Status of the findings below: UNVERIFIED on the console.** No hardware logs were available when they were written, so the ranking comes from reading the code and from compiling one lifted chunk on the host. Console measurements and the changes made after them are in "Console runs" further down. Only code size and compile time were measured. No frame rate was measured.
 
 Earlier reports show the guest CPU is the bottleneck: "rest" time of 26–48 ms per frame against 12–22 ms of GL draw time (`reports/GPU_OFFLOAD_*.md`, `SWITCH_RUN_2026-11-11.md`). So CPU-side items come first.
 
@@ -80,6 +80,52 @@ Compile time for the chunk fell from 17 s to 9 s with the struct. The whole NRO 
 ## How to settle the ranking
 
 Build with `-DMANHUNT_CALL_PROFILE=ON` (`game/src/call_profile.c`) and run one heavy scene. The top guest functions show whether items 2 to 5 matter and whether any single function is worth replacing by hand.
+
+## Console runs, 2026-11-16 and 2026-11-17
+
+Two play sessions with `scripts/perf-play-run.ps1` (nxlink, `MANHUNT_PERF_LOG=2`, `RECOMP_GL_THREAD=1`, `MANHUNT_DUMP_SECS=0`, `MANHUNT_LOG_SYNC=0`). Clocks were CPU 1020, GPU 307, EMC 1331 MHz in both, on battery. The game did not set them. Evidence: `game/build/hw-test/perf-play/20261116-233847` (6 min, intro and gameplay) and `20261117-000136` (44 s, intro only).
+
+### Session 1: where the time goes
+
+- **Movies.** The intro and cutscene movies ran at 16–17 FPS with only 2 draws per frame. Each frame uploads one 640x480 texture in format `0x24` (4:2:2 YUV). It went through the backend sampler one texel at a time, then through a new `glTexImage2D`: about 57 ms per frame. That was 500 of the 553 hitches.
+- **Gameplay is bound by draw submission.** GL draw time grows with the number of draws, at about 0.028 ms per draw:
+
+  | Draws per frame | GL draw | FPS |
+  |---:|---:|---:|
+  | 100–230 | 5–8 ms | 60–75 |
+  | 340–530 | 12–17 ms | 40–50 |
+  | 680–700 | 19–21 ms | 36–38 |
+  | 1,180 | 32 ms | 24 |
+
+  At 690 draws the 19.6 ms splits into: submit (`glDrawElements` alone) 8.2, vertex upload 4.2, uniforms 2.6 (226 calls), texture binds 2.6 (675 binds), other 2.0. "Rest" was only 2–5 ms in gameplay.
+- **All three cores are saturated** (92–97%): guest 75–97% of a core, GL thread 45–73%, APU 76–87%.
+- **Indirect calls (item 4) are not worth the work.** There were 3,300–5,500 per frame in gameplay and 11–14k during loads. At an assumed few tens of ns each, that is about 0.2 ms per frame.
+- **Loading** shows "rest" at 53–56 ms with the GL thread at 4%. That is level loading on the guest thread.
+
+### Changes made after session 1
+
+- `nv2a_gl.c`: a direct fast path for linear `0x24`/`0x25` (YUY2/UYVY). It uses the same BT.601 integer maths as the sampler and uploads into the texture's existing storage. On the host it matched the sampler exactly for all Y/U/V combinations (67,108,864 texels, 0 different).
+- `[perf]` now prints `icalls`: indirect guest calls per frame, read from `g_icall_count`.
+- `[perf-gl]` now prints `samestate`: draws per frame where nothing but vertex data changed since the previous draw (same program, uniforms, textures and their contents, sampling, fixed state, framebuffer, constant attributes, surface, primitive, index size and vertex layout). These are the draws that merging could combine. Counted only under `MANHUNT_PERF_LOG`.
+- `scripts/perf-play-run.ps1`: sends the NRO with logging on and splits `perf.log` (`[perf]`, `[perf-gl]`, `[hitch]`) from `run.log`. `-CallProfile` uses the `switch-prof` build.
+
+Host: all 13 GL suites in `tests/gpu-offload/run.sh` pass. The audio suite does not compile: `recomp_types.h` (generated) has an unused variable `flush` under `-Werror`. These changes do not touch that file.
+
+### Session 2: movie fix verified on the console
+
+| Intro movie | Before | After |
+|---|---:|---:|
+| FPS | 16–17 | 60 |
+| Texture work per frame | ~57 ms | ~4 ms |
+| Hitches | ~500 over the movies | 24 in 44 s |
+
+Session 2 ended in the intro, so `samestate` is still unmeasured in gameplay.
+
+### Open
+
+1. **Measure `samestate` in a heavy gameplay scene.** If it is a large share of the draws, merge consecutive same-state draws (one index buffer, base vertex). If it is small, look at per-draw costs instead: vertex attributes are re-pointed with `glVertexAttribPointer` on every draw, and the driver validates those again.
+2. **Compare clocks.** `MANHUNT_GPU_MHZ` can only lower the clock, so a run at higher clocks has to be docked. Swap was only 1.6–2.5 ms per frame, which suggests the GPU is not the limit.
+3. **Audio (item 6)** still uses most of a core.
 
 ## Not covered here
 
