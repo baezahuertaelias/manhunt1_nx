@@ -23,6 +23,8 @@ typedef struct {
     uint64_t maps, uniform_calls, uniform_bytes, texture_binds, converted_attrs, converted_verts;
     uint64_t queue_attr_bytes, queue_attr_saved_bytes;
     uint64_t same_state_draws;  /* nothing but vertices changed since the previous draw */
+    uint64_t kept_attr_draws;   /* drew with the previous attribute pointers and a base vertex */
+    uint64_t const_reuses;      /* constants changed generation but not content: no upload */
     uint64_t converted_type[8]; /* attribute vertices by NV097 storage type */
 } Nv2aGlPerf;
 void nv2a_gl_perf_read(Nv2aGlPerf *out);

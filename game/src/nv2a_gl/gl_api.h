@@ -217,6 +217,7 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
     X(void, glDisableVertexAttribArray, (GLuint)) \
     X(void, glVertexAttrib4f, (GLuint, GLfloat, GLfloat, GLfloat, GLfloat)) \
     X(void, glDrawElements, (GLenum, GLsizei, GLenum, const void *)) \
+    X(void, glDrawElementsBaseVertex, (GLenum, GLsizei, GLenum, const void *, GLint)) \
     X(void, glDrawArrays, (GLenum, GLint, GLsizei)) \
     X(void, glGenQueries, (GLsizei, GLuint *)) \
     X(void, glBeginQuery, (GLenum, GLuint)) \
@@ -323,6 +324,7 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glDisableVertexAttribArray p_glDisableVertexAttribArray
 #define glVertexAttrib4f         p_glVertexAttrib4f
 #define glDrawElements           p_glDrawElements
+#define glDrawElementsBaseVertex p_glDrawElementsBaseVertex
 #define glDrawArrays             p_glDrawArrays
 #define glGenQueries             p_glGenQueries
 #define glBeginQuery             p_glBeginQuery

@@ -1377,6 +1377,7 @@ static struct {
     uint32_t const_gen;
     int const_valid, light_valid;
     float light[46][4];
+    float consts[192][4];       /* what binding 0 holds while const_valid */
 } s_ubo;
 static int gl_ubo(void)
 {
@@ -1428,7 +1429,15 @@ static void uniform_blocks(const Nv2aRawBatch *b, unsigned blocks)
         s_ubo.const_valid = s_ubo.light_valid = 0;
     }
     if ((blocks & 1) && (!s_ubo.const_valid || s_ubo.const_gen != b->vp_const_gen)) {
-        ubo_put(0, b->vp_consts, GL_UBO_CONSTANT_BYTES);
+        /* Manhunt port addition: the generation moves on every constant
+         * write, rewrites of the same values included. Binding 0 still holds
+         * them then: no 3 KB upload. */
+        if (!s_ubo.const_valid || memcmp(s_ubo.consts, b->vp_consts, GL_UBO_CONSTANT_BYTES)) {
+            ubo_put(0, b->vp_consts, GL_UBO_CONSTANT_BYTES);
+            memcpy(s_ubo.consts, b->vp_consts, GL_UBO_CONSTANT_BYTES);
+        } else if (perf_detail()) {
+            PF_ADD(const_reuses, 1);
+        }
         s_ubo.const_gen = b->vp_const_gen;
         s_ubo.const_valid = 1;
     }
@@ -2468,25 +2477,70 @@ static void count_converted(const Nv2aRawBatch *b, uint16_t conv)
     }
 }
 
+/* Manhunt port addition: the attribute pointers in force, when they were set
+ * for one interleaved run (one source buffer, one stride, nothing converted)
+ * -- the usual vertex. A later draw with the same layout, placed a whole
+ * number of vertices further on in the same buffer, keeps them and draws with
+ * a base vertex: Mesa then has no vertex arrays to validate again. */
+static struct {
+    int valid;
+    GLuint buf;
+    GLintptr at;                 /* buffer offset of the run's first byte */
+    uint32_t stride, present;
+    uint32_t key[NV2A_RAW_ATTRS];
+} s_kept;
+/* MANHUNT_GL_BASE_VERTEX=0 re-points the attributes for every draw, as before. */
+static int base_vertex_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_BASE_VERTEX");
+        on = !(e && *e == '0');
+        fprintf(stderr, "  [GL] kept attribute pointers with a base vertex: %s (MANHUNT_GL_BASE_VERTEX)\n",
+                on ? "on" : "off");
+    }
+    return on;
+}
+
 static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
-                           uint32_t index_count, GLenum index_type, GLintptr *index_at)
+                           uint32_t index_count, GLenum index_type, GLintptr *index_at,
+                           GLint *base_vertex)
 {
     VRun run[NV2A_RAW_ATTRS];
     int of_run[NV2A_RAW_ATTRS];
     uint32_t slot[NV2A_RAW_ATTRS], np = 0, nrun = 0, a, i, v;
     uint32_t nv = b->vertex_count;
     uint16_t conv = b->attr_present & (uint16_t)~b->attr_direct;
-    GLsizeiptr bytes = 0, pack_at, index_offset = 0;
-    GLintptr at;
+    GLsizeiptr bytes = 0, pack_at, index_offset = 0, alloc;
+    GLintptr at, alloc_at;
     uint8_t *dst;
     void *map;
     static uint8_t *staging;
     static size_t staging_cap;
+    uint32_t stride = 0, key[NV2A_RAW_ATTRS];
+    int keep = 0;
 
+    *base_vertex = 0;
     if (!nv)
         return 0;
     count_converted(b, conv);
     nrun = vertex_runs(b, run, of_run);
+    if (s_streaming && s_vring.mapped && nrun == 1 && !conv && b->attr_direct && base_vertex_enabled()) {
+        /* A candidate: every attribute in the one run, all with one stride. */
+        stride = 0;
+        for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+            key[a] = 0;
+            if (!(b->attr_direct & (1u << a)))
+                continue;
+            if (!b->direct[a].stride || (stride && b->direct[a].stride != stride)) {
+                stride = 0;
+                break;
+            }
+            stride = b->direct[a].stride;
+            key[a] = (uint32_t)(b->direct[a].ptr - run[0].lo) | b->direct[a].type << 16
+                   | b->direct[a].size << 24;
+        }
+    }
     for (i = 0; i < nrun; i++) {
         run[i].at = bytes;
         bytes += ((GLsizeiptr)(run[i].hi - run[i].lo) + 15) & ~(GLsizeiptr)15;
@@ -2503,8 +2557,29 @@ static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
         index_offset = (bytes + 3) & ~(GLsizeiptr)3;
         bytes = index_offset + (GLsizeiptr)index_count * (index_type == GL_UNSIGNED_SHORT ? 2 : 4);
     }
-    at = ring_alloc(&s_vring, bytes, &map);
+    /* A candidate takes up to stride - 1 bytes more, to land a whole number
+     * of vertices after the kept pointers. */
+    alloc = bytes + (stride ? (GLsizeiptr)stride - 1 : 0);
+    alloc_at = at = ring_alloc(&s_vring, alloc, &map);
     dst = (uint8_t *)map;
+    if (stride && dst) {
+        GLintptr shift = 0;
+        keep = s_kept.valid && s_kept.buf == s_vring.buf && s_kept.stride == stride
+            && s_kept.present == b->attr_present && at >= s_kept.at
+            && !memcmp(s_kept.key, key, sizeof key);
+        if (keep) {
+            GLintptr d = (at - s_kept.at) % (GLintptr)stride;
+            shift = d ? (GLintptr)stride - d : 0;
+            if ((at + shift - s_kept.at) / (GLintptr)stride > 0x7FFFFFFF)
+                keep = 0;
+        }
+        if (keep) {
+            at += shift;
+            dst += shift;
+            *base_vertex = (GLint)((at - s_kept.at) / (GLintptr)stride);
+            if (perf_detail()) PF_ADD(kept_attr_draws, 1);
+        }
+    }
     if (!dst) {
         if ((size_t)bytes > staging_cap) {
             free(staging);
@@ -2533,9 +2608,20 @@ static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
             memcpy(dst + index_offset, indices, (size_t)index_count * 4);
         }
     }
-    ring_done(&s_vring, at, bytes, map, staging);
+    ring_done(&s_vring, alloc_at, alloc, map, staging);
     if (s_streaming) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_vring.buf);
 
+    if (keep)
+        return 1;
+    /* New pointers: remembered when this draw is a candidate. */
+    s_kept.valid = stride && map;
+    if (s_kept.valid) {
+        s_kept.buf = s_vring.buf;
+        s_kept.at = at;
+        s_kept.stride = stride;
+        s_kept.present = b->attr_present;
+        memcpy(s_kept.key, key, sizeof key);
+    }
     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
         GLintptr off;
         GLint size;
@@ -2933,6 +3019,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     const uint32_t *idx;
     uint32_t n, a, i;
     GLintptr idx_at;
+    GLint base_vertex = 0;
     GLenum mode, idx_type = GL_UNSIGNED_INT;
     float tscale[4][2], c0[8][4], c1[8][4], fog[4], surf[4], aa[2], m[16];
     uint64_t pt = perf_detail() ? hz_now() : 0;
@@ -3251,7 +3338,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     mode = gl_prim(b, &idx, &n);
     if (!n) return;
     idx_type = b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
-    if (!upload_vertices(b, idx, n, idx_type, &idx_at)) {
+    if (!upload_vertices(b, idx, n, idx_type, &idx_at, &base_vertex)) {
         if (gl_gpu()) return;
         gl_fail("vertex upload failed");
     }
@@ -3345,7 +3432,11 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                 last_mode = mode; last_type = idx_type; last_layout = layout;
             }
             PF_STAGE(other_ns);
-            glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
+            if (base_vertex)
+                glDrawElementsBaseVertex(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at,
+                                         base_vertex);
+            else
+                glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
             PF_STAGE(submit_ns);
             if (vq) {
                 glEndQuery(GL_SAMPLES_PASSED);
