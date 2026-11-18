@@ -3084,8 +3084,9 @@ static int wide_target(const Nv2aRawBatch *b, const GlSurf *s)
  * (the previous frame had enough draws on the 640x480 target, see wide_level_next) a 2D draw
  * is squeezed about the screen edge nearest to its own centre instead: the
  * left edge, the right edge, or the middle for what is centred (crosshair,
- * subtitles, prompts). Menus and movies are not level frames and stay
- * centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
+ * subtitles, prompts); per element, not per draw (s_wide_run below). Menus,
+ * a menu over a level (wide_level_now) and movies are not level frames and
+ * stay centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
 /* Level detection with hysteresis. Menus and loading screens draw 0 to 41
  * (console run, frames 391 to 841: they sat on 37 to 41 and a single
  * threshold flipped every frame or two); a level averages about 90 and a
@@ -3105,6 +3106,96 @@ static int wide_hud_edges(void)
         on = !(e && e[0] == '0' && !e[1]);
     }
     return on;
+}
+
+/* An on-by-default switch, "0" turns it off; said once, when first read. */
+static int env_switch(const char *name, int *cache, const char *on_text, const char *off_text)
+{
+    if (*cache < 0) {
+        const char *e = getenv(name);
+        *cache = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "  [GL] %s (%s=%s)\n", *cache ? on_text : off_text, name, e ? e : "unset");
+    }
+    return *cache;
+}
+
+/* A menu over a live level. The pause menu draws over the running world
+ * (runs 40, 41, 44, 45, 47, 48 caught it: 458 fixed-function world draws,
+ * 495 on the target), so the draw count calls it a level and its list
+ * (x 96..252) was pushed to the left edge while its title stayed centred.
+ * The 3D draws are no help: the world is drawn under the menu as in play.
+ * What the pause frame has and no captured level frame has is a 2D draw
+ * spanning exactly the target, x 0..640 (the menu's full-width bar, program
+ * AA8C1020..., 4 vertices); the level's own full-width overlays overscan
+ * (x -128..768, -289..938, -320..959) and the movie quad is excluded by
+ * its program. Only a textured one counts: a fade or a flash is likely a
+ * plain colour quad (the first full-width 2D draw of the 2026-11-18 run has
+ * no texture) and must not move the HUD. The main menu's pages draw such a
+ * quad too (run 37), and are not levels either. A frame with one makes the next frame a menu frame: its
+ * 2D stays a centred 4:3 block. MANHUNT_WIDE_MENU=0: the draw count alone,
+ * as before. */
+static uint32_t s_wide_frame_draws, s_wide_frame_fit;
+static int s_wide_menu, s_wide_menu_on = -1;
+static int wide_menu_check(void)
+{
+    return env_switch("MANHUNT_WIDE_MENU", &s_wide_menu_on,
+                       "widescreen: a 2D draw spanning exactly 0..640 marks a menu frame (HUD centred)",
+                       "widescreen: level frames from the draw count alone");
+}
+/* Whether 2D draws are edge-anchored this frame. */
+static int wide_level_now(void)
+{
+    return s_wide_level && !(s_wide_menu && wide_menu_check());
+}
+
+/* At the flip: what the frame just drawn says about the next one. The Scrap
+ * level averages about 90 draws on the 640x480 target, busier scenes 900; a
+ * menu has up to about 41 and a movie 1 or 2. The first transitions are
+ * logged so a run shows whether the HUD anchoring was on. */
+static void wide_frame_end(void)
+{
+    static unsigned s_logged;
+    int was = wide_level_now(), now;
+    s_wide_level = wide_level_next(s_wide_level, s_wide_frame_draws);
+    s_wide_menu = s_wide_frame_fit != 0;
+    now = wide_level_now();
+    if (now != was && xbox_video_widescreen() && s_logged++ < 24)
+        fprintf(stderr, "[MH-WIDE] frame %u: %s (%u draws on the target, %u exactly full-width)\n",
+                s_frame, now ? "level, HUD anchored to the edges"
+                : s_wide_level ? "menu over a level, HUD centred" : "not a level, HUD centred",
+                s_wide_frame_draws, s_wide_frame_fit);
+    s_wide_frame_draws = 0;
+    s_wide_frame_fit = 0;
+}
+
+/* HUD elements, not draws. Anchoring each draw by its own centre split
+ * elements made of several draws: the tutorial box (x 50.7..323, centre
+ * 187) and its long lines (58.9..311) went to the middle while its short
+ * last line (58.9..147.6, centre 103) went to the left edge, run 44 and the
+ * 2026-11-18 frames 1800 and 2700. A run is a sequence of 2D draws, back
+ * to back on the target (no other draw between them, same frame), each
+ * overlapping the previous one in x (4 pixels of slack). The run's first
+ * draw decides the anchor and the rest follow it, so a box and its text, or
+ * a bar and its frame, move together. Anything else between (a world draw,
+ * a full-width overlay) ends the run. The HUD's clusters do not overlap one
+ * another (left 48..165, right 498..738), so they stay apart. Elements
+ * share textures (radar and hand panel both sample 0x80583D80), so a
+ * texture is no sign of an element. MANHUNT_WIDE_HUD_GROUP=0: each draw by
+ * its own centre, as before. */
+#define WIDE_RUN_SLACK 4.0f
+static struct {
+    int valid;
+    uint32_t frame, next;           /* the frame, and the target draw index that continues it */
+    const GlSurf *surf;
+    float minx, maxx;               /* the previous draw's extent */
+    float anchor;                   /* out[1] for the run */
+} s_wide_run;
+static int s_wide_group_on = -1;
+static int wide_hud_group(void)
+{
+    return env_switch("MANHUNT_WIDE_HUD_GROUP", &s_wide_group_on,
+                       "widescreen: HUD anchored per element (runs of overlapping 2D draws)",
+                       "widescreen: HUD anchored per draw");
 }
 
 /* 0 crop (default), 1 stretch, 2 bars. */
@@ -3131,8 +3222,11 @@ static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float
      * anti-aliasing on, comparing a 0..640 draw against the 1280-wide surface
      * squeezed full-screen fades and grain to 4:3. */
     lw = (b->xform != 1 && b->aa_sx > 0.0f) ? w / b->aa_sx : w;
-    if (minx <= 2.0f && maxx >= lw - 2.0f && vkey != 0xBA9E387C24FCECE1ull)
+    if (minx <= 2.0f && maxx >= lw - 2.0f && vkey != 0xBA9E387C24FCECE1ull) {
+        if (minx >= -2.0f && maxx <= lw + 2.0f && b->tex_va[0])
+            s_wide_frame_fit++;     /* exactly the target, textured: a menu (wide_level_now) */
         return;
+    }
     if (vkey == 0xBA9E387C24FCECE1ull) {
         /* A movie is 4:3. MANHUNT_WIDE_MOVIE: crop (default) scales it to the
          * full width and lets the top and bottom run off the target, so it
@@ -3148,12 +3242,26 @@ static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float
     }
     out[0] = 0.75f;
     out[1] = w * 0.5f;
-    if (s_wide_level && wide_hud_edges()) {
+    if (wide_level_now() && wide_hud_edges()) {
         float cx = (minx + maxx) * 0.5f;
         if (cx < lw * 0.28f)
             out[1] = 0.0f;
         else if (cx > lw * 0.72f)
             out[1] = w;
+        if (wide_hud_group()) {
+            if (s_wide_run.valid && s_wide_run.frame == s_frame &&
+                s_wide_run.next == s_wide_frame_draws && s_wide_run.surf == s &&
+                minx <= s_wide_run.maxx + WIDE_RUN_SLACK && maxx >= s_wide_run.minx - WIDE_RUN_SLACK)
+                out[1] = s_wide_run.anchor;
+            else
+                s_wide_run.anchor = out[1];
+            s_wide_run.valid = 1;
+            s_wide_run.frame = s_frame;
+            s_wide_run.next = s_wide_frame_draws + 1;
+            s_wide_run.surf = s;
+            s_wide_run.minx = minx;
+            s_wide_run.maxx = maxx;
+        }
     }
 }
 
@@ -3175,7 +3283,7 @@ static const uint64_t s_wide_prog[WIDE_PROGS] = {
     0xBA9E387C24FCECE1ull, 0xD7829B66D519BE47ull,
 };
 static const unsigned s_wide_nprog = 4;
-static uint32_t s_wide_frame_draws, s_wide_dumps, s_wide_dump_at, s_wide_dump_ff;
+static uint32_t s_wide_dumps, s_wide_dump_at, s_wide_dump_ff;
 static int s_wide_dumping;
 static int wide_prog_2d(uint64_t vkey)
 {
@@ -3917,6 +4025,48 @@ static void dump_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_t
  * elsewhere: the call is skipped. */
 extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
 
+/* The surface the title flipped. Presenting s_last showed whatever was drawn
+ * or cleared last, so a target rendered or cleared after the frame's last
+ * back-buffer draw would be shown for a frame. The executor works out the
+ * finished buffer at FLIP_STALL (its drawn_offset: by then the title's
+ * colour offset has already moved on to the next buffer) and hands it to
+ * xbox_FramebufferWindowPresent just before the backend's flip;
+ * horizon_compat.c passes it on here, on the executor thread. The queued
+ * backend carries it in the flip record, so the GL thread presents the
+ * address of the flip it is presenting, not a later one. s_last stays the
+ * fallback when no address came or no surface has it.
+ * MANHUNT_PRESENT_FLIPPED=0: s_last, as before. */
+static uint32_t s_flip_req_va;          /* executor thread: the flip about to be issued */
+static uint32_t s_flip_va;              /* GL thread: the flip being presented */
+static int s_present_flipped = -1;
+void nv2a_gl_note_flip(uint32_t va)
+{
+    s_flip_req_va = va;
+}
+static GlSurf *flip_surface(void)
+{
+    static unsigned misses, others;
+    uint32_t va = s_flip_va;            /* this flip's only */
+    GlSurf *f;
+
+    s_flip_va = 0;
+    if (!va || !env_switch("MANHUNT_PRESENT_FLIPPED", &s_present_flipped,
+                           "present: the surface the title flipped",
+                           "present: the last surface drawn or cleared"))
+        return s_last;
+    f = surf_find(va);
+    if (!f) {
+        if (misses++ < 4)
+            fprintf(stderr, "[MH-GL] frame %u: flipped 0x%08X has no surface, showing the last one drawn\n",
+                    s_frame, va);
+        return s_last;
+    }
+    if (f != s_last && others++ < 8)
+        fprintf(stderr, "[MH-GL] frame %u: presenting flipped 0x%08X, not the last target 0x%08X\n",
+                s_frame, va, s_last ? s_last->va : 0u);
+    return f;
+}
+
 static void gl_flip_work(void)
 {
     state_dirty();
@@ -3925,7 +4075,7 @@ static void gl_flip_work(void)
     static uint8_t *pix;
     static size_t pix_cap;
     int ww, wh;
-    GlSurf *s = s_last;
+    GlSurf *s = flip_surface();
 
     if (!ready()) {
         if (gl_gpu()) return;
@@ -3946,19 +4096,7 @@ static void gl_flip_work(void)
         fprintf(stderr, "[MH-WIDE-DRAW] capture %u, frame %u (previous frame had %u draws)\n",
                 s_wide_dumps, s_frame + 1, s_wide_frame_draws);
     }
-    {
-        /* The Scrap level averages about 90 draws on the 640x480 target, busier
-         * scenes 900; a menu has up to about 41 and a movie 1 or 2. The first transitions are
-         * logged so a run shows whether the HUD anchoring was on. */
-        static unsigned s_logged;
-        int lvl = wide_level_next(s_wide_level, s_wide_frame_draws);
-        if (lvl != s_wide_level && xbox_video_widescreen() && s_logged++ < 24)
-            fprintf(stderr, "[MH-WIDE] frame %u: %s (%u draws on the target)\n",
-                    s_frame, lvl ? "level, HUD anchored to the edges" : "not a level, HUD centred",
-                    s_wide_frame_draws);
-        s_wide_level = lvl;
-    }
-    s_wide_frame_draws = 0;
+    wide_frame_end();
     s_frame++;
     {
         /* A frame over 50 ms (a hitch): say what it did -- compiling programs
@@ -4204,6 +4342,14 @@ static void gl_flip(void)
             nanosleep(&ts, NULL);
         }
     }
+}
+
+/* The unqueued backend: the executor's flip, on the executor thread. */
+static void gl_flip_direct(void)
+{
+    s_flip_va = s_flip_req_va;
+    s_flip_req_va = 0;
+    gl_flip();
 }
 
 void nv2a_gl_perf_read(Nv2aGlPerf *out)
@@ -4564,7 +4710,7 @@ static void q_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
 static void q_flip(void)
 {
     uint32_t nreg;
-    size_t size;
+    size_t size, at;
     uint8_t *rec;
 
     /* No more than two frames behind the executor. */
@@ -4579,9 +4725,11 @@ static void q_flip(void)
         __atomic_add_fetch(&s_q_exec_wait_ns, q_now_ns() - t0, __ATOMIC_RELAXED);
     }
     nreg = q_reg_collect();
-    size = sizeof(QHdr) + (size_t)nreg * sizeof(QRegChunk);
+    size = sizeof(QHdr) + (size_t)nreg * sizeof(QRegChunk) + 16;
     rec = q_reserve(size);
-    q_write_state(rec, Q_FLIP, nreg, 0, 0, NULL);
+    at = q_write_state(rec, Q_FLIP, nreg, 0, 0, NULL);
+    ((uint32_t *)(rec + at))[0] = s_flip_req_va;  /* the flipped surface (flip_surface) */
+    s_flip_req_va = 0;
     ((QHdr *)rec)->size = (uint32_t)size;
     __atomic_add_fetch(&s_q_flips, 1, __ATOMIC_ACQ_REL);
     q_publish(size);
@@ -4657,6 +4805,7 @@ static void *q_gl_thread(void *arg)
             } else if (h->type == Q_REPORT) {
                 gl_report(((const uint32_t *)(rec + at))[0], ((const uint32_t *)(rec + at))[1]);
             } else if (h->type == Q_FLIP) {
+                s_flip_va = ((const uint32_t *)(rec + at))[0];
                 gl_flip();
                 __atomic_sub_fetch(&s_q_flips, 1, __ATOMIC_ACQ_REL);
             }
@@ -4713,7 +4862,7 @@ static Nv2aBackend s_backend_q = {
 static Nv2aBackend s_backend_gl = {
     .clear = gl_clear,
     /* draw: everything arrives through draw_raw */
-    .flip = gl_flip,
+    .flip = gl_flip_direct,
     .draw_raw = gl_draw_raw,
     .flags = NV2A_BACKEND_RAW_DIRECT,
     .report = gl_report,

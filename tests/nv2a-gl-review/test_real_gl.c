@@ -196,6 +196,31 @@ static void cpu_only_present_test(void)
     if(queued_mode)q_flip();else gl_flip();assert(swap_pixel==0xff0000ff);
     puts("PASS real GL presentation observes CPU-only writes after sync(1), without a new draw");
 }
+/* Item 13: the flip shows the surface the title flipped (the executor's
+ * address, nv2a_gl_note_flip), not the last one drawn or cleared; s_last
+ * when no address came or no surface has it, or MANHUNT_PRESENT_FLIPPED=0.
+ * Direct: the registered backend's flip; queued: the address rides the
+ * flip record. */
+static void be_flip(void) {if(queued_mode)q_flip();else s_backend_gl.flip();}
+static void flipped_present_test(void)
+{
+    Nv2aSurface a=surface(8,8,32),b=surface(8,8,32);Nv2aRenderState rs={0};
+    b.color_va=0x240000;wide=0;
+    if(queued_mode){q_clear(&a,&rs,0xf0,0xff112233,0);q_clear(&b,&rs,0xf0,0xff445566,0);}
+    else{gl_clear(&a,&rs,0xf0,0xff112233,0);gl_clear(&b,&rs,0xf0,0xff445566,0);}
+    nv2a_gl_note_flip(a.color_va);be_flip();assert(swap_pixel==0xff112233);
+    be_flip();assert(swap_pixel==0xff445566);                 /* no address: the last target */
+    nv2a_gl_note_flip(0x3f0000);be_flip();assert(swap_pixel==0xff445566);   /* no surface there */
+    nv2a_gl_note_flip(b.color_va);be_flip();assert(swap_pixel==0xff445566);
+    /* Queued: the address of each flip, not of a later one noted meanwhile. */
+    nv2a_gl_note_flip(a.color_va);be_flip();nv2a_gl_note_flip(b.color_va);
+    assert(swap_pixel==0xff112233);be_flip();assert(swap_pixel==0xff445566);
+    s_present_flipped=0;
+    nv2a_gl_note_flip(a.color_va);be_flip();assert(swap_pixel==0xff445566);
+    s_present_flipped=1;
+    nv2a_gl_note_flip(a.color_va);be_flip();assert(swap_pixel==0xff112233);
+    puts("PASS real GL presents the flipped surface, falls back to the last target when unknown, and MANHUNT_PRESENT_FLIPPED=0 restores it");
+}
 static void complete(void) {if(queued_mode)q_sync(0);else gl_sync(0);}
 static void fenced_real_test(void)
 {
@@ -213,7 +238,7 @@ static void fenced_real_test(void)
     c[0]=0xff0000ff;triangle(dst,1,0,0,8,0,0,8);complete();assert(out[9]==0xff0000ff);
     sample_va=0x280000;sample_w=sample_h=2;sample_pitch=8;
     puts("PASS real GL fenced raw draw/publish boundaries, clean CPU edits and render-target feedback");
-    clear_only_present_test();cpu_only_present_test();
+    clear_only_present_test();cpu_only_present_test();flipped_present_test();
 }
 /* Full shader assembly + direct CMP queue copy + combined ring submission.
  * Alternating CMP and float batches must reset the program's decode mask. */
@@ -258,12 +283,12 @@ int main(int argc,char **argv)
         fflush(stdout);_Exit(0);
     }
     if(argc>1){
-        queued_mode=s_q_on=1;assert(q_start());clear_only_present_test();cpu_only_present_test();packed_cmp_draw_test();
+        queued_mode=s_q_on=1;assert(q_start());clear_only_present_test();cpu_only_present_test();flipped_present_test();packed_cmp_draw_test();
         puts("PASS real GL queued draw/sync/presentation returns after consuming guest RAM");
         fflush(stdout);_Exit(0);
     }
     assert(ready());
-    clear_only_present_test();clear_depth_test();linear_color_formats_test();draw_sample_test();border_mip_test();render_target_feedback_test();wide_reset_test();cpu_only_present_test();
+    clear_only_present_test();clear_depth_test();linear_color_formats_test();draw_sample_test();border_mip_test();render_target_feedback_test();wide_reset_test();cpu_only_present_test();flipped_present_test();
     packed_cmp_draw_test();
     puts("PASS real GL production-path synthetic suite; gameplay/hardware parity UNVERIFIED");
     return 0;

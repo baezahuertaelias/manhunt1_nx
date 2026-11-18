@@ -282,6 +282,129 @@ static void widescreen_classification_test(void)
     assert(!wide_prog_2d(hud));
     puts("PASS widescreen immutable allowlist, reused addresses, full movie/HUD/overlay bounds and off/target resets");
 }
+/* One 2D draw on the 640x480 target at x mn..mx; the anchor (out[1]) or -1
+ * when left unsqueezed. Counts as a target draw, as the draw path does. */
+static float hud_attrs[2*64];
+static float hud_draw(Nv2aRawBatch *b,const GlSurf *s,uint64_t prog,float mn,float mx)
+{
+    float out[2];
+    hud_attrs[0]=mn;hud_attrs[64]=mx;b->attrs=hud_attrs;
+    wide_2d(b,s,prog,out);s_wide_frame_draws++;
+    return out[0]==0?-1.0f:out[1];
+}
+/* Item 11a: a HUD element of several draws keeps one anchor. Draw extents
+ * are the console's (run 44 and the 2026-11-18 frames 1800/2700). */
+static void widescreen_runs_test(void)
+{
+    const uint64_t hud=0x43720A569E4D3893ull,bar=0xAA8C102096129062ull;
+    GlSurf s={0},other={0};Nv2aRawBatch b={0};
+    s.w=other.w=640;s.h=other.h=480;b.vertex_count=2;b.xform=2;b.tex_va[0]=0x805B0080u;
+    fake_widescreen=1;s_wide_level=1;s_wide_menu=0;s_wide_frame_draws=s_wide_frame_fit=0;
+    unsetenv("MANHUNT_WIDE_HUD_GROUP");s_wide_group_on=-1;
+    /* Tutorial box, then its lines: the short last line (centre 103) used
+     * to go to the left edge while the box and long lines stayed centred. */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,311.8f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,304.8f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==320);
+    /* The right cluster, then the radar: no overlap, so apart, each at its
+     * own edge, though the radar shares the hand panel's texture. */
+    b.tex_va[0]=0x80583D80u;
+    assert(hud_draw(&b,&s,hud,531.5f,584.3f)==640);
+    assert(hud_draw(&b,&s,bar,51.2f,162.1f)==0);
+    assert(hud_draw(&b,&s,hud,48.8f,164.5f)==0);
+    assert(hud_draw(&b,&s,hud,103.7f,109.6f)==0);
+    assert(hud_draw(&b,&s,hud,510.1f,562.6f)==640);
+    assert(hud_draw(&b,&s,hud,567.0f,582.0f)==640);
+    assert(hud_draw(&b,&s,hud,577.0f,592.0f)==640);
+    /* Overlap with the previous draw, not the run's first: a chain. */
+    assert(hud_draw(&b,&s,hud,300.0f,340.0f)==320);
+    assert(hud_draw(&b,&s,hud,336.0f,470.0f)==320);
+    assert(hud_draw(&b,&s,hud,468.0f,600.0f)==320);
+    /* A run ends at any other draw on the target (a world draw, here, and a
+     * full-width overlay), at the next frame and on another surface. */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    /* (the left run would take the box in: the box overlaps it) */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==0);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,bar,-128.0f,768.0f)==-1);
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    s_frame++;
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&other,hud,58.9f,147.6f)==0);
+    /* 4 pixels of slack, no more. */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,hud,326.9f,600.0f)==320);     /* 3.9 apart: joins */
+    assert(hud_draw(&b,&s,hud,604.5f,630.0f)==640);     /* 4.5 apart: its own */
+    assert(hud_draw(&b,&s,hud,560.0f,600.5f)==640);     /* left of it, 4 apart */
+    /* MANHUNT_WIDE_HUD_GROUP=0: each draw by its own centre, as before. */
+    s_wide_group_on=0;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    s_wide_group_on=1;
+    s_wide_level=0;s_wide_frame_draws=0;fake_widescreen=0;
+    puts("PASS widescreen HUD anchored per element: multi-draw box stays together, clusters apart, runs end at other draws/frames/surfaces, rollback");
+}
+/* Item 11b: a menu drawn over a live level (the pause menu: 495 draws on
+ * the target, a 2D bar spanning exactly 0..640) stays centred. */
+static void widescreen_menu_test(void)
+{
+    const uint64_t hud=0x43720A569E4D3893ull,bar=0xAA8C102096129062ull,movie=0xBA9E387C24FCECE1ull;
+    GlSurf s={0};Nv2aRawBatch b={0};
+    s.w=640;s.h=480;b.vertex_count=2;b.xform=2;b.tex_va[0]=0x80611580u;
+    fake_widescreen=1;s_wide_level=1;s_wide_menu=0;s_wide_frame_draws=s_wide_frame_fit=0;
+    unsetenv("MANHUNT_WIDE_MENU");s_wide_menu_on=-1;s_frame++;
+    assert(wide_level_now());
+    /* The first pause frame is anchored from the frame before (in play). */
+    s_wide_frame_draws=470;
+    assert(hud_draw(&b,&s,bar,96.0f,196.4f)==0);
+    assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1&&s_wide_frame_fit==1);
+    s_wide_frame_draws=495;wide_frame_end();
+    assert(s_wide_level==1&&s_wide_menu==1&&!wide_level_now());
+    /* While paused: the list, the title panel and the legends stay centred. */
+    s_frame++;s_wide_frame_draws=470;
+    assert(hud_draw(&b,&s,bar,230.4f,409.6f)==320);
+    assert(hud_draw(&b,&s,bar,96.0f,196.4f)==320);
+    assert(hud_draw(&b,&s,bar,96.0f,252.2f)==320);
+    assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1);
+    assert(hud_draw(&b,&s,hud,47.4f,126.1f)==320);
+    assert(hud_draw(&b,&s,hud,534.1f,592.6f)==320);
+    s_wide_frame_draws=495;wide_frame_end();assert(!wide_level_now());
+    /* Back in play: overscanned overlays, an untextured full-screen quad (a
+     * fade) and the movie quad are not menus; the HUD goes to the edges. */
+    s_frame++;s_wide_frame_draws=470;
+    assert(hud_draw(&b,&s,bar,-128.0f,768.0f)==-1);
+    assert(hud_draw(&b,&s,hud,-289.6f,938.5f)==-1);
+    b.tex_va[0]=0;assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1);b.tex_va[0]=0x80611580u;
+    {float out[2];hud_attrs[0]=0;hud_attrs[64]=640;b.attrs=hud_attrs;wide_2d(&b,&s,movie,out);}
+    assert(s_wide_frame_fit==0);
+    s_wide_frame_draws=495;wide_frame_end();
+    assert(wide_level_now());
+    s_frame++;
+    assert(hud_draw(&b,&s,bar,96.0f,196.4f)==0);
+    /* AA target (1280 wide, factor 2): the bar at 0..640 title pixels counts. */
+    {GlSurf sa=s;Nv2aRawBatch ba=b;sa.w=1280;sa.h=960;ba.aa_sx=ba.aa_sy=2;
+     assert(hud_draw(&ba,&sa,bar,0.0f,640.0f)==-1&&s_wide_frame_fit==1);s_wide_frame_fit=0;}
+    /* MANHUNT_WIDE_MENU=0: the draw count alone, as before. */
+    s_wide_menu_on=0;
+    assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1);
+    s_wide_frame_draws=495;wide_frame_end();
+    assert(s_wide_menu==1&&wide_level_now());
+    s_frame++;assert(hud_draw(&b,&s,bar,96.0f,196.4f)==0);
+    s_wide_menu_on=1;
+    /* A menu with no level behind it stays centred either way. */
+    s_wide_frame_draws=10;wide_frame_end();s_wide_frame_draws=10;wide_frame_end();
+    assert(!s_wide_level&&!wide_level_now());
+    s_wide_menu=0;s_wide_frame_draws=s_wide_frame_fit=0;fake_widescreen=0;
+    puts("PASS widescreen menu over a live level: exact 0..640 textured 2D marks a menu frame, HUD centred; overlays/fades/movie excluded; rollback");
+}
 static Nv2aSurface surface(void)
 {
     Nv2aSurface s={0};s.color_va=0x200000;s.width=3;s.height=2;s.pitch=16;
@@ -470,10 +593,11 @@ static void gpu_mode_test(void)
 int main(int argc,char **argv)
 {
     setenv("MANHUNT_GL_MIPMAPS","1",1);setenv("RECOMP_PROG_CACHE","0",1);
+    if(argc>1&&!strcmp(argv[1],"wide")){init_fake();widescreen_classification_test();widescreen_runs_test();widescreen_menu_test();return 0;}
     if(argc>1&&!strcmp(argv[1],"gpu")){setenv("MANHUNT_GL_SYNC","gpu",1);init_fake();gpu_mode_test();return 0;}
     if(argc>1){setenv("MANHUNT_GL_SYNC","fenced",1);init_fake();fenced_ownership_test();return 0;}
     init_fake();cache_test();palette_test();mip_test();shader_modes_test();
-    widescreen_classification_test();
+    widescreen_classification_test();widescreen_runs_test();widescreen_menu_test();
     surface_sync_test();clear_pitch_test();
     expect_success(queued_completion);
     expect_abort(context_failure);
