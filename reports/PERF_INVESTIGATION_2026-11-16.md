@@ -143,13 +143,29 @@ Launched from the SD card with `MANHUNT_PERF_LOG=2`, `RECOMP_GL_THREAD=1` and `M
 
 Host: all GL suites and the llvmpipe rendering suite pass. A new streaming contract covers placement, the base vertex, re-pointing on a layout change, and ring wrap. **Not yet measured on the console.**
 
+### Session 4: `d50e5fc` on the console, handheld (2026-11-17)
+
+Handheld with the charger connected, at CPU 1020, GPU 307, EMC 1331 MHz: the same clocks as session 1. The run lasted about 3 min, 98 periods, with no GL errors. Evidence: `game/build/hw-test/perf-play/20261117-221235-sd-basevertex`. Fewer heavy periods than before (13 periods at 300 draws or more), so the figures for heavy scenes rest on little data.
+
+- **Both changes take effect.** 84–96% of draws kept the attribute pointers, rising with load. 30–45 constant uploads per frame were skipped as same content. Uniform-buffer uploads per frame went from 211–286 to 104–194.
+- **Per-draw CPU time on the GL thread**, against session 1 (same clocks), in µs per draw:
+
+  | Draws per frame | Upload | Uniform | Submit |
+  |---|---|---|---|
+  | 100–299 | 7.40 → 6.13 | 6.06 → 4.79 | 13.72 → 12.14 |
+  | 300–599 | 6.57 → 5.00 | 5.33 → 3.99 | 12.35 → 10.95 |
+  | 600+ | 5.99 → 4.25 | 3.96 → 3.60 | 11.86 → 9.16 |
+
+  Over all periods with 100 draws or more, GL draw time per draw fell from 31.4 to 29.9 µs (−5%). The upload, uniform and submit stages fell 10–29%. Lookup, bind, state and other did not change.
+- **FPS cannot be compared** between the two runs. The scenes differ: the heavy periods here average 866 draws, against 700 in session 1. The gain per draw is small next to the frame, and the guest thread now runs at 90% of a core.
+
 ## Decisions
 
 - **The CPU clock stays at the system's setting** (owner, 2026-11-17). The port does not raise it. `MANHUNT_CPU_MHZ` and `MANHUNT_GPU_MHZ` can only lower clocks, and that stays as is. Performance work has to reduce CPU work instead.
 
 ### Open
 
-1. **Measure `d50e5fc` on the console** in the same heavy scene as session 3. Compare the `kept` and `constreuse` counts and the upload, uniform and submit times.
+1. **The guest thread** is now the busiest (about 90% of a core in session 4). The call-profile build (`perf-play-run.ps1 -CallProfile`) names its hottest functions.
 2. **Other per-draw CPU cost in the driver.** `glDrawElements` is still about 8–10 ms a frame in heavy scenes.
 3. **Audio (item 6)** still uses most of a core (APU 84–89% in session 3). Ideas: NEON for the HRTF and the voice mixer, and core pinning.
 
