@@ -935,13 +935,15 @@ static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch
  * the size of the one before, down to 1 texel (a DXT level is at least one
  * 4x4 block): xemu's texture upload, and tex_face_stride in nv2a_pb_exec.c.
  * Linear images have no levels. Only level 0 used to be uploaded, so distant
- * floors and walls shimmered. MANHUNT_GL_MIPMAPS=0 restores level 0 only. */
+ * floors and walls shimmered. Off by default: on the console (2026-11-18) the
+ * levels made the scene and the player 16-24% darker than level 0 alone, which
+ * the hardware does not do. MANHUNT_GL_MIPMAPS=1 turns them on. */
 static int gl_mipmaps(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("MANHUNT_GL_MIPMAPS");
-        on = !(e && e[0] == '0' && !e[1]);
+        on = e && e[0] == '1' && !e[1];
         fprintf(stderr, "  [GL] mipmaps: %s (MANHUNT_GL_MIPMAPS)\n", on ? "on" : "off");
     }
     return on;

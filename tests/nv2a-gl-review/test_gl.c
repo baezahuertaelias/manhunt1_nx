@@ -469,7 +469,7 @@ static void gpu_mode_test(void)
 }
 int main(int argc,char **argv)
 {
-    setenv("RECOMP_PROG_CACHE","0",1);
+    setenv("MANHUNT_GL_MIPMAPS","1",1);setenv("RECOMP_PROG_CACHE","0",1);
     if(argc>1&&!strcmp(argv[1],"gpu")){setenv("MANHUNT_GL_SYNC","gpu",1);init_fake();gpu_mode_test();return 0;}
     if(argc>1){setenv("MANHUNT_GL_SYNC","fenced",1);init_fake();fenced_ownership_test();return 0;}
     init_fake();cache_test();palette_test();mip_test();shader_modes_test();

@@ -249,7 +249,7 @@ int main(int argc,char **argv)
 #if defined(__linux__)
     assert(prctl(PR_SET_DUMPABLE,0)==0); /* Bound expected-abort negative controls. */
 #endif
-    setenv("RECOMP_GL_SCALE","1",1);setenv("RECOMP_PROG_CACHE","0",1);unsetenv("RECOMP_GL_THREAD");
+    setenv("RECOMP_GL_SCALE","1",1);setenv("MANHUNT_GL_MIPMAPS","1",1);setenv("RECOMP_PROG_CACHE","0",1);unsetenv("RECOMP_GL_THREAD");
     if(argc>1&&!strncmp(argv[1],"fenced",6)){
         setenv("MANHUNT_GL_SYNC","fenced",1);
         if(strstr(argv[1],"queued")){queued_mode=s_q_on=1;assert(q_start());}
