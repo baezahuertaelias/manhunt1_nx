@@ -16,6 +16,16 @@ __thread uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi;
 static int flip_held;
 int nv2a_pb_exec_flip_held(void) { return __atomic_load_n(&flip_held, __ATOMIC_ACQUIRE); }
 void sub_00292500(void);
+/* The ack-loop wake (patch 0038): counted, and PUT as each wake saw it. */
+static int wakes;
+static uint32_t put_at_wake[8];
+static uint32_t dma_va;
+void xbox_Nv2aAckWake(void)
+{
+    if (wakes < 8)
+        put_at_wake[wakes] = *(volatile uint32_t *)((uintptr_t)dma_va + g_xbox_mem_offset);
+    __atomic_fetch_add(&wakes, 1, __ATOMIC_SEQ_CST);
+}
 
 #define M32(a) (*(volatile uint32_t *)((uintptr_t)(a) + g_xbox_mem_offset))
 #define PDEVICE 0x0029DFB8u
@@ -53,6 +63,7 @@ static void setup(uint32_t flags, uint32_t put0, uint32_t put770) {
     M32(DEV + 0x1C20) = DMA - 0x40;                        /* PUT lands at DMA (base + 0x40) */
     M32(FLUSH) = 0x00000001u;                              /* unrelated bit must survive */
     flip_held = 0;
+    wakes = 0; dma_va = DMA; memset(put_at_wake, 0, sizeof put_at_wake);
     g_esp = STACK; g_esp -= 4; M32(g_esp) = DEV; g_esp -= 4; M32(g_esp) = 0xDEADBEEF;
     g_eax = 0xA1; g_ecx = 0xC1; g_edx = 0xD1;
 }
@@ -85,6 +96,7 @@ int main(int argc, char **argv) {
         ok &= check("fast, no flip: PUT = dev[0] & 0x0FFFFFFF", M32(DMA) == 0x1234u);
         ok &= check("fast: ret 4 pops return + arg", g_esp == esp0 + 8);
         ok &= check("fast: eax/ecx/edx untouched", g_eax == 0xA1 && g_ecx == 0xC1 && g_edx == 0xD1);
+        ok &= check("fast: ack loop woken once, after PUT was written", wakes == 1 && put_at_wake[0] == 0x1234u);
 
         setup(4, 0x1111u, 0x0BADBAD0u); helper_mode = 0; call();
         ok &= check("flags bit 2: PUT from dev+0x770", M32(DMA) == 0x0BADBAD0u);
@@ -94,11 +106,15 @@ int main(int argc, char **argv) {
         ok &= check("flip held: waits for the ack loop to clear busy", dt >= DELAY_MS - 10 && dt < 3000);
         ok &= check("flip held: busy cleared on return, PUT written after", (M32(FLUSH) & BUSY) == 0 && M32(DMA) == 0x2222u);
         ok &= check("flip held: PUT not written before the flush was acknowledged", put_seen_at_release == 0);
+        ok &= check("flip held: ack loop woken before the spin and after PUT",
+                    wakes == 2 && put_at_wake[0] == 0 && put_at_wake[1] == 0x2222u);
     } else {
         setup(0, 0x3333u, 0); helper_mode = 1; flip_held = 0;
         dt = call();
         ok &= check("MANHUNT_KICK_ACK=0: spins until the ack loop clears busy", dt >= DELAY_MS - 10 && dt < 3000);
         ok &= check("MANHUNT_KICK_ACK=0: PUT written after the ack", put_seen_at_release == 0 && M32(DMA) == 0x3333u);
+        ok &= check("MANHUNT_KICK_ACK=0: ack loop woken before the spin and after PUT",
+                    wakes == 2 && put_at_wake[0] == 0 && put_at_wake[1] == 0x3333u);
     }
 
     /* Wait-for-idle after the kick (guest flag 0x0029BB00), both modes. */
@@ -131,6 +147,7 @@ int main(int argc, char **argv) {
     setup(0x2000, 0x5555u, 0); M32(DEV + 0x2478) = 0x77u; M32(DEV + 0x2C) = 10; M32(DEV + 0x30) = 0x00150000u; esp0 = g_esp; helper_mode = 0;
     call();
     ok &= check("flags 0x2000: early return, flush register untouched", M32(FLUSH) == 1u);
+    ok &= check("flags 0x2000: no ack-loop wake (fake register block)", wakes == 0);
     ok &= check("flags 0x2000: DMA block rewired, dev+0x1DE4 copied, ret 4",
                 M32(DEV + 0x1C20) == 0x0029DFB0u - 0x40u && M32(0x0029DFB0u) == 0x5555u && M32(DEV + 0x1DE4) == 0x77u
                 && M32(0x00150000u) == 8u && g_esp == esp0 + 8);

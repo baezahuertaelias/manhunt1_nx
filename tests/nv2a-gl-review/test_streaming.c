@@ -142,9 +142,11 @@ static void base_vertex_contract(void)
 }
 static void bad_fence(void) { GlRing g=new_ring(192,1);put(&g,4,1);stream_fail_fence=1;ring_flip(&g); }
 static void bad_wait(void) { GlRing g=new_ring(192,1);for(int i=0;i<3;i++){put(&g,4,1);if(i==2)stream_fail_wait=1;ring_flip(&g);} }
+#ifndef STREAMING_NO_MAIN   /* test_narrow_indices.c reuses the fake driver */
 int main(void)
 {
     setenv("MANHUNT_PERF_LOG","2",1); init_stream();
     persistent_contract();mutable_contract();packed_contract();base_vertex_contract();expect_abort(bad_fence);expect_abort(bad_wait);
     puts("PASS persistent fence allocation/wait errors stop before unsafe reuse");return 0;
 }
+#endif

@@ -7,7 +7,7 @@
 #     sh /repo/tests/d3d-kickoff/run.sh
 set -eu
 out="${TMPDIR:-/tmp}/d3d-kickoff-test"
-cc -O2 -std=gnu11 -w -I/repo/game/build/gen -I/repo/game/build/xboxrecomp/include \
+cc -O2 -std=gnu11 -w -I/repo/game/build/gen -I/repo/game/src -I/repo/game/build/xboxrecomp/include \
    -o "$out" /repo/tests/d3d-kickoff/kickoff_test.c /repo/game/src/d3d_kickoff.c -lpthread
 "$out" fast
 MANHUNT_KICK_ACK=0 "$out" orig

@@ -16,6 +16,10 @@
  * the original's (the ack loop clears it on release), so frame pacing is
  * unchanged. MANHUNT_KICK_ACK=0 restores the original spin for A/B runs.
  *
+ * The ack loop sleeps up to 1 ms while the GPU is idle (patch 0038), so the
+ * kick wakes it after writing PUT, and before spinning on a flush it must
+ * acknowledge. MANHUNT_ACK_WAKE=0 (read by the runtime) keeps its fixed pass.
+ *
  * Everything else is the original: the device+8 bit 13 path that writes
  * PUT/GET to the fake register block, PUT from device+0x770 when flags bit 2
  * is set, and the optional wait-for-idle when 0x0029BB00 is nonzero.
@@ -34,6 +38,9 @@
 #define PFB_FLUSH_BUSY    0x00010000u
 
 extern int nv2a_pb_exec_flip_held(void);
+/* Wakes the runtime's ack loop when it sleeps on an idle GPU (patch 0038,
+ * MANHUNT_ACK_WAKE). A no-op while it is awake or with waking off. */
+extern void xbox_Nv2aAckWake(void);
 
 static uint64_t now_ns(void)
 {
@@ -77,6 +84,7 @@ void sub_00292500(void)
         __atomic_fetch_and(flush, ~PFB_FLUSH_BUSY, __ATOMIC_SEQ_CST);
     } else if (__atomic_load_n(flush, __ATOMIC_ACQUIRE) & PFB_FLUSH_BUSY) {
         uint64_t t0 = now_ns();
+        xbox_Nv2aAckWake();                    /* the ack loop clears it */
         while (__atomic_load_n(flush, __ATOMIC_ACQUIRE) & PFB_FLUSH_BUSY)
             ;
         s_wait_ns += now_ns() - t0;
@@ -88,6 +96,7 @@ void sub_00292500(void)
      * order these plain stores on AArch64. No code on x86. */
     __atomic_thread_fence(__ATOMIC_RELEASE);
     MEM32(MEM32(dev + 0x1C20) + 0x40) = put & 0x0FFFFFFFu;
+    xbox_Nv2aAckWake();                        /* new PUT: no idle sleep in the way */
     if (MEM32(D3D_KICK_IDLE)) {
         uint32_t nv = MEM32(d3d + 0x934);
         while (MEM32(nv + 0x3240) != MEM32(nv + 0x3244) || MEM32(nv + 0x400700))

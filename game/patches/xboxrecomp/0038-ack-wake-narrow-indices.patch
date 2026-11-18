@@ -1,0 +1,285 @@
+--- /dev/null
++++ b/src/kernel/nv2a_ack_wake.h
+@@ -0,0 +1,83 @@
++/*
++ * nv2a_ack_wake.h - let the NV2A ack loop sleep while the GPU is idle.
++ *
++ * The ack loop (xbox_memory_layout.c) executes the pushbuffer, advances
++ * DMA_GET, answers the PFB flush kick and runs a handful of clocks. It used
++ * to pass every 200 us whether or not anything had been submitted: about
++ * 5000 wake-ups a second on a console whose three usable cores are already
++ * busy. Now, once a pass finds nothing pending (GET == PUT, no flip held, no
++ * flush kick waiting), it sleeps on an event for up to a millisecond, and the
++ * title's KickOff (game/src/d3d_kickoff.c) sets the event when it writes PUT.
++ * While work is pending the loop keeps its 200 us cadence.
++ *
++ * The handshake is the usual one for "sleep unless there is work":
++ *
++ *   loop:    sleeping = 1; full fence; if (!pending()) wait(event, ms);
++ *            sleeping = 0
++ *   kicker:  publish PUT; full fence; if (sleeping) signal(event)
++ *
++ * Either the loop sees the new PUT in its re-check, or the kicker sees
++ * sleeping and signals. The event is sticky (auto-reset), so a signal sent
++ * before the wait starts is not lost: the wait returns at once. A stale
++ * signal costs one early pass.
++ *
++ * The event itself is supplied by the caller (signal/wait callbacks), so
++ * tests/nv2a-ack-wake in the game project drives this with pthreads and no
++ * kernel.
++ */
++#ifndef NV2A_ACK_WAKE_H
++#define NV2A_ACK_WAKE_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct XboxAckWake {
++    volatile int sleeping;          /* the loop is about to wait or waiting */
++    void *event;                    /* NULL: waking is off */
++    void (*signal)(void *event);
++    /* Wait up to ms; 1 when signalled, 0 on timeout. */
++    int  (*wait)(void *event, unsigned ms);
++    /* Statistics, written by the loop only. */
++    uint32_t kick_wakes, timeouts, skipped;
++} XboxAckWake;
++
++/* Kicker side, right after the new PUT is stored. */
++static inline void xbox_AckWakeKick(XboxAckWake *w)
++{
++    if (!w->event)
++        return;
++    __atomic_thread_fence(__ATOMIC_SEQ_CST);
++    if (__atomic_load_n(&w->sleeping, __ATOMIC_RELAXED))
++        w->signal(w->event);
++}
++
++/* Loop side, at the end of a pass that found nothing to do. pending(arg) is
++ * evaluated again after the loop has announced the sleep; when it reports
++ * work the loop does not wait. Returns 1 woken, 0 timed out, -1 not slept. */
++static inline int xbox_AckWakeIdle(XboxAckWake *w, int (*pending)(void *),
++                                   void *arg, unsigned ms)
++{
++    int r = -1;
++
++    __atomic_store_n(&w->sleeping, 1, __ATOMIC_SEQ_CST);
++    __atomic_thread_fence(__ATOMIC_SEQ_CST);
++    if (!pending(arg))
++        r = w->wait(w->event, ms);
++    __atomic_store_n(&w->sleeping, 0, __ATOMIC_RELEASE);
++    if (r > 0)
++        w->kick_wakes++;
++    else if (r == 0)
++        w->timeouts++;
++    else
++        w->skipped++;
++    return r;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* NV2A_ACK_WAKE_H */
+--- a/src/kernel/nv2a_backend.h
++++ b/src/kernel/nv2a_backend.h
+@@ -198,6 +198,10 @@
+     uint32_t        vtx_epoch;
+     /* RAW_LIGHTING: bit 0 shader lighting, bit 1 flip normals, bit 2 valid diffuse array. */
+     uint32_t        lighting;
++    /* Only for a back end registered with NV2A_BACKEND_RAW_INDEX16, and only
++     * when vertex_count <= 65536: the indices as 16 bits, index_count of
++     * them, and indices is NULL. Otherwise NULL and indices holds them. */
++    const uint16_t *indices16;
+ } Nv2aRawBatch;
+ 
+ /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */
+@@ -270,6 +274,8 @@
+ #define NV2A_BACKEND_RAW_LIGHTING 0x4u
+ /* Packed 11:11:10 attributes require a shader decoder, not native GL formats. */
+ #define NV2A_BACKEND_RAW_CMP 0x8u
++/* draw_raw takes 16-bit indices (Nv2aRawBatch.indices16) when they fit. */
++#define NV2A_BACKEND_RAW_INDEX16 0x10u
+ 
+ static inline int nv2a_backend_contract_valid(const Nv2aBackend *b)
+ {
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -3454,14 +3454,25 @@
+         if (timed)
+             s_raw_lit_ns += xbox_HostNowNs() - t0;
+     }
+-    for (i = 0; i < s_gpu.idx_count; i++)
+-        s_raw_idx[i] = s_gpu.idx[i] - lo;
++    /* Rebased indices span nv vertices, so with nv <= 65536 every one fits
++     * 16 bits: a back end that asks gets them narrowed here, once, instead
++     * of copying 32-bit ones and narrowing them itself. The buffer is the
++     * 32-bit one, so it has room. */
++    if ((s_backend->flags & NV2A_BACKEND_RAW_INDEX16) && nv <= 65536u) {
++        uint16_t *o = (uint16_t *)s_raw_idx;
++        for (i = 0; i < s_gpu.idx_count; i++)
++            o[i] = (uint16_t)(s_gpu.idx[i] - lo);
++        rb.indices16 = o;
++    } else {
++        for (i = 0; i < s_gpu.idx_count; i++)
++            s_raw_idx[i] = s_gpu.idx[i] - lo;
++        rb.indices = s_raw_idx;
++    }
+ 
+     rb.prim = s_gpu.prim;
+     rb.vertex_count = nv;
+     rb.attr_present = present;
+     rb.attrs = s_raw_attrs;
+-    rb.indices = s_raw_idx;
+     rb.index_count = s_gpu.idx_count;
+     rb.regs = s_reg;
+     rb.vp_program = nv2a_vsh_program_slots();
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -20,6 +20,7 @@
+ #include "guest_vmem.h"
+ #include "kernel_missing.h"
+ #include "nv2a_flip_hold.h"
++#include "nv2a_ack_wake.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -1448,9 +1449,62 @@
+     return (volatile uint32_t *)((char *)g_nv2a_memory + offset);
+ }
+ 
++/* Sleep while the GPU is idle, woken by the title's KickOff (nv2a_ack_wake.h).
++ *
++ * What the ack loop does each pass, and why a 1 ms idle sleep keeps each
++ * duty's timing:
++ *   - flip hold poll, PFB flush ack, DMA walk, GET advance: these only have
++ *     work while something is pending, and then the pass stays at 200 us
++ *     (nv2a_ack_pending); a KickOff wakes the loop as soon as PUT moves.
++ *   - interrupt-status clears and idle bits: nothing raises them here; the
++ *     vblank's two bits belong to the vblank-ack thread, and this loop is
++ *     only their backstop after VBL_ACK_LATE_MS.
++ *   - fence/counter mirrors, DSP ack, pokes: polled, up to 1 ms later when
++ *     idle.
++ *   - frame counters: 16 ms period. KeTickCount: GetTickCount, 1 ms unit.
++ *   - the MCPX counter moved once per pass; after a sleep it moves once per
++ *     200 us slept, so its rate stays what it was.
++ * MANHUNT_ACK_WAKE=0 restores the fixed 200 us pass. */
++#define NV2A_ACK_IDLE_MS  1u
++#define NV2A_ACK_PASS_NS  200000u
++static XboxAckWake g_nv2a_ack_wake;
++extern int nv2a_pb_exec_flip_held(void);
++extern uint64_t xbox_HostNowNs(void);
++
++static void nv2a_ack_signal(void *ev)
++{
++    SetEvent((HANDLE)ev);
++}
++
++static int nv2a_ack_wait(void *ev, unsigned ms)
++{
++    return WaitForSingleObject((HANDLE)ev, ms) == WAIT_OBJECT_0;
++}
++
++/* Work that wants the 200 us pass: a segment not yet executed (GET behind
++ * PUT), a flip held for its vblank, or a PFB flush kick waiting for its ack. */
++static int nv2a_ack_pending(void *param)
++{
++    const char *regs = (const char *)param;
++    uint32_t put = *(volatile const uint32_t *)(regs + NV2A_USER_DMA_PUT);
++    uint32_t get = *(volatile const uint32_t *)(regs + NV2A_USER_DMA_GET);
++
++    if (put != get || nv2a_pb_exec_flip_held())
++        return 1;
++    return (*(volatile const uint32_t *)(regs + NV2A_ACK_PFB_FLUSH) & 0x00010000u) != 0;
++}
++
++/* The title wrote DMA_PUT, or set the PFB flush kick: wake the loop if it is
++ * asleep. Any thread; a fence and a load when the loop is awake. */
++void xbox_Nv2aAckWake(void)
++{
++    xbox_AckWakeKick(&g_nv2a_ack_wake);
++}
++
+ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+ {
+     volatile uint32_t *regs = (volatile uint32_t *)param;
++    uint32_t mcpx_ticks = 1;    /* MCPX counter steps owed, one per 200 us */
+     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+         /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
+          * nothing, leaves DMA_GET where it is and acknowledges no PFB flush,
+@@ -1642,9 +1696,10 @@
+             for (size_t i = 0; i < sizeof(MCPX_COUNTERS) / sizeof(MCPX_COUNTERS[0]); i++) {
+                 volatile uint32_t *c =
+                     (volatile uint32_t *)((char *)g_mcpx_regs + MCPX_COUNTERS[i]);
+-                *c += 1;
++                *c += mcpx_ticks;
+             }
+         }
++        mcpx_ticks = 1;
+ 
+         /* Advance KeTickCount. It was written once at init and left frozen,
+          * which silently breaks every timeout that polls it: Halo's DHCP setup
+@@ -1655,6 +1710,16 @@
+         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
+                                + g_memory_offset) = GetTickCount();
+ 
++        if (g_nv2a_ack_wake.event && !nv2a_ack_pending(param)) {
++            /* Idle: sleep until a KickOff, or NV2A_ACK_IDLE_MS. */
++            uint64_t t0 = xbox_HostNowNs(), slept;
++            xbox_AckWakeIdle(&g_nv2a_ack_wake, nv2a_ack_pending, param, NV2A_ACK_IDLE_MS);
++            slept = xbox_HostNowNs() - t0;
++            mcpx_ticks = slept >= 2u * NV2A_ACK_PASS_NS
++                       ? (uint32_t)(slept / NV2A_ACK_PASS_NS) : 1u;
++            if (mcpx_ticks > 100u)
++                mcpx_ticks = 100u;
++        } else {
+ #if defined(__SWITCH__)
+         /* Horizon: Sleep(0) is svcSleepThread(-1), a yield with core migration
+          * that takes the kernel's global scheduler lock; in this never-sleeping
+@@ -1664,6 +1729,25 @@
+ #else
+         Sleep(0);  /* yield; the waiter is spinning on another core */
+ #endif
++        }
++        if (g_nv2a_ack_wake.event) {
++            static DWORD report_ms;
++            static uint32_t passes;
++            DWORD now_ms = GetTickCount();
++            passes++;
++            if (!report_ms)
++                report_ms = now_ms;
++            if (now_ms - report_ms >= 10000) {
++                fprintf(stderr, "[NV2A] ack loop: %u passes in %.1f s, %u woken by a kick,"
++                        " %u idle timeouts, %u found work on the re-check\n",
++                        passes, (now_ms - report_ms) / 1000.0, g_nv2a_ack_wake.kick_wakes,
++                        g_nv2a_ack_wake.timeouts, g_nv2a_ack_wake.skipped);
++                report_ms = now_ms;
++                passes = 0;
++                g_nv2a_ack_wake.kick_wakes = g_nv2a_ack_wake.timeouts = 0;
++                g_nv2a_ack_wake.skipped = 0;
++            }
++        }
+     }
+     return 0;
+ }
+@@ -1673,6 +1757,17 @@
+     dsp_ack_init();
+     poke_init();
+     g_nv2a_ack_stop = 0;
++    {
++        const char *e = getenv("MANHUNT_ACK_WAKE");
++        if (!(e && e[0] == '0')) {
++            g_nv2a_ack_wake.signal = nv2a_ack_signal;
++            g_nv2a_ack_wake.wait = nv2a_ack_wait;
++            g_nv2a_ack_wake.event = CreateEventA(NULL, FALSE, FALSE, NULL);
++        }
++        fprintf(stderr, "  NV2A ack loop: %s (MANHUNT_ACK_WAKE)\n",
++                g_nv2a_ack_wake.event ? "sleeps up to 1 ms when idle, woken by a kick"
++                                      : "fixed 200 us pass");
++    }
+     g_nv2a_ack_thread = CreateThread(NULL, 8u << 20 /* a draw_raw back end compiles shaders here */, nv2a_ack_thread,
+                                      g_nv2a_memory, 0, NULL);
+     if (g_nv2a_ack_thread) {

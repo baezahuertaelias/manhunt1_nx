@@ -2655,11 +2655,13 @@ static void psh_key(const uint32_t *r, Nv2aPshKey *k)
 static uint32_t *s_prim_idx;
 static size_t    s_prim_cap;
 
-static GLenum gl_prim(const Nv2aRawBatch *b, const uint32_t **idx, uint32_t *n)
+/* *idx is uint16_t when b->indices16 is set (narrowed by the executor,
+ * MANHUNT_NARROW_INDICES), uint32_t otherwise; QUADS keep the width. */
+static GLenum gl_prim(const Nv2aRawBatch *b, const void **idx, uint32_t *n)
 {
     uint32_t i, m = 0;
 
-    *idx = b->indices;
+    *idx = b->indices16 ? (const void *)b->indices16 : (const void *)b->indices;
     *n = b->index_count;
     switch (b->prim) {
     case 1: return 0x0000;             /* POINTS */
@@ -2678,6 +2680,17 @@ static GLenum gl_prim(const Nv2aRawBatch *b, const uint32_t **idx, uint32_t *n)
             s_prim_idx = (uint32_t *)malloc(s_prim_cap * 4);
         }
         if (!s_prim_idx) gl_fail("primitive index allocation failed");
+        if (b->indices16) {
+            uint16_t *o = (uint16_t *)s_prim_idx;
+            for (i = 0; i + 3 < b->index_count; i += 4) {
+                const uint16_t *q = b->indices16 + i;
+                o[m++] = q[0]; o[m++] = q[1]; o[m++] = q[2];
+                o[m++] = q[0]; o[m++] = q[2]; o[m++] = q[3];
+            }
+            *idx = o;
+            *n = m;
+            return GL_TRIANGLES;
+        }
         for (i = 0; i + 3 < b->index_count; i += 4) {
             const uint32_t *q = b->indices + i;
             s_prim_idx[m++] = q[0]; s_prim_idx[m++] = q[1]; s_prim_idx[m++] = q[2];
@@ -2944,7 +2957,7 @@ static int base_vertex_enabled(void)
     return on;
 }
 
-static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
+static int upload_vertices(const Nv2aRawBatch *b, const void *indices,
                            uint32_t index_count, GLenum index_type, GLintptr *index_at,
                            GLint *base_vertex)
 {
@@ -3043,9 +3056,16 @@ static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
     }
     if (s_streaming) {
         *index_at = at + index_offset;
-        if (index_type == GL_UNSIGNED_SHORT) {
+        if (b->indices16) {             /* narrowed by the executor (gl_prim) */
+            if (index_type == GL_UNSIGNED_SHORT) {
+                memcpy(dst + index_offset, indices, (size_t)index_count * 2);
+            } else {
+                uint32_t *out = (uint32_t *)(dst + index_offset);
+                for (i = 0; i < index_count; ++i) out[i] = ((const uint16_t *)indices)[i];
+            }
+        } else if (index_type == GL_UNSIGNED_SHORT) {
             uint16_t *out = (uint16_t *)(dst + index_offset);
-            for (i = 0; i < index_count; ++i) out[i] = (uint16_t)indices[i];
+            for (i = 0; i < index_count; ++i) out[i] = (uint16_t)((const uint32_t *)indices)[i];
         } else {
             memcpy(dst + index_offset, indices, (size_t)index_count * 4);
         }
@@ -3568,7 +3588,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     GlProg *p;
     Nv2aPshKey pk;
     const uint32_t *r = b->regs;
-    const uint32_t *idx;
+    const void *idx;
     uint32_t n, a, i;
     GLintptr idx_at;
     GLint base_vertex = 0;
@@ -3907,7 +3927,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     if (!state_cache_enabled()) glBindVertexArray(s_vao);
     mode = gl_prim(b, &idx, &n);
     if (!n) return;
-    idx_type = b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+    idx_type = b->indices16 || b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
     if (!upload_vertices(b, idx, n, idx_type, &idx_at, &base_vertex)) {
         if (gl_gpu()) return;
         gl_fail("vertex upload failed");
@@ -3934,8 +3954,13 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
         static uint16_t *idx16;
         static size_t idx16_cap;
         void *dst;
-        idx_type = b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
-        if (idx_type == GL_UNSIGNED_INT) {
+        idx_type = b->indices16 || b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+        if (b->indices16) {             /* narrowed by the executor (gl_prim) */
+            idx_at = ring_alloc(&s_iring, (GLsizeiptr)n * 2, &dst);
+            if (dst)
+                memcpy(dst, idx, (size_t)n * 2);
+            ring_done(&s_iring, idx_at, (GLsizeiptr)n * 2, dst, idx);
+        } else if (idx_type == GL_UNSIGNED_INT) {
             idx_at = ring_alloc(&s_iring, (GLsizeiptr)n * 4, &dst);
             if (dst)
                 memcpy(dst, idx, (size_t)n * 4);
@@ -3954,7 +3979,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                 o = idx16;
             }
             for (i = 0; i < n; i++)
-                o[i] = (uint16_t)idx[i];
+                o[i] = (uint16_t)((const uint32_t *)idx)[i];
             ring_done(&s_iring, idx_at, (GLsizeiptr)n * 2, dst, idx16);
         }
     }
@@ -4727,7 +4752,10 @@ static void q_read_batch(const uint8_t *rec, size_t at, Nv2aRawBatch *bb)
         if (bb->attr_direct & (1u << a))
             bb->direct[a].ptr = rec + (uintptr_t)bb->direct[a].ptr;
     bb->attrs = bb->attrs ? (const float *)(rec + (uintptr_t)bb->attrs) : NULL;
-    bb->indices = (const uint32_t *)(rec + (uintptr_t)bb->indices);
+    if (bb->indices16)
+        bb->indices16 = (const uint16_t *)(rec + (uintptr_t)bb->indices16);
+    else
+        bb->indices = (const uint32_t *)(rec + (uintptr_t)bb->indices);
 }
 
 static void q_draw(const Nv2aRawBatch *b)
@@ -4740,6 +4768,8 @@ static void q_draw(const Nv2aRawBatch *b)
     int packed = queue_pack();
     for (a = 0; a < NV2A_RAW_ATTRS; a++) if (conv & (1u << a)) slots[nconv++] = a;
     size_t attr_bytes = (size_t)b->vertex_count * (packed ? nconv : NV2A_RAW_ATTRS) * 16;
+    /* 16-bit when the executor narrowed them (MANHUNT_NARROW_INDICES). */
+    size_t idx_bytes = (size_t)b->index_count * (b->indices16 ? 2 : 4);
     size_t size, at, runs_at[NV2A_RAW_ATTRS], attrs_at = 0, idx_at, batch_at;
     Nv2aRawBatch *qb;
     uint8_t *rec;
@@ -4764,7 +4794,7 @@ static void q_draw(const Nv2aRawBatch *b)
         size += Q_ALIGN(attr_bytes);
     }
     idx_at = size;
-    size += Q_ALIGN((size_t)b->index_count * 4);
+    size += Q_ALIGN(idx_bytes);
     if (size > Q_BYTES / 4)
         gl_fail("queued draw exceeds bounded record capacity");
 
@@ -4811,8 +4841,13 @@ static void q_draw(const Nv2aRawBatch *b)
             PF_ADD(queue_attr_saved_bytes, (size_t)b->vertex_count * NV2A_RAW_ATTRS * 16 - attr_bytes);
         }
     } else qb->attrs = NULL;
-    memcpy(rec + idx_at, b->indices, (size_t)b->index_count * 4);
-    qb->indices = (const uint32_t *)(uintptr_t)idx_at;
+    if (b->indices16) {
+        memcpy(rec + idx_at, b->indices16, idx_bytes);
+        qb->indices16 = (const uint16_t *)(uintptr_t)idx_at;
+    } else {
+        memcpy(rec + idx_at, b->indices, idx_bytes);
+        qb->indices = (const uint32_t *)(uintptr_t)idx_at;
+    }
     ((QHdr *)rec)->size = (uint32_t)size;
     q_publish(size);
     /* gpu mode owes the guest nothing per draw: waiting here made the two
@@ -5012,6 +5047,13 @@ void nv2a_gl_install(void)
     fprintf(stderr, "[MH-GL] fixed-function lighting: %s (MANHUNT_SHADER_LIGHTING)\n",
             flags & NV2A_BACKEND_RAW_LIGHTING ? "shader" : "CPU");
     if (gl_fenced()) flags |= NV2A_BACKEND_DEFERRED_RAM;
+    {
+        /* The executor narrows indices to 16 bits once (Nv2aRawBatch.indices16). */
+        const char *e = getenv("MANHUNT_NARROW_INDICES");
+        if (!(e && *e == '0')) flags |= NV2A_BACKEND_RAW_INDEX16;
+        fprintf(stderr, "[MH-GL] 16-bit indices from the executor: %s (MANHUNT_NARROW_INDICES)\n",
+                flags & NV2A_BACKEND_RAW_INDEX16 ? "on" : "off");
+    }
     s_backend_gl.flags=s_backend_q.flags=flags;
     {
         const char *e = getenv("RECOMP_GL_THREAD");
