@@ -316,9 +316,10 @@ void nv2a_fog_params(const uint32_t *regs, uint32_t xform, float out[4])
     default:     out[2] = 0.0f; break;          /* LINEAR (0x2601) */
     }
     /* A vertex program's oFog.x is the fog distance. The fixed-function
-     * path does not generate one (vFog is 0). This runtime's CPU path runs its
-     * fog_factor on that 0 too, with factor 1 when fog is off, so both paths
-     * do here; RECOMP_GL_FOG_RAW=1 keeps the renderer's original raw read. */
+     * path generates one per SET_FOG_GEN_MODE (gl_vsh.c, u_fogm); with
+     * MANHUNT_GL_FF_FOG=0 it is 0, as this runtime's CPU path still has it.
+     * Factor 1 when fog is off; RECOMP_GL_FOG_RAW=1 keeps the renderer's
+     * original raw read (and no generated coordinate). */
     static int fog_raw = -1;
     if (fog_raw < 0) {
         const char *e = getenv("RECOMP_GL_FOG_RAW");
@@ -332,6 +333,7 @@ void nv2a_fog_params(const uint32_t *regs, uint32_t xform, float out[4])
 }
 
 int nv2a_gl_gpu_mode(void);            /* nv2a_gl.c */
+int nv2a_gl_shader_minor(void);        /* gl_vsh.c */
 
 int nv2a_gl_psh_supported(const Nv2aPshKey *k)
 {
@@ -427,10 +429,15 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         emit(&o, "    float fG = "); final_input(&o, cw1 >> 8, 1, k); emit(&o, ";\n");
         emit(&o, "    fragColor = vec4(fA * fB + (1.0 - fA) * fC + fD, fG);\n");
     }
+    /* The alpha test compares 8-bit alpha with the 8-bit reference, as the
+     * CPU path's alpha_test_pass does (rounded): unrounded, EQUAL almost
+     * never passed. MANHUNT_GL_SHADER_MINOR=0: the old unrounded compare. */
     emit(&o,
         "    fragColor = clamp(fragColor, 0.0, 1.0);\n"
-        "    float ar = fragColor.a * 255.0;\n"
-        "    bool pass = true;\n"
+        "    float ar = %s;\n"
+        "    bool pass = true;\n",
+        nv2a_gl_shader_minor() ? "floor(fragColor.a * 255.0 + 0.5)" : "fragColor.a * 255.0");
+    emit(&o,
         "    if (u_alpha_func == 0x200) pass = false;\n"
         "    else if (u_alpha_func == 0x201) pass = ar <  u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x202) pass = ar == u_alpha_ref;\n"
