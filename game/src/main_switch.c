@@ -13,7 +13,7 @@
  *   - guest code runs on a thread with a large stack, because every guest
  *     call is a host call in the lifted code;
  *   - an evidence thread dumps the guest framebuffer as BMP to
- *     sdmc:/manhunt-frames every MANHUNT_DUMP_SECS seconds.
+ *     sdmc:/manhunt-frames every MANHUNT_DUMP_SECS seconds (off by default).
  * Memory: win32_compat_horizon.inc (patch 0003) backs the guest window with
  * code-memory mappings; no RAM mirrors (not needed to boot: FEASIBILITY.md).
  */
@@ -1035,7 +1035,12 @@ static void config_init(void)
         {"RECOMP_PB_EXEC", "1"}, {"RECOMP_PB_WALK", "dma"},
         {"RECOMP_TITLE_KEVENTS", "1"}, {"RECOMP_VBLANK", "paced"},
         {"RECOMP_DISPATCH_GATE", "1"}, {"RECOMP_FLIP_PACING", "1"},
-        {"MANHUNT_DUMP_SECS", "15"},
+        /* The dump reads the software framebuffer, which the GL backend does not
+         * keep (fb_present.c), so it only woke a thread 10 times a second. */
+        {"MANHUNT_DUMP_SECS", "0"},
+        /* GL submission on its own thread: 25.0 FPS against 22.25 without
+         * (reports/PERF_AUDIO_STATUS_2026-11-10.md); every console run since used it. */
+        {"RECOMP_GL_THREAD", "1"},
         /* Accepted on the console 2026-11-11/12 (reports/SWITCH_RUN_2026-11-11.md):
          * GL upload/state paths, APU history window, critical-section resolver
          * cache, contiguous reuse. Each takes =0 in manhunt.env or as an
