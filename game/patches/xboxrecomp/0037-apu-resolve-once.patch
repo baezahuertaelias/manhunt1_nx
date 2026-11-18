@@ -1,0 +1,538 @@
+diff --git a/src/apu/apu_core.c b/src/apu/apu_core.c
+old mode 100644
+new mode 100755
+index 9bfcc13..d4e49b2
+--- a/src/apu/apu_core.c
++++ b/src/apu/apu_core.c
+@@ -155,6 +155,34 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
+     return g_apu_ram_ptr + (a & 0x03FFFFFFu);
+ }
+ 
++/* mcpx_apu_phys(addr), plus in *avail how many bytes from addr on resolve
++ * the same way: for every 0 <= i < *avail, mcpx_apu_phys(addr + i) is the
++ * returned pointer + i. *avail is at least 1 and never runs past the end of
++ * addr's 4 KB page.
++ *
++ * Every case above is a fixed base plus a. Which case applies depends on the
++ * page maps, which hold one entry per 4 KB page, and on comparisons of a with
++ * 64 MB, the mapped RAM size, the image bounds and the contiguous arena's
++ * high-water mark. 64 MB is page aligned. The image bounds come from section
++ * sizes and need not be, so the span also stops at any of those bounds that
++ * falls inside the page. The voice processor uses this to resolve a voice's
++ * register block or a run of sample data once instead of per access. */
++uint8_t *mcpx_apu_phys_span(uint64_t addr, uint32_t *avail)
++{
++    uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
++    uint32_t end = (a | 0xFFFu) + 1u;
++    uint32_t bound[4];
++    bound[0] = g_xbox_image_lo;
++    bound[1] = g_xbox_image_hi;
++    bound[2] = xbox_ContiguousAllocatedBytes();
++    bound[3] = apu_mapped_ram();
++    for (int i = 0; i < 4; i++)
++        if (bound[i] > a && bound[i] < end)
++            end = bound[i];
++    *avail = end - a;
++    return mcpx_apu_phys(addr);
++}
++
+ /* Which of the cases above resolved an address, for the RECOMP_APU_TRACE
+  * per-voice line and the doorbell line: "named" (a heap page
+  * MmGetPhysicalAddress named), "win" (a page the contiguous allocator handed
+diff --git a/src/apu/apu_shim.h b/src/apu/apu_shim.h
+old mode 100644
+new mode 100755
+index 3a3996f..43c263f
+--- a/src/apu/apu_shim.h
++++ b/src/apu/apu_shim.h
+@@ -100,6 +100,9 @@ static inline void qemu_thread_join(QemuThread *t) {
+ extern uint8_t *g_apu_ram_ptr; /* Set at init to point at Xbox 64MB RAM */
+ /* Where a physical address the title handed the APU lives. See apu_core.c. */
+ uint8_t *mcpx_apu_phys(uint64_t addr);
++/* mcpx_apu_phys, and how many bytes from addr on (within its 4 KB page)
++ * resolve linearly from the returned pointer. See apu_core.c. */
++uint8_t *mcpx_apu_phys_span(uint64_t addr, uint32_t *avail);
+ /* Which case of mcpx_apu_phys resolved an address, for trace lines. */
+ const char *mcpx_apu_phys_class(uint64_t addr);
+ 
+diff --git a/src/apu/apu_state.h b/src/apu/apu_state.h
+old mode 100644
+new mode 100755
+index 21edcf0..2043f15
+--- a/src/apu/apu_state.h
++++ b/src/apu/apu_state.h
+@@ -391,6 +391,17 @@ typedef struct MCPXAPUVoiceFilter {
+     HrtfFilter hrtf;
+     float gain_prev[8];     /* each bin's gain at the end of the last frame */
+     bool gain_valid;
++    /* The last ADPCM block voice_get_samples decoded for this voice, kept
++     * across calls (a frame takes about 35 source samples of a 64-sample
++     * block). It is keyed on the block's raw bytes, its size and the channel
++     * count, which are all the decoder reads, so a new buffer, position or
++     * format, or new data written over the old, simply misses. Only blocks
++     * whose decode writes every entry voice_get_samples reads are kept (see
++     * there). adpcm_raw_size 0: nothing kept. */
++    uint32_t adpcm_raw_size;
++    int adpcm_channels;
++    uint32_t adpcm_raw[2 * 36 / 4];
++    int16_t adpcm_decoded[65 * 2 * 2];
+ } MCPXAPUVoiceFilter;
+ 
+ typedef struct VoiceWorkItem {
+diff --git a/src/apu/apu_vp.c b/src/apu/apu_vp.c
+old mode 100644
+new mode 100755
+index 9f04357..8c4569c
+--- a/src/apu/apu_vp.c
++++ b/src/apu/apu_vp.c
+@@ -23,6 +23,9 @@
+ #include "apu.h"
+ #include "fpconv.h"
+ #include "apu_math_cache.h"
++#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
++#include <xmmintrin.h>
++#endif
+ 
+ /* #define DEBUG_MCPX */
+ 
+@@ -103,13 +106,107 @@ static float attenuate(uint16_t vol)
+     return apu_attenuation_cached(vol);
+ }
+ 
++/* Skipping a mix bin whose gain ramp is zero throughout (voice_process).
++ *
++ * Such a bin adds c * s to each mixbin sample m, with c a zero of either sign.
++ * For a finite s that is a zero, and m + (+-0) is m bit for bit, except
++ * -0 + +0, which is +0. Inf or NaN samples would add a NaN, so the skip
++ * needs every sample of the voice finite (vp_samples_finite).
++ *
++ * A mixbin never holds -0 when every addition into it rounds to nearest with
++ * no flushing: the frame starts the bins at +0 (memset), a clear sets +0, and
++ * a sum is -0 only from -0 + -0. Flush-to-zero breaks that (a tiny negative
++ * sum becomes -0), as does a directed rounding mode (x - x is -0 rounding
++ * down), and default-NaN mode would change a NaN's payload where the add
++ * would keep it. The frame thread runs the title's interrupt routine between
++ * frames, and the title's LDMXCSR reaches the host's FTZ (recomp_ldmxcsr), so
++ * the mode is checked: at the start of the frame and before each voice's mix,
++ * and once it is not plain, nothing is skipped for the rest of the frame. */
++static bool s_mix_skip_ok;
++
++/* MANHUNT_APU_RESOLVE_ONCE=0 goes back to resolving every voice field and
++ * sample through mcpx_apu_phys, decoding each ADPCM block afresh every call
++ * and mixing every bin. The output is the same either way (tests/audio-apu/
++ * run-vp-exact.sh); the switch is for timing the two on the console. -1:
++ * not read yet (first frame), which counts as on. */
++static int s_resolve_once = -1;
++
++static inline bool vp_fpenv_plain(void)
++{
++#if defined(__aarch64__)
++    uint64_t fpcr;
++    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
++    /* RMode (23:22), FZ (24), DN (25); FIZ, AH, NEP (2:0) where present. */
++    return (fpcr & ((0xFull << 22) | 0x7u)) == 0;
++#elif defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
++    /* DAZ (6), RC (14:13), FTZ (15). */
++    return (_mm_getcsr() & 0xE040u) == 0;
++#else
++    return false;
++#endif
++}
++
++static bool vp_samples_finite(const float samples[][2], unsigned int channels)
++{
++    uint32_t bad = 0;
++    for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
++        for (unsigned int ch = 0; ch < channels; ch++) {
++            uint32_t u;
++            memcpy(&u, &samples[i][ch], 4);
++            bad |= (uint32_t)((u & 0x7F800000u) == 0x7F800000u);
++        }
++    }
++    return bad == 0;
++}
++
+ /* ============================================================
+  * Voice register accessors (read/write voice struct in RAM)
+  * ============================================================ */
+ 
++/* The register block of the voice the frame thread is working on, resolved
++ * once (vp_voice_block_begin) instead of through mcpx_apu_phys on every field:
++ * a voice reads 50 to 80 fields a frame. Thread-local, so a front-end method
++ * on a title thread (VOICE_LOCK, VOICE_ON) still resolves its own. NULL when
++ * the block does not resolve linearly over its 0x80 bytes, and then every
++ * field goes through mcpx_apu_phys as before. */
++#if defined(_MSC_VER)
++#  define VP_TLS __declspec(thread)
++#else
++#  define VP_TLS __thread
++#endif
++static VP_TLS uint8_t *s_vblk;
++static VP_TLS uint16_t s_vblk_handle;
++
++static void vp_voice_block_begin(MCPXAPUState *d, uint16_t voice_handle)
++{
++    hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
++    uint32_t avail;
++    uint8_t *p = mcpx_apu_phys_span(voice, &avail);
++    s_vblk = avail >= NV_PAVS_SIZE ? p : NULL;
++    s_vblk_handle = voice_handle;
++}
++
++static void vp_voice_block_end(void)
++{
++    s_vblk = NULL;
++}
++
++/* Where field `offset` of the voice lives on the host, or NULL to resolve it
++ * the slow way. */
++static inline uint32_t *vp_voice_field(uint16_t voice_handle, hwaddr offset)
++{
++    if (s_vblk && voice_handle == s_vblk_handle &&
++        offset <= NV_PAVS_SIZE - 4)
++        return (uint32_t *)(s_vblk + offset);
++    return NULL;
++}
++
+ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
+                                hwaddr offset, uint32_t mask)
+ {
++    uint32_t *f = vp_voice_field(voice_handle, offset);
++    if (f)
++        return (*f & mask) >> ctz32(mask);
+     hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
+     return (ldl_le_phys(address_space_memory, voice + offset) & mask) >>
+            ctz32(mask);
+@@ -118,6 +215,11 @@ static uint32_t voice_get_mask(MCPXAPUState *d, uint16_t voice_handle,
+ static void voice_set_mask(MCPXAPUState *d, uint16_t voice_handle,
+                            hwaddr offset, uint32_t mask, uint32_t val)
+ {
++    uint32_t *f = vp_voice_field(voice_handle, offset);
++    if (f) {
++        *f = (*f & ~mask) | ((val << ctz32(mask)) & mask);
++        return;
++    }
+     hwaddr voice = d->regs[NV_PAPU_VPVADDR] + voice_handle * NV_PAVS_SIZE;
+     uint32_t v = ldl_le_phys(address_space_memory, voice + offset) & ~mask;
+     stl_le_phys(address_space_memory, voice + offset,
+@@ -1075,6 +1177,60 @@ static void vp_ring_report(unsigned secs)
+  * Sample fetching from voice buffers
+  * ============================================================ */
+ 
++/* Sample data, resolved once per page instead of once per access.
++ *
++ * vp_fetch_data_addr is get_data_ptr with the SGE entry of the last linear
++ * page kept: the entry is read again only when the page changes. vp_fetch_host
++ * is mcpx_apu_phys with the last resolved span kept (mcpx_apu_phys_span):
++ * an address inside it is the span's host pointer plus the distance. Both
++ * give exactly what get_data_ptr and mcpx_apu_phys give. Nothing in
++ * voice_get_samples writes guest memory between its sample reads, so a kept
++ * SGE entry cannot go stale within one call. */
++typedef struct VpFetch {
++    hwaddr sge_base;
++    unsigned int sge_page;      /* linear page of sge_prd; ~0u: none */
++    uint32_t sge_prd;
++    hwaddr span_lo;             /* physical start of the resolved span */
++    uint32_t span_len;          /* its length; 0: none */
++    uint8_t *span_host;
++    bool once;                  /* false: every access resolved, as before */
++} VpFetch;
++
++static void vp_fetch_init(VpFetch *f, hwaddr sge_base)
++{
++    f->sge_base = sge_base;
++    f->sge_page = ~0u;
++    f->sge_prd = 0;
++    f->span_lo = 0;
++    f->span_len = 0;
++    f->span_host = NULL;
++    f->once = s_resolve_once != 0;
++}
++
++static inline uint8_t *vp_fetch_host(VpFetch *f, hwaddr addr)
++{
++    if (!f->once)
++        return mcpx_apu_phys(addr);
++    hwaddr off = addr - f->span_lo;
++    if (off < f->span_len)
++        return f->span_host + off;
++    f->span_host = mcpx_apu_phys_span(addr, &f->span_len);
++    f->span_lo = addr;
++    return f->span_host;
++}
++
++/* get_data_ptr(f->sge_base, 0xFFFFFFFF, addr), same arithmetic. */
++static inline hwaddr vp_fetch_data_addr(VpFetch *f, uint32_t addr)
++{
++    unsigned int entry = addr / TARGET_PAGE_SIZE;
++    if (entry != f->sge_page || !f->once) {
++        f->sge_prd = ldl_le_phys(address_space_memory,
++                                 f->sge_base + entry * 4 * 2);
++        f->sge_page = entry;
++    }
++    return f->sge_prd + addr % TARGET_PAGE_SIZE;
++}
++
+ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                        int num_samples_requested)
+ {
+@@ -1193,6 +1349,21 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+     }
+     block_size *= samples_per_block;
+ 
++    /* The decoded block kept across calls (see MCPXAPUVoiceFilter) serves
++     * only blocks whose decode writes every entry read below: frames 0-63 of
++     * each channel. adpcm_decode_block writes 1 + 8 * chunks frames, chunks
++     * being (block_size - 4 * channels) / (4 * channels), so that takes
++     * samples_per_block >= channels; and the kept copy holds two 36-byte
++     * blocks. Anything else decodes into the local buffers as before, where
++     * entries the decode leaves alone hold whatever they held. */
++    MCPXAPUVoiceFilter *vf = &d->vp.filters[v];
++    bool adpcm_keep = s_resolve_once && adpcm && samples_per_block >= channels &&
++                      block_size <= sizeof(vf->adpcm_raw);
++    int16_t *decoded = adpcm_keep ? vf->adpcm_decoded : adpcm_decoded;
++
++    VpFetch fetch;
++    vp_fetch_init(&fetch, d->regs[NV_PAPU_VPSGEADDR]);
++
+     int sample_count = 0;
+     hwaddr stat_addr = 0;
+     for (; (sample_count < num_samples_requested) && (cbo <= ebo);
+@@ -1217,23 +1388,34 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                     linear_addr += ba;
+                     for (unsigned int word_index = 0;
+                          word_index < (9 * samples_per_block); word_index++) {
+-                        hwaddr addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR],
+-                                                   0xFFFFFFFF, linear_addr);
++                        hwaddr addr = vp_fetch_data_addr(&fetch, linear_addr);
+                         adpcm_block[word_index] =
+-                            ldl_le_phys(address_space_memory, addr);
++                            *(const uint32_t *)vp_fetch_host(&fetch, addr);
+                         linear_addr += 4;
+                     }
+                 }
+-                adpcm_decode_block(adpcm_decoded, (uint8_t *)adpcm_block,
+-                                   block_size, channels);
++                if (!adpcm_keep) {
++                    adpcm_decode_block(adpcm_decoded, (uint8_t *)adpcm_block,
++                                       block_size, channels);
++                } else if (vf->adpcm_raw_size != block_size ||
++                           vf->adpcm_channels != (int)channels ||
++                           memcmp(vf->adpcm_raw, adpcm_block, block_size)) {
++                    vf->adpcm_raw_size = 0;
++                    memcpy(vf->adpcm_raw, adpcm_block, block_size);
++                    adpcm_decode_block(vf->adpcm_decoded,
++                                       (uint8_t *)vf->adpcm_raw,
++                                       block_size, channels);
++                    vf->adpcm_channels = (int)channels;
++                    vf->adpcm_raw_size = (uint32_t)block_size;
++                }
+                 adpcm_block_index = block_index;
+             }
+ 
+             samples[sample_count][0] =
+-                int16_to_float(adpcm_decoded[block_position * channels]);
++                int16_to_float(decoded[block_position * channels]);
+             if (stereo) {
+                 samples[sample_count][1] = int16_to_float(
+-                    adpcm_decoded[block_position * channels + 1]);
++                    decoded[block_position * channels + 1]);
+             }
+         } else {
+             hwaddr addr;
+@@ -1241,28 +1423,28 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
+                 addr = segment_offset + cbo * block_size;
+             } else {
+                 uint32_t linear_addr = ba + cbo * (uint32_t)block_size;
+-                addr = get_data_ptr(d->regs[NV_PAPU_VPSGEADDR], 0xFFFFFFFF,
+-                                    linear_addr);
++                addr = vp_fetch_data_addr(&fetch, linear_addr);
+             }
+ 
+             for (unsigned int channel = 0; channel < channels; channel++) {
+                 uint32_t ival;
+                 float fval;
++                const uint8_t *host = vp_fetch_host(&fetch, addr);
+                 switch (sample_size) {
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_U8:
+-                    ival = ldub_phys(address_space_memory, addr);
++                    ival = *(const uint8_t *)host;
+                     fval = uint8_to_float((uint8_t)(ival & 0xff));
+                     break;
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S16:
+-                    ival = lduw_le_phys(address_space_memory, addr);
++                    ival = *(const uint16_t *)host;
+                     fval = int16_to_float((int16_t)(ival & 0xffff));
+                     break;
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S24:
+-                    ival = ldl_le_phys(address_space_memory, addr);
++                    ival = *(const uint32_t *)host;
+                     fval = int24_to_float(ival);
+                     break;
+                 case NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S32:
+-                    ival = ldl_le_phys(address_space_memory, addr);
++                    ival = *(const uint32_t *)host;
+                     fval = int32_to_float(ival);
+                     break;
+                 default:
+@@ -1592,7 +1774,12 @@ static void voice_process(MCPXAPUState *d,
+         }
+     }
+ 
+-    /* Mix into bins */
++    /* Mix into bins. A bin whose ramp starts and ends at zero adds a zero to
++     * every sample, which leaves the bin as it was, so it is skipped -- when
++     * that is exact (see vp_mix_skip_exact). */
++    if (s_mix_skip_ok && !vp_fpenv_plain())
++        s_mix_skip_ok = false;
++    int finite = -1;          /* samples all finite: unknown yet */
+     for (int b = 0; b < 8; b++) {
+         float g = ea_value;
+         float hr;
+@@ -1611,6 +1798,12 @@ static void voice_process(MCPXAPUState *d,
+         float g0 = f->gain_valid ? f->gain_prev[b] : g;
+         float step = (g - g0) / NUM_SAMPLES_PER_FRAME;
+         f->gain_prev[b] = g;
++        if (g0 == 0.0f && g == 0.0f && s_mix_skip_ok) {
++            if (finite < 0)
++                finite = vp_samples_finite(samples, channels);
++            if (finite)
++                continue;
++        }
+         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
+             mixbins[bin[b]][i] += (g0 + step * (i + 1)) * samples[i][b % channels];
+         }
+@@ -1676,6 +1869,14 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+                         float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
+ {
+     memset(d->vp.sample_buf, 0, sizeof(d->vp.sample_buf));
++    if (s_resolve_once < 0) {
++        const char *e = getenv("MANHUNT_APU_RESOLVE_ONCE");
++        s_resolve_once = !(e && e[0] == '0');
++        fprintf(stderr, "[APU] voice registers and sample data resolved once, "
++                "ADPCM block kept, silent bins skipped: %s "
++                "(MANHUNT_APU_RESOLVE_ONCE)\n", s_resolve_once ? "on" : "off");
++    }
++    s_mix_skip_ok = s_resolve_once && vp_fpenv_plain();
+ 
+     for (int list = 0; list < 3; list++) {
+         hwaddr top, current, next;
+@@ -1692,11 +1893,16 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+             }
+ 
+             uint16_t v = (uint16_t)d->regs[current];
++            if (s_resolve_once)
++                vp_voice_block_begin(d, v);
+             d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
+                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
+ 
+             if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
+                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
++                /* The front end may run the title's ISR, which may move the
++                 * voice array: resolve from scratch from here on. */
++                vp_voice_block_end();
+                 /* One trap at a time: once the front end is trapped, a second
+                  * idle voice in the same frame would overwrite FEDECPARAM
+                  * before the ISR has read the first. The rest trap on later
+@@ -1709,6 +1915,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
+                 voice_spin_lock(d, v);
+                 voice_process(d, mixbins, d->vp.sample_buf, v, list);
+                 voice_spin_unlock(d, v);
++                vp_voice_block_end();
+             }
+             d->regs[current] = d->regs[next];
+         }
+diff --git a/tests/apu_phys/test_main.c b/tests/apu_phys/test_main.c
+old mode 100644
+new mode 100755
+index a5a148f..367a419
+--- a/tests/apu_phys/test_main.c
++++ b/tests/apu_phys/test_main.c
+@@ -68,6 +68,41 @@ static int side(uint32_t phys)
+     return -1;
+ }
+ 
++/* mcpx_apu_phys_span(a) vouches for n bytes: each must resolve as
++ * mcpx_apu_phys does, within a's page. Checked from every step-th address
++ * in [lo, hi). */
++static int spans_ok(uint32_t lo, uint32_t hi, uint32_t step)
++{
++    for (uint32_t a = lo; a < hi; a += step) {
++        uint32_t n = 0;
++        uint8_t *p = mcpx_apu_phys_span(a, &n);
++        if (p != mcpx_apu_phys(a) || n == 0 || (a & 0xFFFu) + n > 0x1000u) {
++            printf("  span at 0x%08X: %u bytes\n", a, n);
++            return 0;
++        }
++        for (uint32_t i = 0; i < n; i++)
++            if (mcpx_apu_phys(a + i) != p + i) {
++                printf("  span at 0x%08X: byte %u of %u resolves elsewhere\n", a, i, n);
++                return 0;
++            }
++    }
++    return 1;
++}
++
++static void check_spans(const char *what, uint32_t a, uint32_t c)
++{
++    extern uint32_t xbox_ContiguousAllocatedBytes(void);
++    uint32_t top = xbox_ContiguousAllocatedBytes();
++    char line[96];
++    int ok = spans_ok(a - 0x2000u, c + 0x3000u, 0x35u) &&
++             spans_ok(g_xbox_image_lo - 0x1000u, g_xbox_image_lo + 0x1000u, 0x11u) &&
++             spans_ok(g_xbox_image_hi - 0x1000u, g_xbox_image_hi + 0x1000u, 0x11u) &&
++             spans_ok(top - 0x1000u, top + 0x1000u, 0x11u) &&
++             spans_ok((64u << 20) - 0x2000u, (64u << 20) + 0x2000u, 0x101u);
++    snprintf(line, sizeof line, "spans resolve as single addresses (%s)", what);
++    check(ok, line);
++}
++
+ int main(int argc, char **argv)
+ {
+     const char *path = argc > 1 ? argv[1] : "tools/conformance/test.xbe";
+@@ -113,6 +148,17 @@ int main(int argc, char **argv)
+ 
+     xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)(XBOX_CONTIG_BASE + a));
+     check(side(a + 0x10) == 0, "a window name of the same number keeps RAM");
++    check_spans("RAM and window pages mixed", a, c);
++    {
++        /* The image bounds come from section sizes: a span must stop at one
++         * that falls inside a page. */
++        uint32_t n = 0;
++        mcpx_apu_phys_span(g_xbox_image_hi - 1u, &n);
++        check(n == 1u, "a span stops at the image's end");
++        mcpx_apu_phys_span((g_xbox_image_hi & ~0xFFFu), &n);
++        check((g_xbox_image_hi & 0xFFFu) == 0 || n == (g_xbox_image_hi & 0xFFFu),
++              "a span from the page start stops at the image's end");
++    }
+ 
+     /* Not heap: the image and the main stack are never recorded. */
+     xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)g_xbox_image_lo);
+@@ -140,6 +186,7 @@ int main(int argc, char **argv)
+     /* b merges with free a and c; the page b shared with c is free now. */
+     xbox_HeapFree(b);
+     check(side(b) == 1, "a page shared by two blocks both now free goes back");
++    check_spans("after the frees", a, c);
+ 
+     printf("apu_phys: %s\n", failures ? "FAILED" : "all passed");
+     return failures ? 1 : 0;
+diff --git a/tests/apu_vp/test_main.c b/tests/apu_vp/test_main.c
+old mode 100644
+new mode 100755
+index 0b8e0b4..c17ead4
+--- a/tests/apu_vp/test_main.c
++++ b/tests/apu_vp/test_main.c
+@@ -42,6 +42,13 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
+     return s_ram + addr;
+ }
+ 
++/* The fake RAM is linear: a span runs to the end of the page. */
++uint8_t *mcpx_apu_phys_span(uint64_t addr, uint32_t *avail)
++{
++    *avail = 0x1000u - (uint32_t)(addr & 0xFFFu);
++    return mcpx_apu_phys(addr);
++}
++
+ const char *mcpx_apu_phys_class(uint64_t addr) { (void)addr; return "fake"; }
+ int apu_env_on(const char *name) { (void)name; return 0; }
+ ApuIrqStats apu_irq_stats;

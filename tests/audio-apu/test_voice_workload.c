@@ -18,6 +18,9 @@ static uint64_t resolutions;
 uint8_t *mcpx_apu_phys(uint64_t at) {
     assert(at < sizeof ram); resolutions++; return ram + at;
 }
+uint8_t *mcpx_apu_phys_span(uint64_t at, uint32_t *avail) {
+    *avail = 0x1000u - (uint32_t)(at & 0xFFFu); return mcpx_apu_phys(at);
+}
 const char *mcpx_apu_phys_class(uint64_t at) { (void)at; return "fixture"; }
 int apu_env_on(const char *name) { const char *e = getenv(name); return e && *e && *e != '0'; }
 #define VOICE_BASE 0x10000
