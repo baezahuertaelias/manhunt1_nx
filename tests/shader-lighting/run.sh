@@ -23,3 +23,12 @@ cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -ffp-contract=off -ffunction-sections 
 EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 "$out/test-fog-clip"
 MANHUNT_GL_FF_FOG=0 MANHUNT_GL_CLIP_CLAMP=1 MANHUNT_GL_SHADER_MINOR=0 \
   EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 "$out/test-fog-clip"
+
+# Fixed-function spot cones and texgen/texture matrices: defaults, then the
+# rollback switches.
+cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -ffp-contract=off -ffunction-sections -fdata-sections \
+  "$root/tests/shader-lighting/test_spot_texgen.c" "$root/game/src/nv2a_gl/gl_vsh.c" \
+  -Wl,--gc-sections -lEGL -lGL -lm -pthread -o "$out/test-spot-texgen"
+EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 "$out/test-spot-texgen"
+MANHUNT_GL_FF_SPOT=0 MANHUNT_GL_FF_TEXGEN=0 \
+  EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 "$out/test-spot-texgen"

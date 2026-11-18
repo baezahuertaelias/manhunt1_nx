@@ -1718,6 +1718,9 @@ typedef struct {
     GLint      u_fogm;          /* fixed-function fog generation (gl_vsh.c) */
     int        fogm_valid;
     float      fogm[5][4];
+    GLint      u_ffx;           /* fixed-function spot + texgen (gl_vsh.c) */
+    int        ffx_valid;
+    float      ffx[NV2A_FFX_ROWS][4];
     struct GlUni {
         float surf[4], aa[2], m[16], vpoff[4], tscale[4][2];
         float c0[8][4], c1[8][4], fog[4], fc[2][4], aref, fogp[4], wide[2];
@@ -2110,6 +2113,7 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->u_wide = glGetUniformLocation(p->prog, "u_wide");
     p->u_light = glGetUniformLocation(p->prog, "u_light");
     p->u_fogm = glGetUniformLocation(p->prog, "u_fogm");
+    p->u_ffx = glGetUniformLocation(p->prog, "u_ffx");
     p->u_tscale = glGetUniformLocation(p->prog, "u_tscale");
     p->u_c0 = glGetUniformLocation(p->prog, "u_c0");
     p->u_c1 = glGetUniformLocation(p->prog, "u_c1");
@@ -3470,6 +3474,15 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
             glUniform4fv(p->u_fogm, 5, &fogm[0][0]);
             memcpy(p->fogm, fogm, sizeof fogm);
             p->fogm_valid = 1;
+        }
+    }
+    if (p->u_ffx >= 0) {
+        float ffx[NV2A_FFX_ROWS][4];
+        nv2a_gl_vsh_ffx_uniforms(r, b->lighting, ffx);
+        if (!p->ffx_valid || memcmp(ffx, p->ffx, sizeof ffx)) {
+            glUniform4fv(p->u_ffx, NV2A_FFX_ROWS, &ffx[0][0]);
+            memcpy(p->ffx, ffx, sizeof ffx);
+            p->ffx_valid = 1;
         }
     }
     {

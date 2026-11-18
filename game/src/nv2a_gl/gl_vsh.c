@@ -525,66 +525,111 @@ const char *nv2a_gl_vsh_main_program(void)
     return NV2A_VSH_MAIN("", "uniform vec2 u_wide;      /* widescreen 2D: x scale (<0: y scale -x), centre (0: off) */\n");
 }
 
-/* Mirrors the runtime's lit_color, including its current local/spot model.
- * This moves the existing calculation; it adds no new lighting effects. */
+/* Mirrors the runtime's lit_color for infinite and local lights. Spot
+ * lights (kind 3) add xemu's cone (vsh-ff.c, LIGHT_SPOT) on GL: u_ffx[2 + i]
+ * is SET_LIGHT_SPOT_DIRECTION, which Xbox D3D writes as -dir * s with
+ * w = -s * cos(phi/2), s = 1 / (cos(theta/2) - cos(phi/2)). Inside the inner
+ * cone the light is unchanged, outside the outer cone it is 0, and between
+ * the attenuation is scaled by the linear ramp dot(spot, L) + w.
+ * SET_LIGHT_SPOT_FALLOFF is not used, as in xemu (its FIXME): falloff 1.
+ * u_ffx[0].x is 0 with MANHUNT_GL_FF_SPOT=0: spots lit as point lights, the
+ * old form, which the runtime's lit_color still uses. A zero direction also
+ * keeps the point-light form. */
+#define NV2A_LIGHT_GLSL(decl, spot) \
+    "#ifdef NV2A_GL_UBO\n" \
+    "layout(std140) uniform Nv2aLighting { vec4 u_light[46]; };\n" \
+    "#else\n" \
+    "uniform vec4 u_light[46];\n" \
+    "#endif\n" \
+    decl \
+    "vec4 nv2a_ffp_diffuse(vec4 pos, vec4 normal, vec4 vc) {\n" \
+    "    if (u_light[0].x == 0.0) return vc;\n" \
+    "    vec3 e, n;\n" \
+    "    for (int k = 0; k < 3; ++k) {\n" \
+    "        e[k] = dot(u_light[2+k].xyz, pos.xyz) + u_light[2+k].w;\n" \
+    "        n[k] = dot(u_light[2+k].xyz, normal.xyz);\n" \
+    "    }\n" \
+    "    float len = length(n);\n" \
+    "    if (len > 1e-8) n /= len;\n" \
+    "    if (u_light[0].w != 0.0 && dot(n,e) > 0.0) n = -n;\n" \
+    "    vec3 color = u_light[1].rgb;\n" \
+    "    for (int i = 0; i < 8; ++i) {\n" \
+    "        int b = 6 + i * 5;\n" \
+    "        int kind = int(u_light[b].w);\n" \
+    "        if (kind == 0) continue;\n" \
+    "        vec3 l; float att = 1.0;\n" \
+    "        if (kind == 1) l = u_light[b+2].xyz;\n" \
+    "        else {\n" \
+    "            l = u_light[b+3].xyz - e;\n" \
+    "            float d = length(l);\n" \
+    "            float range = u_light[b+1].w;\n" \
+    "            if (d > range && range > 0.0) continue;\n" \
+    "            if (d > 1e-8) l /= d;\n" \
+    "            vec3 a = u_light[b+4].xyz;\n" \
+    "            att = a.x + a.y*d + a.z*d*d;\n" \
+    "            att = att > 1e-8 ? 1.0 / att : 1.0;\n" \
+    spot \
+    "        }\n" \
+    "        float ndl = max(dot(n,l), 0.0);\n" \
+    "        vec3 amb = u_light[b].rgb, dif = u_light[b+1].rgb;\n" \
+    "        if (u_light[0].y != 0.0) amb *= vc.rgb;\n" \
+    "        if (u_light[0].z != 0.0) dif *= vc.rgb;\n" \
+    "        color += att * (amb + dif * ndl);\n" \
+    "    }\n" \
+    "    return clamp(vec4(color, u_light[0].z != 0.0 ? vc.a : u_light[1].a), 0.0, 1.0);\n" \
+    "}\n" \
+    "#define NV2A_DIFFUSE nv2a_ffp_diffuse(v0, v2, v3)\n"
+
+#define NV2A_STR2(x) #x
+#define NV2A_STR(x) NV2A_STR2(x)
+/* GL: u_ffx is declared with the lighting, which nv2a_gl.c puts before the
+ * fixed-function main that reads it as well. */
+#define NV2A_FFX_DECL_GLSL \
+    "#ifndef NV2A_FFX\n" \
+    "#define NV2A_FFX 1\n" \
+    "uniform vec4 u_ffx[" NV2A_STR(NV2A_FFX_ROWS) "]; /* spot + texgen, see nv2a_gl_vsh_ffx_uniforms */\n" \
+    "#endif\n"
+/* xemu's LIGHT_SPOT, with l the normalised vertex-to-light vector (VP). */
+#define NV2A_SPOT_GLSL \
+    "            if (kind == 3 && u_ffx[0].x != 0.0) {\n" \
+    "                vec4 sd = u_ffx[2 + i];\n" \
+    "                float sl = length(sd.xyz);\n" \
+    "                if (sl > 0.0) {\n" \
+    "                    float inv = 1.0 / sl;\n" \
+    "                    float cphi = -inv * sd.w;\n" \
+    "                    float ctheta = inv + cphi;\n" \
+    "                    float sdvp = dot(sd.xyz, l);\n" \
+    "                    float rho = inv * sdvp;\n" \
+    "                    if (!(rho > ctheta)) {\n" \
+    "                        if (rho <= cphi) att = 0.0;\n" \
+    "                        else att *= sdvp + sd.w;\n" \
+    "                    }\n" \
+    "                }\n" \
+    "            }\n"
+
 const char *nv2a_gl_vsh_lighting(void)
 {
-    return
-        "#ifdef NV2A_GL_UBO\n"
-        "layout(std140) uniform Nv2aLighting { vec4 u_light[46]; };\n"
-        "#else\n"
-        "uniform vec4 u_light[46];\n"
-        "#endif\n"
-        "vec4 nv2a_ffp_diffuse(vec4 pos, vec4 normal, vec4 vc) {\n"
-        "    if (u_light[0].x == 0.0) return vc;\n"
-        "    vec3 e, n;\n"
-        "    for (int k = 0; k < 3; ++k) {\n"
-        "        e[k] = dot(u_light[2+k].xyz, pos.xyz) + u_light[2+k].w;\n"
-        "        n[k] = dot(u_light[2+k].xyz, normal.xyz);\n"
-        "    }\n"
-        "    float len = length(n);\n"
-        "    if (len > 1e-8) n /= len;\n"
-        "    if (u_light[0].w != 0.0 && dot(n,e) > 0.0) n = -n;\n"
-        "    vec3 color = u_light[1].rgb;\n"
-        "    for (int i = 0; i < 8; ++i) {\n"
-        "        int b = 6 + i * 5;\n"
-        "        int kind = int(u_light[b].w);\n"
-        "        if (kind == 0) continue;\n"
-        "        vec3 l; float att = 1.0;\n"
-        "        if (kind == 1) l = u_light[b+2].xyz;\n"
-        "        else {\n"
-        "            l = u_light[b+3].xyz - e;\n"
-        "            float d = length(l);\n"
-        "            float range = u_light[b+1].w;\n"
-        "            if (d > range && range > 0.0) continue;\n"
-        "            if (d > 1e-8) l /= d;\n"
-        "            vec3 a = u_light[b+4].xyz;\n"
-        "            att = a.x + a.y*d + a.z*d*d;\n"
-        "            att = att > 1e-8 ? 1.0 / att : 1.0;\n"
-        "        }\n"
-        "        float ndl = max(dot(n,l), 0.0);\n"
-        "        vec3 amb = u_light[b].rgb, dif = u_light[b+1].rgb;\n"
-        "        if (u_light[0].y != 0.0) amb *= vc.rgb;\n"
-        "        if (u_light[0].z != 0.0) dif *= vc.rgb;\n"
-        "        color += att * (amb + dif * ndl);\n"
-        "    }\n"
-        "    return clamp(vec4(color, u_light[0].z != 0.0 ? vc.a : u_light[1].a), 0.0, 1.0);\n"
-        "}\n"
-        "#define NV2A_DIFFUSE nv2a_ffp_diffuse(v0, v2, v3)\n";
+    /* Vulkan (nv2a_vk) takes no plain uniforms: the old local-light form. */
+    if (nv2a_shader_vk)
+        return NV2A_LIGHT_GLSL("", "");
+    return NV2A_LIGHT_GLSL(NV2A_FFX_DECL_GLSL, NV2A_SPOT_GLSL);
 }
 
 const char *nv2a_gl_vsh_fixed(void)
 {
     /* Vulkan: u_xform is a member of the prelude's uniform block. */
-    static const char decl[] = "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
-                               "uniform vec2 u_wide;      /* widescreen 2D: x scale (<0: y scale -x), centre (0: off) */\n"
-                               "uniform vec4 u_fogm[5];   /* fog generation, see nv2a_gl_vsh_fog_uniforms */\n"
-                               "#define NV2A_FF_FOG 1\n";
+    /* GL only (skipped under Vulkan): these uniforms and the generated fog
+     * coordinate and texture coordinates. */
+#define NV2A_FIXED_DECL \
+        "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n" \
+        "uniform vec2 u_wide;      /* widescreen 2D: x scale (<0: y scale -x), centre (0: off) */\n" \
+        "uniform vec4 u_fogm[5];   /* fog generation, see nv2a_gl_vsh_fog_uniforms */\n" \
+        "#define NV2A_FF_FOG 1\n" \
+        NV2A_FFX_DECL_GLSL \
+        "#define NV2A_FF_TEX 1\n"
+    static const char decl[] = NV2A_FIXED_DECL;
     static const char body[] =
-        "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
-        "uniform vec2 u_wide;      /* widescreen 2D: x scale (<0: y scale -x), centre (0: off) */\n"
-        "uniform vec4 u_fogm[5];   /* fog generation, see nv2a_gl_vsh_fog_uniforms */\n"
-        "#define NV2A_FF_FOG 1\n"
+        NV2A_FIXED_DECL
         "#ifndef NV2A_DIFFUSE\n#define NV2A_DIFFUSE v3\n#endif\n"
         /* The fog coordinate the fixed-function transform generates
          * (SET_FOG_GEN_MODE, as xemu's vsh-ff.c): from the eye-space
@@ -605,8 +650,53 @@ const char *nv2a_gl_vsh_fixed(void)
         "#else\n"
         "float nv2a_ff_fog() { return 0.0; }\n"
         "#endif\n"
+        /* Texture-coordinate generation and the texture matrix per stage
+         * (SET_TEXGEN_S/T/R/Q, SET_TEXTURE_MATRIX_ENABLE, as xemu's
+         * vsh-ff.c), from the eye-space position ep and normal en. Mode
+         * codes from nv2a_gl_vsh_ffx_uniforms: 0 the attribute, 1 eye
+         * linear, 2 object linear, 3 sphere map, 4 normal map, 5 reflection
+         * map. */
+        "#ifdef NV2A_FF_TEX\n"
+        "vec4 nv2a_ff_tex(int s, vec4 t, vec4 ep, vec3 en) {\n"
+        "    int b = 14 + s * 9;\n"
+        "    vec4 mode = u_ffx[b];\n"
+        "    vec4 o = t;\n"
+        "    if (mode != vec4(0.0)) {\n"
+        "        vec3 u = dot(ep.xyz, ep.xyz) > 0.0 ? normalize(ep.xyz) : vec3(0.0, 0.0, -1.0);\n"
+        "        vec3 rf = reflect(u, en);\n"
+        "        float rm = length(rf + vec3(0.0, 0.0, 1.0));\n"
+        "        float im = rm > 0.0 ? 1.0 / (2.0 * rm) : 0.0;\n"
+        "        for (int j = 0; j < 4; ++j) {\n"
+        "            int m = int(mode[j] + 0.5);\n"
+        "            if (m == 1) o[j] = dot(u_ffx[b + 1 + j], ep);\n"
+        "            else if (m == 2) o[j] = dot(u_ffx[b + 1 + j], v0);\n"
+        "            else if (m == 3) o[j] = rf[j] * im + 0.5;\n"
+        "            else if (m == 4) o[j] = en[j];\n"
+        "            else if (m == 5) o[j] = rf[j];\n"
+        "        }\n"
+        "    }\n"
+        "    if (u_ffx[1][s] != 0.0)\n"
+        "        o = vec4(dot(u_ffx[b + 5], o), dot(u_ffx[b + 6], o),\n"
+        "                 dot(u_ffx[b + 7], o), dot(u_ffx[b + 8], o));\n"
+        "    return o;\n"
+        "}\n"
+        "void nv2a_ff_texgen(inout vec4 t0, inout vec4 t1, inout vec4 t2, inout vec4 t3) {\n"
+        "    if (u_ffx[0].y == 0.0) return;\n"
+        "    vec4 ep = vec4(dot(u_ffx[10], v0), dot(u_ffx[11], v0),\n"
+        "                   dot(u_ffx[12], v0), dot(u_ffx[13], v0));\n"
+        "    vec3 en = vec3(dot(u_ffx[10].xyz, v2.xyz), dot(u_ffx[11].xyz, v2.xyz),\n"
+        "                   dot(u_ffx[12].xyz, v2.xyz));\n"
+        "    float nl = length(en);\n"
+        "    if (nl > 1e-8) en /= nl;\n"
+        "    t0 = nv2a_ff_tex(0, t0, ep, en); t1 = nv2a_ff_tex(1, t1, ep, en);\n"
+        "    t2 = nv2a_ff_tex(2, t2, ep, en); t3 = nv2a_ff_tex(3, t3, ep, en);\n"
+        "}\n"
+        "#else\n"
+        "void nv2a_ff_texgen(inout vec4 t0, inout vec4 t1, inout vec4 t2, inout vec4 t3) { }\n"
+        "#endif\n"
         "void main() {\n"
         "    float fog = 0.0;\n"
+        "    vec4 t0 = v9, t1 = v10, t2 = v11, t3 = v12;\n"
         "    if (u_xform == 1) {\n"
         "        vec4 clip = vec4(dot(u_m[0], v0), dot(u_m[1], v0),\n"
         "                         dot(u_m[2], v0), dot(u_m[3], v0));\n"
@@ -617,6 +707,7 @@ const char *nv2a_gl_vsh_fixed(void)
         "        else if (u_wide.x < 0.0) sw.y = u_wide.y * w + (sw.y - u_wide.y * w) * -u_wide.x;\n"
         "        gl_Position = nv2a_clip(sw, w);\n"
         "        fog = nv2a_ff_fog();\n"
+        "        nv2a_ff_texgen(t0, t1, t2, t3);\n"
         "    } else {\n"
         "        float w = (v0.w > 0.0) ? 1.0 / v0.w : 1.0;\n"
         "        vec3 p = v0.xyz;\n"
@@ -625,7 +716,7 @@ const char *nv2a_gl_vsh_fixed(void)
         "        gl_Position = nv2a_clip(p * w, w);\n"
         "    }\n"
         "    vD0 = clamp(NV2A_DIFFUSE, 0.0, 1.0); vD1 = clamp(v4, 0.0, 1.0);\n"
-        "    vT0 = v9; vT1 = v10; vT2 = v11; vT3 = v12; vFog = fog;\n"
+        "    vT0 = t0; vT1 = t1; vT2 = t2; vT3 = t3; vFog = fog;\n"
         "}\n";
     return nv2a_shader_vk ? body + sizeof decl - 1 : body;
 }
@@ -701,5 +792,87 @@ void nv2a_gl_vsh_fog_uniforms(const uint32_t *r, float out[5][4])
         out[3][2] = 1.0f;
         out[4][0] = 3.0f;
         break;
+    }
+}
+
+/* NV097_SET_TEXGEN_S/T/R/Q value to nv2a_ff_tex's mode code, for component
+ * c (0 S .. 3 Q). The values are GL's enums. Sphere map takes S and T only,
+ * normal and reflection map S, T and R (xemu asserts the same); anything
+ * else -- emboss (0x855F), which xemu does not generate either, or a mode on
+ * a component it cannot feed -- passes the attribute through. */
+static float texgen_code(uint32_t v, int c)
+{
+    switch (v) {
+    case 0x2400: return 1.0f;                       /* EYE_LINEAR */
+    case 0x2401: return 2.0f;                       /* OBJECT_LINEAR */
+    case 0x2402: return c < 2 ? 3.0f : 0.0f;        /* SPHERE_MAP */
+    case 0x8511: return c < 3 ? 4.0f : 0.0f;        /* NORMAL_MAP */
+    case 0x8512: return c < 3 ? 5.0f : 0.0f;        /* REFLECTION_MAP */
+    default:     return 0.0f;                       /* DISABLE, EMBOSS */
+    }
+}
+
+/* u_ffx for a fixed-function batch:
+ *   row 0      x spot cones on, y texgen/texture matrix used by any stage
+ *   row 1      SET_TEXTURE_MATRIX_ENABLE per stage (x..w = stage 0..3)
+ *   rows 2-9   SET_LIGHT_SPOT_DIRECTION of light 0-7, spot lights only
+ *   rows 10-13 SET_MODEL_VIEW_MATRIX0, rows as lit_color reads them
+ *   rows 14 + 9s .. 22 + 9s, stage s:
+ *              mode codes S, T, R, Q (texgen_code)
+ *              SET_TEXGEN_PLANE_S, _T, _R, _Q
+ *              SET_TEXTURE_MATRIX rows 0-3 (out_j = dot(row j, t), the way
+ *              the model-view rows are applied; xemu's oT * texMat)
+ * Rows a draw does not use stay zero, so most draws upload nothing new.
+ * Method offsets (NV097, xemu nv2a_regs.h): SET_TEXGEN_S 0x03C0 (T +4, R +8,
+ * Q +0xC, stage stride 0x10), SET_TEXTURE_MATRIX_ENABLE 0x0420 (stride 4),
+ * SET_TEXTURE_MATRIX 0x06C0 (stride 0x40), SET_TEXGEN_PLANE_S 0x0840 (T, R, Q
+ * at +0x10 each, stage stride 0x40), SET_LIGHT_SPOT_DIRECTION light base
+ * 0x1000 + 0x80 i, +0x4C (4 floats). */
+void nv2a_gl_vsh_ffx_uniforms(const uint32_t *r, uint32_t lighting,
+                              float out[NV2A_FFX_ROWS][4])
+{
+    static int spot_on = -1, tex_on = -1;
+    int s, c, i, any = 0;
+
+    memset(out, 0, NV2A_FFX_ROWS * 4 * sizeof(float));
+    if (spot_on < 0) {
+        const char *e = getenv("MANHUNT_GL_FF_SPOT");
+        spot_on = !(e && *e == '0');
+        e = getenv("MANHUNT_GL_FF_TEXGEN");
+        tex_on = !(e && *e == '0');
+        fprintf(stderr, "[MH-GL] fixed-function spot lights: %s (MANHUNT_GL_FF_SPOT)\n",
+                spot_on ? "cone (SET_LIGHT_SPOT_DIRECTION)" : "lit as point lights");
+        fprintf(stderr, "[MH-GL] fixed-function texgen and texture matrices: %s (MANHUNT_GL_FF_TEXGEN)\n",
+                tex_on ? "on" : "off, coordinates passed through");
+    }
+    if (spot_on && (lighting & 1u)) {
+        const uint32_t mask = r[0x03BC / 4];        /* SET_LIGHT_ENABLE_MASK */
+        for (i = 0; i < 8; i++)
+            if (((mask >> (2 * i)) & 3u) == 3u) {   /* V_SPOT */
+                memcpy(out[2 + i], r + (0x1000 + i * 0x80 + 0x4C) / 4, 16);
+                out[0][0] = 1.0f;
+            }
+    }
+    if (!tex_on)
+        return;
+    for (s = 0; s < 4; s++) {
+        float *mode = out[14 + 9 * s];
+        int used = 0;
+        for (c = 0; c < 4; c++) {
+            mode[c] = texgen_code(r[(0x03C0 + s * 0x10 + c * 4) / 4], c);
+            used |= mode[c] != 0.0f;
+        }
+        if (used)
+            memcpy(out[15 + 9 * s], r + (0x0840 + s * 0x40) / 4, 4 * 16);
+        if (r[(0x0420 + s * 4) / 4]) {
+            out[1][s] = 1.0f;
+            memcpy(out[19 + 9 * s], r + (0x06C0 + s * 0x40) / 4, 4 * 16);
+            used = 1;
+        }
+        any |= used;
+    }
+    if (any) {
+        out[0][1] = 1.0f;
+        memcpy(out[10], r + 0x0480 / 4, 4 * 16);
     }
 }
