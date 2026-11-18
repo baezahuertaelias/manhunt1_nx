@@ -212,6 +212,54 @@ static void mip_test(void)
     assert(stage_wrap(4,1)==GL_CLAMP_TO_BORDER&&stage_wrap(4,0)==GL_CLAMP_TO_EDGE&&stage_wrap(1,0)==GL_REPEAT);
     puts("PASS mip chain levels, sizes, offsets, uploads, chain change detection, filters and border source");
 }
+/* Item 5 follow-up. Manhunt's TXDs store one level per texture (level 0 is
+ * followed by the next texture's RW chunk headers) and its FORMAT words carry
+ * MIPMAP_LEVELS 1, with MIN filter 6 (tent between LODs). Such a texture must
+ * upload exactly level 0 and filter GL_LINEAR, as with mipmaps off: the chain
+ * path is not what made the 2026-11-18 frames darker. A chain that runs past
+ * the real data (zeros after level 0) is what MANHUNT_GL_MIP_TRACE exposes:
+ * level 0 bright, the rest 0. */
+static void manhunt_mip_test(void)
+{
+    const uint32_t f2d=2u<<4;
+    const uint32_t fmt1=f2d|(0x0Cu<<8)|(1u<<16)|(7u<<20)|(7u<<24);   /* DXT1 128x128, 1 level */
+    assert(tex_mip_levels(fmt1,128,128)==1);
+    assert(min_filter(6,1)==GL_LINEAR&&min_filter(2,1)==GL_LINEAR);
+    {
+        const unsigned va=0x200000;
+        memset(guest+va,0xab,128*128/2+0x80+4096);        /* level 0, chunk headers, next texture */
+        mip_n=0;mip_base=va;p_glCompressedTexImage2D=mip_cupload;p_glTexParameteri=mip_param;mip_max_level=-1;
+        tex_get_levels(va,0x0C,128,128,0,tex_mip_levels(fmt1,128,128));
+        assert(mip_n==1&&mip_rec[0].level==0&&mip_rec[0].size==8192&&s_tex_cur->levels_gl==1);
+        assert(mip_max_level==-1);                        /* no chain: MAX_LEVEL untouched */
+    }
+    /* Luminance helpers: white and black DXT1 blocks, DXT1 transparent texels. */
+    {
+        uint8_t blk[16]={0xff,0xff,0,0,0,0,0,0};          /* c0 white > c1 black, all index 0 */
+        uint32_t px[4]={0xffffffffu,0xff000000u,0xffffffffu,0xff000000u};
+        assert(luma_dxt(blk,4,4,0x0C)==255);
+        memset(blk,0,sizeof blk);assert(luma_dxt(blk,4,4,0x0C)==0);
+        blk[0]=0xff;blk[1]=0xff;blk[2]=0xff;blk[3]=0xff;memset(blk+4,0xff,4);  /* c0==c1: index 3 transparent black */
+        assert(luma_dxt(blk,4,4,0x0C)==0);
+        assert(luma_bgra(px,4)==127);
+    }
+    /* Trace of a chain that runs past the data: DXT1 8x8, four levels asked,
+     * level 0 white, the 24 bytes after it zero. */
+    {
+        const unsigned va=0x210000;unsigned i;
+        memset(guest+va,0,64);
+        for(i=0;i<4;i++){guest[va+i*8]=0xff;guest[va+i*8+1]=0xff;}
+        s_mt_format=f2d|(0x0Cu<<8)|(4u<<16)|(3u<<20)|(3u<<24);s_mt_filter=6u<<16;s_mt_control0=0x40000000u|(0xFFFu<<6);
+        mip_n=0;mip_base=va;p_glCompressedTexImage2D=mip_cupload;
+        tex_get_levels(va,0x0C,8,8,0,4);
+        assert(mip_n==4&&s_tex_cur->levels_gl==4);
+        s_mt_format=s_mt_control0=s_mt_filter=0;
+        assert(s_mt_len==-1&&s_mt_lines>0);
+        assert(strstr(s_mt_line,"fmt 0x0C 8x8 format-levels 4 asked 4 min 6 lod-clamp 0..4095 luma 255 0 0 0 held 4\n"));
+    }
+    p_glTexParameteri=fake_glTexParameteri;p_glCompressedTexImage2D=fake_glCompressedTexImage2D;
+    puts("PASS Manhunt-like single-level textures upload level 0 only, mip trace luminance per level");
+}
 static void shader_modes_test(void)
 {
     Nv2aPshKey k={0};char buf[65536];
@@ -592,11 +640,11 @@ static void gpu_mode_test(void)
 }
 int main(int argc,char **argv)
 {
-    setenv("MANHUNT_GL_MIPMAPS","1",1);setenv("RECOMP_PROG_CACHE","0",1);
+    setenv("MANHUNT_GL_MIPMAPS","1",1);setenv("MANHUNT_GL_MIP_TRACE","1",1);setenv("RECOMP_PROG_CACHE","0",1);
     if(argc>1&&!strcmp(argv[1],"wide")){init_fake();widescreen_classification_test();widescreen_runs_test();widescreen_menu_test();return 0;}
     if(argc>1&&!strcmp(argv[1],"gpu")){setenv("MANHUNT_GL_SYNC","gpu",1);init_fake();gpu_mode_test();return 0;}
     if(argc>1){setenv("MANHUNT_GL_SYNC","fenced",1);init_fake();fenced_ownership_test();return 0;}
-    init_fake();cache_test();palette_test();mip_test();shader_modes_test();
+    init_fake();cache_test();palette_test();mip_test();manhunt_mip_test();shader_modes_test();
     widescreen_classification_test();widescreen_runs_test();widescreen_menu_test();
     surface_sync_test();clear_pitch_test();
     expect_success(queued_completion);

@@ -935,9 +935,13 @@ static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch
  * the size of the one before, down to 1 texel (a DXT level is at least one
  * 4x4 block): xemu's texture upload, and tex_face_stride in nv2a_pb_exec.c.
  * Linear images have no levels. Only level 0 used to be uploaded, so distant
- * floors and walls shimmered. Off by default: on the console (2026-11-18) the
- * levels made the scene and the player 16-24% darker than level 0 alone, which
- * the hardware does not do. MANHUNT_GL_MIPMAPS=1 turns them on. */
+ * floors and walls shimmered. Off by default: the console runs of 2026-11-18
+ * looked 16-24% darker with them, but that compared frame 3600 of runs that
+ * had drifted to different places (different framing, an alerted radar); over
+ * frames 2700-9000 the mean luminance is 7.7 on, 7.4 no-mip, 7.7 all off.
+ * Manhunt's TXDs hold one level per texture and its FORMAT words say 1, so for
+ * this game the chain path uploads level 0 alone and filters as before.
+ * MANHUNT_GL_MIPMAPS=1 turns them on; MANHUNT_GL_MIP_TRACE=1 logs the levels. */
 static int gl_mipmaps(void)
 {
     static int on = -1;
@@ -979,6 +983,110 @@ static uint32_t mip_dim(uint32_t d, uint32_t level)
 {
     d >>= level;
     return d ? d : 1;
+}
+
+/* MANHUNT_GL_MIP_TRACE=1 (default off): one line per swizzled or DXT texture
+ * upload with the stage's FORMAT level count, the levels asked for and held,
+ * the MIN filter mode, the CONTROL0 LOD clamps and the mean luminance (0-255)
+ * of every level uploaded, so a console run shows whether a level holds the
+ * texture's own image or something else. Manhunt's Xbox TXDs store one level
+ * per texture, and the console's stage-0 records (2026-11-05, [MH-DEKO-X])
+ * show MIPMAP_LEVELS 1 throughout; this confirms it for every stage. The
+ * luminance costs a pass over the level, made only while tracing. */
+static int gl_mip_trace(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_MIP_TRACE");
+        on = e && e[0] == '1' && !e[1];
+        if (on)
+            fprintf(stderr, "  [GL] mip trace: on (MANHUNT_GL_MIP_TRACE)\n");
+    }
+    return on;
+}
+
+/* The stage bind_stage is binding: FORMAT, CONTROL0, FILTER. 0 elsewhere. */
+static uint32_t s_mt_format, s_mt_control0, s_mt_filter;
+static char s_mt_line[400];
+static int s_mt_len = -1;
+static uint32_t s_mt_lines;
+
+/* Mean luminance, 0-255, of n A8R8G8B8 texels (alpha ignored). */
+static uint32_t luma_bgra(const uint32_t *p, size_t n)
+{
+    uint64_t s = 0;
+    size_t i;
+    for (i = 0; i < n; i++)
+        s += 299u * ((p[i] >> 16) & 0xFF) + 587u * ((p[i] >> 8) & 0xFF) + 114u * (p[i] & 0xFF);
+    return n ? (uint32_t)(s / ((uint64_t)n * 1000u)) : 0;
+}
+
+static uint32_t luma_565(uint32_t c)
+{
+    uint32_t r = ((c >> 11) & 31) * 255 / 31, g = ((c >> 5) & 63) * 255 / 63, b = (c & 31) * 255 / 31;
+    return 299u * r + 587u * g + 114u * b;          /* x1000 */
+}
+
+/* Mean luminance of a DXT level: each block's four colours (DXT1 with
+ * c0 <= c1: the third halfway, the fourth transparent black), weighted by
+ * the texels that pick them. Whole blocks, so a 2x2 level counts 16. */
+static uint32_t luma_dxt(const uint8_t *src, uint32_t w, uint32_t h, uint32_t color)
+{
+    uint32_t bb = dxt_block_bytes(color), nb = ((w + 3) / 4) * ((h + 3) / 4), i, k;
+    uint64_t s = 0;
+    if (!bb || !nb)
+        return 0;
+    for (i = 0; i < nb; i++) {
+        const uint8_t *b = src + (size_t)i * bb + (bb == 16 ? 8 : 0);
+        uint32_t c0 = b[0] | (uint32_t)b[1] << 8, c1 = b[2] | (uint32_t)b[3] << 8;
+        uint32_t bits = b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+        uint32_t l[4];
+        l[0] = luma_565(c0);
+        l[1] = luma_565(c1);
+        if (bb == 16 || c0 > c1) {
+            l[2] = (2 * l[0] + l[1]) / 3;
+            l[3] = (l[0] + 2 * l[1]) / 3;
+        } else {
+            l[2] = (l[0] + l[1]) / 2;
+            l[3] = 0;
+        }
+        for (k = 0; k < 16; k++)
+            s += l[(bits >> (2 * k)) & 3];
+    }
+    return (uint32_t)(s / ((uint64_t)nb * 16u * 1000u));
+}
+
+static void mt_begin(uint32_t va, uint32_t color, uint32_t w, uint32_t h, uint32_t levels)
+{
+    s_mt_len = snprintf(s_mt_line, sizeof s_mt_line,
+        "  [GL] mip trace frame %u va 0x%08X fmt 0x%02X %ux%u format-levels %u asked %u"
+        " min %u lod-clamp %u..%u luma",
+        (unsigned)s_frame, (unsigned)va, (unsigned)color, (unsigned)w, (unsigned)h,
+        (unsigned)((s_mt_format >> 16) & 0xF), (unsigned)levels,
+        (unsigned)((s_mt_filter >> 16) & 0xFF), (unsigned)((s_mt_control0 >> 18) & 0xFFF),
+        (unsigned)((s_mt_control0 >> 6) & 0xFFF));
+}
+
+static void mt_level(uint32_t luma)
+{
+    if (s_mt_len < 0 || s_mt_len >= (int)sizeof s_mt_line - 16)
+        return;
+    s_mt_len += snprintf(s_mt_line + s_mt_len, sizeof s_mt_line - (size_t)s_mt_len,
+                         " %u", (unsigned)luma);
+}
+
+/* One write per line: the log splits lines written in pieces. Bounded. */
+static void mt_end(uint32_t held)
+{
+    if (s_mt_len < 0)
+        return;
+    if (s_mt_lines < 20000 && s_mt_len < (int)sizeof s_mt_line - 16) {
+        s_mt_lines++;
+        snprintf(s_mt_line + s_mt_len, sizeof s_mt_line - (size_t)s_mt_len,
+                 " held %u\n", (unsigned)held);
+        fputs(s_mt_line, stderr);
+    }
+    s_mt_len = -1;
 }
 
 /* Levels to upload for a stage's FORMAT word: MIPMAP_LEVELS (bits 16-19) for
@@ -1144,6 +1252,8 @@ static uint32_t tex_upload_mips(const GlTex *t, GLenum dxt, const Nv2aTexture *n
             if (glGetError() != GL_NO_ERROR)
                 break;
             *bytes += n;
+            if (gl_mip_trace())
+                mt_level(luma_dxt(mem + va, lw, lh, t->color));
         } else {
             if (!s_decode)
                 break;
@@ -1163,6 +1273,8 @@ static uint32_t tex_upload_mips(const GlTex *t, GLenum dxt, const Nv2aTexture *n
             glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, (GLsizei)lw, (GLsizei)lh, 0,
                          GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
             *bytes += lw * lh * 4;
+            if (gl_mip_trace())
+                mt_level(luma_bgra(s_decode, (size_t)lw * lh));
         }
         off += n;
     }
@@ -1331,7 +1443,13 @@ static GLuint tex_get_levels(uint32_t va, uint32_t color, uint32_t w, uint32_t h
             glCompressedTexImage2D(GL_TEXTURE_2D, 0, fmt, (GLsizei)w, (GLsizei)h, 0,
                                    (GLsizei)size, (const uint8_t *)xbox_GetMemoryOffset() + va);
             if (glGetError() == GL_NO_ERROR) {
+                if (gl_mip_trace()) {
+                    mt_begin(va, color, w, h, t->levels);
+                    mt_level(luma_dxt((const uint8_t *)xbox_GetMemoryOffset() + va, w, h, color));
+                }
                 t->levels_gl = tex_upload_mips(t, fmt, NULL, &size);
+                if (gl_mip_trace())
+                    mt_end(t->levels_gl);
                 tex_account(t, size);
                 gl_step_done("texture upload");
                 return t->tex;
@@ -1382,7 +1500,13 @@ static GLuint tex_get_levels(uint32_t va, uint32_t color, uint32_t w, uint32_t h
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
         uint32_t up = w * h * 4;
+        if (gl_mip_trace()) {
+            mt_begin(va, color, w, h, t->levels);
+            mt_level(luma_bgra(s_decode, (size_t)w * h));
+        }
         t->levels_gl = tex_upload_mips(t, 0, &nt, &up);
+        if (gl_mip_trace())
+            mt_end(t->levels_gl);
         tex_account(t, up);
         gl_step_done("texture upload");
     } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)
@@ -1390,7 +1514,13 @@ static GLuint tex_get_levels(uint32_t va, uint32_t color, uint32_t w, uint32_t h
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
         uint32_t up = w * h * 4;
+        if (gl_mip_trace()) {
+            mt_begin(va, color, w, h, t->levels);
+            mt_level(luma_bgra(s_decode, (size_t)w * h));
+        }
         t->levels_gl = tex_upload_mips(t, 0, &nt, &up);
+        if (gl_mip_trace())
+            mt_end(t->levels_gl);
         tex_account(t, up);
         gl_step_done("texture upload");
     } else if (gl_gpu()) {
@@ -1552,7 +1682,9 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
             texture_surface_sync(s_palette_va,(256u >> ((s_palette_reg >> 2)&3u))*4u);
         /* A source overlap flush can change framebuffer bindings/state. */
         s_tex_cur = NULL;
+        s_mt_format = format; s_mt_control0 = control0; s_mt_filter = regs[base + 5];
         tex = tex_get_levels(va, color, w, h, pitch, levels);
+        s_mt_format = s_mt_control0 = s_mt_filter = 0;
         if (s_tex_cur && s_tex_cur->tex == tex)
             levels_gl = s_tex_cur->levels_gl;
     }
