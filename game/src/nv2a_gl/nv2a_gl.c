@@ -208,6 +208,44 @@ static int s_streaming; /* one packed vertex/index upload, even without buffer s
 static int s_persistent; /* MANHUNT_GL_PERSISTENT: opt-in until console acceptance */
 static void ring_init(GlRing *g, int persistent);
 static void ring_flip(GlRing *g);
+/* Manhunt port addition (P7): the direct vertex ring. With RECOMP_GL_THREAD=1
+ * and persistent streaming, the executor thread copies a draw's vertex data
+ * from guest memory straight into this persistently mapped buffer, instead
+ * of into the queue record and from there into s_vring on the GL thread.
+ *
+ * Ownership: the GL thread creates and maps the buffer, then publishes
+ * `ready`. Only the executor allocates (`head`, bytes ever allocated, with
+ * wrap filler). The record for the draw carries the region's offset and its
+ * end in `head` terms. The GL thread counts what it has consumed, puts a
+ * fence after the draws that read it (every cap/8 bytes, and at each flip),
+ * and moves `tail` up to a fence's end once the GPU has passed that fence.
+ * The executor reuses bytes only below `tail` + cap, and when the ring is
+ * full it does not wait: the draw takes the old path through the queue.
+ * The GL thread never reads the region (it is mapped write-only): draws whose
+ * vertices the GL thread reads (the widescreen 2D placement) take the old
+ * path. MANHUNT_GL_DIRECT_RING=0 turns it off. */
+typedef struct {
+    uint64_t end;                /* s_xr.head after this region */
+    uint32_t at, bytes;          /* buffer offset and size of the region */
+} QRingRef;
+#define XR_FENCES 64
+static struct {
+    GLuint buf;
+    uint8_t *map;
+    size_t cap;
+    int ready;                   /* atomic; GL thread publishes buf/map/cap */
+    uint64_t tail;               /* atomic; GL thread: GPU done below this */
+    int starved;                 /* atomic; executor found the ring full */
+    /* Executor thread only. */
+    uint64_t head;
+    struct { int valid; size_t at; uint32_t stride, present, key[NV2A_RAW_ATTRS]; } anchor;
+    /* GL thread only. */
+    uint64_t consumed, fenced;
+    struct { GLsync sync; uint64_t end; } fence[XR_FENCES];
+    unsigned fence_first, fence_count;
+} s_xr = { .cap = 16u << 20 };
+static const QRingRef *s_draw_ring;     /* GL thread: this draw's vertices are in s_xr */
+static void xr_init(void);
 static const uint32_t *s_regs;          /* the executor's method shadow */
 static uint32_t      s_frame;
 /* Hitch accounting (gl_flip logs frames over 50 ms): per frame, programs
@@ -2624,6 +2662,8 @@ static int ready(void)
                 storage ? "available" : "unavailable", s_persistent ? "on" : "off", s_streaming ? "on" : "off");
         ring_init(&s_vring, s_persistent);
         ring_init(&s_iring, 0);
+        if (s_q_on)
+            xr_init();
     }
     s_state = 1;
     prog_cache_prewarm();
@@ -3153,6 +3193,108 @@ static void ring_done(GlRing *g, GLintptr at, GLsizeiptr size, void *ptr,
     gl_check("vertex/index buffer upload");
 }
 
+/* The direct vertex ring (see s_xr). GL thread: create and map it once. */
+static void xr_init(void)
+{
+    const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    const char *e = getenv("MANHUNT_GL_DIRECT_RING");
+    void *map = NULL;
+
+    if (e && !strcmp(e, "0")) {
+        fprintf(stderr, "  [GL] direct vertex ring: off (MANHUNT_GL_DIRECT_RING=0)\n");
+        return;
+    }
+    if (!s_persistent || !s_vring.mapped || !s_xr.cap) {
+        fprintf(stderr, "  [GL] direct vertex ring: off, needs persistent streaming (MANHUNT_GL_DIRECT_RING)\n");
+        return;
+    }
+    s_xr.cap &= ~(size_t)63;
+    glGenBuffers(1, &s_xr.buf);
+    glBindBuffer(GL_ARRAY_BUFFER, s_xr.buf);
+    glBufferStorage(GL_ARRAY_BUFFER, (GLsizeiptr)s_xr.cap, NULL, flags);
+    if (perf_detail()) PF_ADD(maps, 1);
+    map = glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)s_xr.cap, flags);
+    if (!map) {
+        GLenum error = glGetError();
+        (void)error;
+        glDeleteBuffers(1, &s_xr.buf);
+        s_xr.buf = 0;
+    } else {
+        s_xr.map = (uint8_t *)map;
+        __atomic_store_n(&s_xr.ready, 1, __ATOMIC_RELEASE);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, s_vring.buf);
+    fprintf(stderr, "  [GL] direct vertex ring: %s, %zu KB (MANHUNT_GL_DIRECT_RING)\n",
+            map ? "on" : "off, persistent map failed", s_xr.cap >> 10);
+}
+
+/* GL thread: hand back to the executor every region the GPU has finished
+ * with. Polls without waiting. */
+static void xr_retire(void)
+{
+    while (s_xr.fence_count) {
+        unsigned i = s_xr.fence_first;
+        GLenum st = glClientWaitSync(s_xr.fence[i].sync, 0, 0);
+        if (st == GL_TIMEOUT_EXPIRED)
+            break;
+        if (st == GL_WAIT_FAILED)
+            glFinish();                 /* cannot tell: make it certainly done */
+        glDeleteSync(s_xr.fence[i].sync);
+        __atomic_store_n(&s_xr.tail, s_xr.fence[i].end, __ATOMIC_RELEASE);
+        s_xr.fence_first = (i + 1) % XR_FENCES;
+        s_xr.fence_count--;
+    }
+}
+
+/* GL thread: fence the draws submitted so far that read the ring. flush
+ * submits the fence now (mid-frame); a flip's swap submits it anyway. */
+static void xr_fence(int flush)
+{
+    GLsync sync;
+    if (!s_xr.map || s_xr.consumed == s_xr.fenced)
+        return;
+    if (s_xr.fence_count == XR_FENCES) {
+        /* Never more than XR_FENCES in flight: wait for the oldest. */
+        unsigned i = s_xr.fence_first;
+        GLenum st;
+        do st = glClientWaitSync(s_xr.fence[i].sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        while (st == GL_TIMEOUT_EXPIRED);
+        if (st == GL_WAIT_FAILED)
+            glFinish();
+        xr_retire();
+    }
+    sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) {
+        /* No fence: wait for everything, then the whole consumed range is free. */
+        glFinish();
+        s_xr.fenced = s_xr.consumed;
+        while (s_xr.fence_count) xr_retire();
+        __atomic_store_n(&s_xr.tail, s_xr.consumed, __ATOMIC_RELEASE);
+        return;
+    }
+    if (flush)
+        (void)glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+    s_xr.fence[(s_xr.fence_first + s_xr.fence_count) % XR_FENCES].sync = sync;
+    s_xr.fence[(s_xr.fence_first + s_xr.fence_count) % XR_FENCES].end = s_xr.consumed;
+    s_xr.fence_count++;
+    s_xr.fenced = s_xr.consumed;
+}
+
+/* GL thread, after replaying a record whose vertices are in the ring
+ * (drawn or not): that region now belongs to the draws submitted. */
+static void xr_consumed(const QRingRef *ref)
+{
+    if (ref->end > s_xr.consumed)
+        s_xr.consumed = ref->end;
+    if (s_xr.consumed - s_xr.fenced >= s_xr.cap / 8) {
+        xr_fence(1);
+        xr_retire();
+    } else if (__atomic_load_n(&s_xr.starved, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&s_xr.starved, 0, __ATOMIC_RELAXED);
+        xr_retire();
+    }
+}
+
 /* Which vertex attribute arrays are enabled in s_vao (only this file
  * touches it): enable and disable only on change. */
 static uint32_t s_attr_on;
@@ -3286,26 +3428,36 @@ static int upload_vertices(const Nv2aRawBatch *b, const void *indices,
     static size_t staging_cap;
     uint32_t stride = 0, key[NV2A_RAW_ATTRS];
     int keep = 0;
+    /* Direct ring (s_xr): the executor already placed the vertices, every
+     * attribute direct, direct[a].ptr an offset into the region at xr->at.
+     * Only the indices go through s_vring here. */
+    const QRingRef *xr = s_draw_ring;
 
     *base_vertex = 0;
     if (!nv)
         return 0;
     count_converted(b, conv);
-    nrun = vertex_runs(b, run, of_run);
-    if (s_streaming && s_vring.mapped && nrun == 1 && !conv && b->attr_direct && base_vertex_enabled()) {
-        /* A candidate: every attribute in the one run, all with one stride. */
+    nrun = xr ? 0 : vertex_runs(b, run, of_run);
+    if (xr ? b->attr_direct && base_vertex_enabled()
+           : s_streaming && s_vring.mapped && nrun == 1 && !conv && b->attr_direct && base_vertex_enabled()) {
+        /* A candidate: every attribute in the one run, all with one stride.
+         * In the ring the key is each attribute's offset in the region, so
+         * one stride is enough: equal keys mean equal placement. */
         stride = 0;
         for (a = 0; a < NV2A_RAW_ATTRS; a++) {
             key[a] = 0;
             if (!(b->attr_direct & (1u << a)))
                 continue;
-            if (!b->direct[a].stride || (stride && b->direct[a].stride != stride)) {
+            /* Ring offsets from 0x10000 up would collide with the type bits. */
+            if (!b->direct[a].stride || (stride && b->direct[a].stride != stride)
+                || (xr && (uintptr_t)b->direct[a].ptr >= 0x10000)) {
                 stride = 0;
                 break;
             }
             stride = b->direct[a].stride;
-            key[a] = (uint32_t)(b->direct[a].ptr - run[0].lo) | b->direct[a].type << 16
-                   | b->direct[a].size << 24;
+            key[a] = (uint32_t)(xr ? (uintptr_t)b->direct[a].ptr
+                                   : (uintptr_t)(b->direct[a].ptr - run[0].lo))
+                   | b->direct[a].type << 16 | b->direct[a].size << 24;
         }
     }
     for (i = 0; i < nrun; i++) {
@@ -3317,7 +3469,7 @@ static int upload_vertices(const Nv2aRawBatch *b, const void *indices,
             slot[np++] = a;
     pack_at = bytes;
     bytes += (GLsizeiptr)nv * np * 4 * sizeof(float);
-    if (!bytes)
+    if (!bytes && !xr)
         return 0;
 
     if (s_streaming) {
@@ -3326,10 +3478,23 @@ static int upload_vertices(const Nv2aRawBatch *b, const void *indices,
     }
     /* A candidate takes up to stride - 1 bytes more, to land a whole number
      * of vertices after the kept pointers. */
-    alloc = bytes + (stride ? (GLsizeiptr)stride - 1 : 0);
+    alloc = bytes + (stride && !xr ? (GLsizeiptr)stride - 1 : 0);
     alloc_at = at = ring_alloc(&s_vring, alloc, &map);
     dst = (uint8_t *)map;
-    if (stride && dst) {
+    if (xr) {
+        /* The executor placed the region a whole number of vertices after
+         * its own last region of this layout when it could (xr_alloc). */
+        GLintptr xat = (GLintptr)xr->at;
+        keep = stride && s_kept.valid && s_kept.buf == s_xr.buf && s_kept.stride == stride
+            && s_kept.present == b->attr_present && xat >= s_kept.at
+            && (xat - s_kept.at) % (GLintptr)stride == 0
+            && (xat - s_kept.at) / (GLintptr)stride <= 0x7FFFFFFF
+            && !memcmp(s_kept.key, key, sizeof key);
+        if (keep) {
+            *base_vertex = (GLint)((xat - s_kept.at) / (GLintptr)stride);
+            if (perf_detail()) PF_ADD(kept_attr_draws, 1);
+        }
+    } else if (stride && dst) {
         GLintptr shift = 0;
         keep = s_kept.valid && s_kept.buf == s_vring.buf && s_kept.stride == stride
             && s_kept.present == b->attr_present && at >= s_kept.at
@@ -3388,14 +3553,16 @@ static int upload_vertices(const Nv2aRawBatch *b, const void *indices,
     if (keep)
         return 1;
     /* New pointers: remembered when this draw is a candidate. */
-    s_kept.valid = stride && map;
+    s_kept.valid = stride && (xr || map);
     if (s_kept.valid) {
-        s_kept.buf = s_vring.buf;
-        s_kept.at = at;
+        s_kept.buf = xr ? s_xr.buf : s_vring.buf;
+        s_kept.at = xr ? (GLintptr)xr->at : at;
         s_kept.stride = stride;
         s_kept.present = b->attr_present;
         memcpy(s_kept.key, key, sizeof key);
     }
+    if (xr)
+        glBindBuffer(GL_ARRAY_BUFFER, s_xr.buf);   /* what the pointers below capture */
     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
         GLintptr off;
         GLint size;
@@ -3408,7 +3575,10 @@ static int upload_vertices(const Nv2aRawBatch *b, const void *indices,
         attr_enable(a, 1);
         if (!(b->attr_direct & (1u << a)))
             continue;
-        off = at + run[of_run[a]].at + (b->direct[a].ptr - run[of_run[a]].lo);
+        if (xr)
+            off = (GLintptr)xr->at + (GLintptr)(uintptr_t)b->direct[a].ptr;
+        else
+            off = at + run[of_run[a]].at + (b->direct[a].ptr - run[of_run[a]].lo);
         size = (GLint)b->direct[a].size;
         switch (b->direct[a].type) {
         case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
@@ -3506,7 +3676,9 @@ static int wide_xrange(const Nv2aRawBatch *b, float *mn, float *mx)
     float minx = 1e30f, maxx = -1e30f;
     uint32_t v;
 
-    if (!b->vertex_count)
+    /* Vertices in the direct ring are not readable here (write-only map);
+     * the executor keeps the draws placed by this on the queue path. */
+    if (!b->vertex_count || s_draw_ring)
         return 0;
     for (v = 0; v < b->vertex_count; v++) {
         float x, q[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -4789,7 +4961,9 @@ static void gl_flip(void)
     static int64_t cap_ns = -1;
     static uint64_t next_ns;
     uint64_t t0 = hz_now();
+    xr_fence(0);                 /* the swap in gl_flip_work submits it */
     gl_flip_work();
+    xr_retire();
     ring_flip(&s_vring);
     ring_flip(&s_iring);
     validate_frame();
@@ -5057,18 +5231,187 @@ static int queue_pack(void)
 }
 static void q_read_batch(const uint8_t *rec, size_t at, Nv2aRawBatch *bb)
 {
+    /* A record whose vertices are in the direct ring (QHdr.pad[0]) keeps
+     * direct[a].ptr as offsets into its region; upload_vertices adds them. */
+    int ring = ((const QHdr *)rec)->pad[0] != 0;
     *bb = *(const Nv2aRawBatch *)(rec + at);
     bb->regs = g_regs;
     bb->vp_program = (const uint32_t (*)[4])g_prog;
     bb->vp_consts = (const float (*)[4])g_consts;
     for (unsigned a = 0; a < NV2A_RAW_ATTRS; a++)
-        if (bb->attr_direct & (1u << a))
+        if ((bb->attr_direct & (1u << a)) && !ring)
             bb->direct[a].ptr = rec + (uintptr_t)bb->direct[a].ptr;
     bb->attrs = bb->attrs ? (const float *)(rec + (uintptr_t)bb->attrs) : NULL;
     if (bb->indices16)
         bb->indices16 = (const uint16_t *)(rec + (uintptr_t)bb->indices16);
     else
         bb->indices = (const uint32_t *)(rec + (uintptr_t)bb->indices);
+}
+
+/* Executor: the direct ring is usable. Off under the debug captures that
+ * read vertex data on the GL thread (RECOMP_GL_WATCH, MANHUNT_PAGE_CAPTURE). */
+static int xr_usable(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *page = getenv("MANHUNT_PAGE_CAPTURE");
+        on = !getenv("RECOMP_GL_WATCH") && !(page && *page == '1');
+    }
+    return on && __atomic_load_n(&s_xr.ready, __ATOMIC_ACQUIRE);
+}
+
+/* Executor: whether the GL thread may read this draw's vertices -- the
+ * widescreen 2D placement (wide_2d, through wide_xrange). The same tests as
+ * gl_draw_raw_work: pre-transformed, an orthographic fixed-function
+ * composite, or a vertex program from s_wide_prog (hashed as prog_get does,
+ * once per program generation). Those draws keep the queue path. The
+ * [MH-WIDE-DRAW] capture log shows x -1..-1 for ring draws. */
+static int xr_reads_vertices(const Nv2aRawBatch *b)
+{
+    static uint32_t gen;
+    static int is_2d;
+    if (b->xform == 1)
+        return b->composite[12] == 0.0f && b->composite[13] == 0.0f &&
+               b->composite[14] == 0.0f && b->composite[15] != 0.0f;
+    if (b->xform != 2 || !b->vp_program)
+        return 1;
+    if (b->vp_prog_gen != gen || !gen) {
+        uint64_t h = prog_hash(b);
+        is_2d = 0;
+        for (unsigned i = 0; i < s_wide_nprog; i++)
+            if (s_wide_prog[i] == h)
+                is_2d = 1;
+        gen = b->vp_prog_gen;
+    }
+    return is_2d;
+}
+
+/* Executor: `bytes` contiguous bytes of the ring, 64-aligned; for a layout
+ * with one stride, placed a whole number of vertices after the previous
+ * region of the same layout (the anchor), so the GL thread can keep its
+ * attribute pointers and draw with a base vertex. 0 when that space may
+ * still be read by the GPU: the caller takes the queue path. */
+static int xr_alloc(size_t bytes, uint32_t stride, uint32_t present, const uint32_t *key,
+                    size_t *at_out, uint64_t *end_out)
+{
+    size_t cap = s_xr.cap, off = (size_t)(s_xr.head % cap);
+    size_t at = (off + 63) & ~(size_t)63;
+    int same = stride && s_xr.anchor.valid && s_xr.anchor.stride == stride
+        && s_xr.anchor.present == present
+        && !memcmp(s_xr.anchor.key, key, sizeof s_xr.anchor.key);
+    int aligned = 0, wrap = 0;
+    uint64_t end;
+
+    if (same && at >= s_xr.anchor.at) {
+        size_t d = (at - s_xr.anchor.at) % stride;
+        if (d) at += stride - d;
+        aligned = 1;
+    }
+    if (at + bytes > cap) {
+        /* Wrap: the rest of the ring is filler. */
+        end = s_xr.head + (cap - off) + bytes;
+        at = 0;
+        wrap = 1;
+        aligned = same && s_xr.anchor.at == 0;
+    } else {
+        end = s_xr.head + (at - off) + bytes;
+    }
+    if (end - __atomic_load_n(&s_xr.tail, __ATOMIC_ACQUIRE) > cap) {
+        __atomic_store_n(&s_xr.starved, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+    s_xr.head = end;
+    if (stride && !aligned) {
+        s_xr.anchor.valid = 1;
+        s_xr.anchor.at = at;
+        s_xr.anchor.stride = stride;
+        s_xr.anchor.present = present;
+        memcpy(s_xr.anchor.key, key, sizeof s_xr.anchor.key);
+    }
+    if (wrap && perf_detail()) PF_ADD(ring_wraps, 1);
+    *at_out = at;
+    *end_out = end;
+    return 1;
+}
+
+/* Executor: copy this draw's vertex data from guest memory straight into
+ * the direct ring, in the layout upload_vertices would give it in s_vring
+ * (the runs, 16-aligned, then converted attributes packed float4, as
+ * MANHUNT_GL_QUEUE_PACK describes them). Fills the descriptors the record
+ * carries: every present attribute direct, ptr an offset into the region.
+ * 0: use the queue path. */
+static int xr_place(const Nv2aRawBatch *b, const VRun *run, const int *of_run, uint32_t nrun,
+                    uint16_t conv, const uint32_t *slots, uint32_t nconv,
+                    Nv2aRawBatch *desc, QRingRef *ref)
+{
+    size_t run_at[NV2A_RAW_ATTRS], bytes = 0, pack_at, at;
+    uint32_t stride = 0, key[NV2A_RAW_ATTRS], a, i, v;
+    uint64_t end;
+    uint8_t *dst;
+
+    if (!b->vertex_count || !xr_usable() || xr_reads_vertices(b))
+        return 0;
+    for (i = 0; i < nrun; i++) {
+        run_at[i] = bytes;
+        bytes += ((size_t)(run[i].hi - run[i].lo) + 15) & ~(size_t)15;
+    }
+    pack_at = bytes;
+    bytes += (size_t)b->vertex_count * nconv * 16;
+    if (!bytes || bytes > s_xr.cap / 4)
+        return 0;
+    for (a = 0; a < NV2A_RAW_ATTRS; a++)
+        if (b->attr_direct & (1u << a))
+            desc->direct[a].ptr = (const uint8_t *)(uintptr_t)
+                (run_at[of_run[a]] + (size_t)(b->direct[a].ptr - run[of_run[a]].lo));
+    for (i = 0; i < nconv; i++) {
+        a = slots[i];
+        desc->direct[a].ptr = (const uint8_t *)(uintptr_t)(pack_at + i * 16);
+        desc->direct[a].type = 2;
+        desc->direct[a].size = 4;
+        desc->direct[a].stride = nconv * 16;
+    }
+    desc->attr_direct |= conv;
+    desc->attrs = NULL;
+    /* Candidate for kept pointers, as upload_vertices decides it. Offsets
+     * from 0x10000 up would collide with the type bits of the key. */
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        key[a] = 0;
+        if (!(desc->attr_direct & (1u << a)))
+            continue;
+        if (!desc->direct[a].stride || (stride && desc->direct[a].stride != stride)
+            || (uintptr_t)desc->direct[a].ptr >= 0x10000) {
+            stride = 0;
+            break;
+        }
+        stride = desc->direct[a].stride;
+        key[a] = (uint32_t)(uintptr_t)desc->direct[a].ptr | desc->direct[a].type << 16
+               | desc->direct[a].size << 24;
+    }
+    if (!stride)
+        memset(key, 0, sizeof key);
+    if (!xr_alloc(bytes, stride, b->attr_present, key, &at, &end)) {
+        if (perf_detail()) PF_ADD(ring_full, 1);
+        return 0;
+    }
+    dst = s_xr.map + at;
+    for (i = 0; i < nrun; i++)
+        memcpy(dst + run_at[i], run[i].lo, (size_t)(run[i].hi - run[i].lo));
+    if (nconv) {
+        uint8_t *out = dst + pack_at;
+        for (v = 0; v < b->vertex_count; v++)
+            for (i = 0; i < nconv; i++)
+                memcpy(out + ((size_t)v * nconv + i) * 16,
+                       b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slots[i]) * 4, 16);
+    }
+    ref->end = end;
+    ref->at = (uint32_t)at;
+    ref->bytes = (uint32_t)bytes;
+    if (conv) count_converted(b, conv);
+    if (perf_detail()) {
+        PF_ADD(ring_draws, 1);
+        PF_ADD(ring_bytes, bytes);
+    }
+    return 1;
 }
 
 static void q_draw(const Nv2aRawBatch *b)
@@ -5078,15 +5421,21 @@ static void q_draw(const Nv2aRawBatch *b)
     uint32_t nrun = vertex_runs(b, run, of_run), i, a, nreg, nprog = 0, nconst = 0;
     uint16_t conv = b->attr_present & (uint16_t)~b->attr_direct;
     uint32_t slots[NV2A_RAW_ATTRS], nconv = 0;
-    int packed = queue_pack();
+    int packed = queue_pack(), in_ring;
     for (a = 0; a < NV2A_RAW_ATTRS; a++) if (conv & (1u << a)) slots[nconv++] = a;
     size_t attr_bytes = (size_t)b->vertex_count * (packed ? nconv : NV2A_RAW_ATTRS) * 16;
     /* 16-bit when the executor narrowed them (MANHUNT_NARROW_INDICES). */
     size_t idx_bytes = (size_t)b->index_count * (b->indices16 ? 2 : 4);
-    size_t size, at, runs_at[NV2A_RAW_ATTRS], attrs_at = 0, idx_at, batch_at;
-    Nv2aRawBatch *qb;
+    size_t size, at, runs_at[NV2A_RAW_ATTRS], attrs_at = 0, idx_at, batch_at, ring_at = 0;
+    Nv2aRawBatch *qb, desc = *b;
+    QRingRef ref = {0};
     uint8_t *rec;
+    uint64_t t0 = perf_detail() ? hz_now() : 0;
 
+    /* Vertex data straight into the direct ring when it can; the record
+     * then carries only the region's place. */
+    in_ring = xr_place(b, run, of_run, nrun, conv, slots, nconv, &desc, &ref);
+    uint64_t copy_ns = t0 ? hz_now() - t0 : 0;
     s_q_live_regs = b->regs;
     nreg = q_reg_collect();
     if (b->vp_program && b->vp_prog_gen != s_q_prog_gen && b->vp_slots <= PROG_ROWS)
@@ -5098,13 +5447,18 @@ static void q_draw(const Nv2aRawBatch *b)
          + (size_t)(nprog + nconst) * sizeof(QRow);
     batch_at = size;
     size += Q_ALIGN(sizeof(Nv2aRawBatch));
-    for (i = 0; i < nrun; i++) {
-        runs_at[i] = size;
-        size += Q_ALIGN((size_t)(run[i].hi - run[i].lo));
-    }
-    if (conv) {
-        attrs_at = size;
-        size += Q_ALIGN(attr_bytes);
+    if (in_ring) {
+        ring_at = size;
+        size += Q_ALIGN(sizeof(QRingRef));
+    } else {
+        for (i = 0; i < nrun; i++) {
+            runs_at[i] = size;
+            size += Q_ALIGN((size_t)(run[i].hi - run[i].lo));
+        }
+        if (conv) {
+            attrs_at = size;
+            size += Q_ALIGN(attr_bytes);
+        }
     }
     idx_at = size;
     size += Q_ALIGN(idx_bytes);
@@ -5120,40 +5474,48 @@ static void q_draw(const Nv2aRawBatch *b)
         abort();
     }
     qb = (Nv2aRawBatch *)(rec + batch_at);
-    *qb = *b;
-    /* Pointers become offsets into the record; the GL thread fixes them. */
-    for (i = 0; i < nrun; i++)
-        memcpy(rec + runs_at[i], run[i].lo, (size_t)(run[i].hi - run[i].lo));
-    for (a = 0; a < NV2A_RAW_ATTRS; a++)
-        if (b->attr_direct & (1u << a))
-            qb->direct[a].ptr = (const uint8_t *)(uintptr_t)
-                (runs_at[of_run[a]] + (size_t)(b->direct[a].ptr - run[of_run[a]].lo));
-    if (conv) {
-        if (packed) {
-            if (nconv == NV2A_RAW_ATTRS) memcpy(rec + attrs_at, b->attrs, attr_bytes);
-            else for (uint32_t v = 0; v < b->vertex_count; v++)
-                for (i = 0; i < nconv; i++)
-                    memcpy(rec + attrs_at + ((size_t)v * nconv + i) * 16,
-                           b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slots[i]) * 4, 16);
-            /* Converted float4s use the existing native float attribute path.
-             * Direct guest attributes keep their original descriptors/bytes. */
-            for (i = 0; i < nconv; i++) {
-                a = slots[i];
-                qb->direct[a].ptr = (const uint8_t *)(uintptr_t)(attrs_at + i * 16);
-                qb->direct[a].type = 2; qb->direct[a].size = 4; qb->direct[a].stride = nconv * 16;
+    if (t0) t0 = hz_now();
+    if (in_ring) {
+        *qb = desc;
+        memcpy(rec + ring_at, &ref, sizeof ref);
+        ((QHdr *)rec)->pad[0] = 1;
+    } else {
+        *qb = *b;
+        /* Pointers become offsets into the record; the GL thread fixes them. */
+        for (i = 0; i < nrun; i++)
+            memcpy(rec + runs_at[i], run[i].lo, (size_t)(run[i].hi - run[i].lo));
+        for (a = 0; a < NV2A_RAW_ATTRS; a++)
+            if (b->attr_direct & (1u << a))
+                qb->direct[a].ptr = (const uint8_t *)(uintptr_t)
+                    (runs_at[of_run[a]] + (size_t)(b->direct[a].ptr - run[of_run[a]].lo));
+        if (conv) {
+            if (packed) {
+                if (nconv == NV2A_RAW_ATTRS) memcpy(rec + attrs_at, b->attrs, attr_bytes);
+                else for (uint32_t v = 0; v < b->vertex_count; v++)
+                    for (i = 0; i < nconv; i++)
+                        memcpy(rec + attrs_at + ((size_t)v * nconv + i) * 16,
+                               b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slots[i]) * 4, 16);
+                /* Converted float4s use the existing native float attribute path.
+                 * Direct guest attributes keep their original descriptors/bytes. */
+                for (i = 0; i < nconv; i++) {
+                    a = slots[i];
+                    qb->direct[a].ptr = (const uint8_t *)(uintptr_t)(attrs_at + i * 16);
+                    qb->direct[a].type = 2; qb->direct[a].size = 4; qb->direct[a].stride = nconv * 16;
+                }
+                qb->attr_direct |= conv;
+                qb->attrs = NULL;
+                count_converted(b, conv);
+            } else {
+                memcpy(rec + attrs_at, b->attrs, attr_bytes);
+                qb->attrs = (const float *)(uintptr_t)attrs_at;
             }
-            qb->attr_direct |= conv;
-            qb->attrs = NULL;
-            count_converted(b, conv);
-        } else {
-            memcpy(rec + attrs_at, b->attrs, attr_bytes);
-            qb->attrs = (const float *)(uintptr_t)attrs_at;
-        }
-        if (perf_detail()) {
-            PF_ADD(queue_attr_bytes, attr_bytes);
-            PF_ADD(queue_attr_saved_bytes, (size_t)b->vertex_count * NV2A_RAW_ATTRS * 16 - attr_bytes);
-        }
-    } else qb->attrs = NULL;
+            if (perf_detail()) {
+                PF_ADD(queue_attr_bytes, attr_bytes);
+                PF_ADD(queue_attr_saved_bytes, (size_t)b->vertex_count * NV2A_RAW_ATTRS * 16 - attr_bytes);
+            }
+        } else qb->attrs = NULL;
+    }
+    if (t0) PF_ADD(queue_vertex_ns, copy_ns + hz_now() - t0);
     if (b->indices16) {
         memcpy(rec + idx_at, b->indices16, idx_bytes);
         qb->indices16 = (const uint16_t *)(uintptr_t)idx_at;
@@ -5276,7 +5638,16 @@ static void *q_gl_thread(void *arg)
             if (h->type == Q_DRAW) {
                 Nv2aRawBatch bb;
                 q_read_batch(rec, at, &bb);
-                gl_draw_raw(&bb);
+                if (h->pad[0]) {
+                    /* Vertices in the direct ring: the region's place follows the batch. */
+                    QRingRef ref;
+                    memcpy(&ref, rec + at + Q_ALIGN(sizeof(Nv2aRawBatch)), sizeof ref);
+                    s_draw_ring = &ref;
+                    gl_draw_raw(&bb);
+                    s_draw_ring = NULL;
+                    xr_consumed(&ref);
+                } else
+                    gl_draw_raw(&bb);
             } else if (h->type == Q_CLEAR) {
                 const QClear *c = (const QClear *)(rec + at);
                 gl_clear(&c->s, &c->rs, c->flags, c->argb, c->zs);

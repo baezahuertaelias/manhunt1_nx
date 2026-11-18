@@ -18,12 +18,25 @@ static void observed_swap(SDL_Window *window);
 #include NV2A_GL_SOURCE
 #undef SDL_GL_SwapWindow
 static uint32_t swap_pixel;
+/* test_direct_ring.c: a hash of every whole presented frame, in order. */
+static int swap_hash_on;
+static unsigned swap_count;
+static uint64_t swap_hashes[4096];
 static void observed_swap(SDL_Window *window)
 {
     int w,h;
     SDL_GL_GetDrawableSize(window,&w,&h);
     glBindFramebuffer(GL_READ_FRAMEBUFFER,0);
     glReadPixels(w/2,h/2,1,1,GL_BGRA,GL_UNSIGNED_BYTE,&swap_pixel);
+    if(swap_hash_on) {
+        static uint8_t *px;static size_t cap;size_t n=(size_t)w*h*4;uint64_t hash=1469598103934665603ull;
+        if(n>cap){free(px);px=malloc(n);cap=n;assert(px);}
+        glReadPixels(0,0,w,h,GL_BGRA,GL_UNSIGNED_BYTE,px);
+        for(size_t i=0;i<n;i++)hash=(hash^px[i])*1099511628211ull;
+        unsigned k=__atomic_load_n(&swap_count,__ATOMIC_RELAXED);
+        if(k<4096)swap_hashes[k]=hash;
+        __atomic_store_n(&swap_count,k+1,__ATOMIC_RELEASE);
+    }
     assert(glGetError()==GL_NO_ERROR);
     SDL_GL_SwapWindow(window);
 }

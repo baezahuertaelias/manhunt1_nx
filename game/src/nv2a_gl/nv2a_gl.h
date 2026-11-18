@@ -26,6 +26,10 @@ typedef struct {
     uint64_t kept_attr_draws;   /* drew with the previous attribute pointers and a base vertex */
     uint64_t const_reuses;      /* constants changed generation but not content: no upload */
     uint64_t converted_type[8]; /* attribute vertices by NV097 storage type */
+    /* RECOMP_GL_THREAD=1, executor side: draws whose vertices went straight
+     * into the direct ring and their bytes; draws that found it full; ring
+     * wraps; time copying vertex data (ring or queue record) per draw. */
+    uint64_t ring_draws, ring_bytes, ring_full, ring_wraps, queue_vertex_ns;
 } Nv2aGlPerf;
 void nv2a_gl_perf_read(Nv2aGlPerf *out);
 
