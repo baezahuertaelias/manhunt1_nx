@@ -2,6 +2,7 @@
  * only: no game assets, guest simulation, console FPS or gameplay acceptance. */
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -165,6 +166,154 @@ static void border_mip_test(void)
     assert(c[3*8+3]==0xffff0000);
     puts("PASS real GL texture border colour and source bit, mip level selection and LOD clamp");
 }
+/* ── Texture-shader modes (gl_psh.c texshader_fetch) against C references ──
+ * One draw over the 8x8 surface: per-stage texture state, texcoords constant
+ * over the triangle, the final combiner outputting T<out>. Nearest filtering,
+ * so each pixel is one texel. */
+typedef struct { uint32_t va, format; } TsStage;
+static uint32_t ts_draw(const TsStage st[4],uint32_t prog,uint32_t other,uint32_t dotmap,
+                        const float tc[4][4],unsigned out)
+{
+    Nv2aSurface s=surface(8,8,32);uint32_t *c=color_ram(&s);
+    float attrs[3*64]={0};uint32_t indices[3]={0,1,2};Nv2aRawBatch b={0};
+    const float pos[6]={0,0,8,0,0,8};
+    for(unsigned v=0;v<3;v++){
+        float *a=attrs+v*64;a[0]=pos[v*2];a[1]=pos[v*2+1];a[2]=0;a[3]=1;a[12]=1;a[15]=1;
+        for(unsigned t=0;t<4;t++)memcpy(a+36+4*t,tc[t],16);
+    }
+    regs[0x288/4]=8+out;regs[0x28c/4]=(0x10u|(8+out))<<8;regs[0x1e60/4]=0;
+    regs[0x1e70/4]=prog;regs[0x1e78/4]=other;regs[0x1e74/4]=dotmap;
+    for(unsigned t=0;t<4;t++){
+        uint32_t base=(0x1b00+t*0x40)/4;
+        regs[base]=st[t].va;regs[base+1]=st[t].format;regs[base+2]=0;
+        regs[base+3]=st[t].va?0x40000000u:0;regs[base+4]=0;regs[base+5]=(1u<<16)|(1u<<24);regs[base+7]=0;
+        b.tex_va[t]=st[t].va;
+    }
+    b.surface=s;b.regs=regs;b.prim=5;b.vertex_count=b.index_count=3;b.indices=indices;b.attrs=attrs;
+    b.attr_present=(1u<<0)|(1u<<3)|(0xFu<<9);
+    memset(c,0,256);gl_draw_raw(&b);
+    uint32_t px=c[3*8+3];
+    for(unsigned t=0;t<4;t++){uint32_t base=(0x1b00+t*0x40)/4;regs[base]=regs[base+1]=regs[base+3]=0;}
+    regs[0x1e70/4]=regs[0x1e78/4]=regs[0x1e74/4]=0;
+    return px;
+}
+/* Swizzled A8R8G8B8, n x n (power of two), log2 n in `l`. */
+static uint32_t ts_fmt(unsigned l,unsigned levels,int cube)
+{
+    return (2u<<4)|(0x06u<<8)|(levels<<16)|(l<<20)|(l<<24)|(cube?4u:0u);
+}
+static float sign3(uint8_t x) {return x>=128?(x-256.0f)/127.0f:x/127.0f;}
+static void ts_put(uint32_t va,unsigned n,unsigned x,unsigned y,uint32_t argb)
+{
+    ((uint32_t*)(guest+va))[swizzle_index(x,y,n,n)]=argb;
+}
+static uint32_t ts_texel(unsigned face,unsigned x,unsigned y)
+{
+    return 0xff000000u|((face*40u+20u)<<16)|((x*100u+10u)<<8)|(y*100u+30u);
+}
+/* CUBEMAP: six 2x2 faces of two levels each, faces 128 bytes apart (one
+ * face's chain is 20 bytes, aligned up), against the CPU renderer's face
+ * selection (rc_stage_fetch in nv2a_pb_exec.c, GL's cube rules). */
+static void cube_mode_test(void)
+{
+    const uint32_t va=0x2e0000,stride=128;
+    for(unsigned f=0;f<6;f++)for(unsigned y=0;y<2;y++)for(unsigned x=0;x<2;x++)
+        ts_put(va+f*stride,2,x,y,ts_texel(f,x,y));
+    for(unsigned f=0;f<6;f++)ts_put(va+f*stride+16,1,0,0,0xff000000u); /* level 1 */
+    const float dirs[][3]={{1,.3f,-.6f},{1,-.4f,.5f},{-1,.6f,.3f},{-1,-.2f,-.7f},{.3f,1,.6f},{-.5f,1,-.4f},
+                           {.4f,-1,.3f},{-.6f,-1,-.2f},{.2f,.5f,1},{-.7f,-.3f,1},{.6f,.4f,-1},{-.3f,-.6f,-1}};
+    TsStage st[4]={{va,ts_fmt(1,2,1)},{0,0},{0,0},{0,0}};
+    for(unsigned d=0;d<sizeof dirs/sizeof dirs[0];d++){
+        float x=dirs[d][0],y=dirs[d][1],z=dirs[d][2],ax=fabsf(x),ay=fabsf(y),az=fabsf(z),ma,sc,tcc;unsigned face;
+        if(ax>=ay&&ax>=az){face=x>0?0:1;ma=ax;sc=x>0?-z:z;tcc=-y;}
+        else if(ay>=az){face=y>0?2:3;ma=ay;sc=x;tcc=y>0?z:-z;}
+        else{face=z>0?4:5;ma=az;sc=z>0?x:-x;tcc=-y;}
+        unsigned u=(unsigned)((sc/ma+1)*0.5f*2),v=(unsigned)((tcc/ma+1)*0.5f*2);
+        float tc[4][4]={{x,y,z,1},{0},{0},{0}};
+        uint32_t px=ts_draw(st,3,0,0,tc,0);
+        if(px!=ts_texel(face,u,v)){fprintf(stderr,"cube dir %u: got %08X want %08X (face %u %u,%u)\n",d,px,ts_texel(face,u,v),face,u,v);assert(0);}
+    }
+    /* A cube mode on a 2D texture reads black; MANHUNT_GL_TEXSHADER=0 is
+     * covered by test_gl.c's source checks. */
+    TsStage flat[4]={{va,ts_fmt(1,1,0)},{0,0},{0,0},{0,0}};
+    float tc[4][4]={{1,.3f,-.6f,1},{0},{0},{0}};
+    assert((ts_draw(flat,3,0,0,tc,0)&0xffffffu)==0);   /* no texture: GL's (0, 0, 0, 1) */
+    puts("PASS real GL cube maps: 6 faces at the 128-byte-aligned mip-chain stride, face/texel selection matches the CPU reference");
+}
+/* BUMPENVMAP and BUMPENVMAP_LUM: stage 0 a constant (du, dv) map, stage 1 a
+ * 4x4 colour texture at tc1 + M * (du, dv); D3D's convention u' = u + M00 du
+ * + M10 dv, v' = v + M01 du + M11 dv. */
+static void bump_mode_test(void)
+{
+    const uint32_t bva=0x2e1000,cva=0x2e2000;
+    const uint8_t du=0x40,dv=0xC0,lum=0x80;
+    for(unsigned y=0;y<2;y++)for(unsigned x=0;x<2;x++)ts_put(bva,2,x,y,0xff000000u|((uint32_t)lum<<16)|((uint32_t)dv<<8)|du);
+    for(unsigned y=0;y<4;y++)for(unsigned x=0;x<4;x++)ts_put(cva,4,x,y,0xff000000u|((x*60u+20u)<<16)|((y*60u+20u)<<8)|0x80u);
+    const float mats[][4]={{1,0,0,1},{0,1,1,0},{.5f,.25f,-.25f,.5f}};
+    const float tcs[][2]={{.1f,.6f},{.6f,.1f},{.4f,.45f}};
+    TsStage st[4]={{bva,ts_fmt(1,1,0)},{cva,ts_fmt(2,1,0)},{0,0},{0,0}};
+    for(unsigned m=0;m<3;m++)for(unsigned lm=0;lm<2;lm++){
+        const float *M=mats[m],scale=lm?1.0f:0,offset=lm?0.25f:0;
+        memcpy(&regs[(0x1b68)/4],M,16);memcpy(&regs[0x1b78/4],&scale,4);memcpy(&regs[0x1b7c/4],&offset,4);
+        float su=sign3(du),sv=sign3(dv);
+        float u=tcs[m][0]+M[0]*su+M[2]*sv,v=tcs[m][1]+M[1]*su+M[3]*sv;
+        unsigned x=(unsigned)(u*4),y=(unsigned)(v*4);
+        float tc[4][4]={{.5f,.5f,0,1},{tcs[m][0],tcs[m][1],0,1},{0},{0}};
+        uint32_t px=ts_draw(st,1u|((lm?7u:6u)<<5),0,0,tc,1);
+        uint32_t want=0xff000000u|((x*60u+20u)<<16)|((y*60u+20u)<<8)|0x80u;
+        if(lm){
+            /* T1 *= scale * T0.r + offset: every channel, alpha included. */
+            float f=scale*(lum/255.0f)+offset;uint32_t w2=0;
+            for(int sh=0;sh<32;sh+=8){float ch=((want>>sh)&255)/255.0f*f;w2|=(uint32_t)(ch*255.0f+0.5f)<<sh;}
+            for(int sh=0;sh<32;sh+=8){int d=(int)((px>>sh)&255)-(int)((w2>>sh)&255);
+                if(d<-1||d>1){fprintf(stderr,"bump lum m%u: got %08X want %08X\n",m,px,w2);assert(0);}}
+        } else if(px!=want){fprintf(stderr,"bump m%u: got %08X want %08X (%u,%u)\n",m,px,want,x,y);assert(0);}
+    }
+    memset(&regs[0x1b68/4],0,24);
+    puts("PASS real GL BUMPENVMAP/_LUM: SET_TEXTURE_SET_BUMP_ENV_MAT/SCALE/OFFSET offsets and luminance match the D3D reference");
+}
+/* DOTPRODUCT + DOT_ST, dot mapping 3 (-1..1, xemu's sign3): T2 at
+ * (dot(tc1, N), dot(tc2, N)), N from stage 0's texel. */
+static void dot_mode_test(void)
+{
+    const uint32_t nva=0x2e3000,cva=0x2e4000;
+    const uint8_t nb[3]={0x40,0xC0,0x7F};                  /* r, g, b */
+    for(unsigned y=0;y<2;y++)for(unsigned x=0;x<2;x++)ts_put(nva,2,x,y,0xff000000u|((uint32_t)nb[0]<<16)|((uint32_t)nb[1]<<8)|nb[2]);
+    for(unsigned y=0;y<4;y++)for(unsigned x=0;x<4;x++)ts_put(cva,4,x,y,0xff000000u|((x*60u+20u)<<16)|((y*60u+20u)<<8)|0x11u);
+    const float tc1s[][3]={{.2f,.1f,.3f},{.9f,.3f,.1f},{.1f,-.4f,.2f}};
+    const float tc2s[][3]={{.5f,.2f,.4f},{.1f,.1f,.6f},{.3f,-.6f,.1f}};
+    TsStage st[4]={{nva,ts_fmt(1,1,0)},{0,0},{cva,ts_fmt(2,1,0)},{0,0}};
+    for(unsigned i=0;i<3;i++){
+        float n[3]={sign3(nb[0]),sign3(nb[1]),sign3(nb[2])};
+        float d1=tc1s[i][0]*n[0]+tc1s[i][1]*n[1]+tc1s[i][2]*n[2];
+        float d2=tc2s[i][0]*n[0]+tc2s[i][1]*n[1]+tc2s[i][2]*n[2];
+        unsigned x=(unsigned)(d1*4),y=(unsigned)(d2*4);
+        assert(d1>0&&d1<1&&d2>0&&d2<1);
+        float tc[4][4]={{.5f,.5f,0,1},{tc1s[i][0],tc1s[i][1],tc1s[i][2],1},{tc2s[i][0],tc2s[i][1],tc2s[i][2],1},{0}};
+        uint32_t px=ts_draw(st,1u|(17u<<5)|(9u<<10),0,0x033,tc,2);
+        uint32_t want=0xff000000u|((x*60u+20u)<<16)|((y*60u+20u)<<8)|0x11u;
+        if(px!=want){fprintf(stderr,"dot_st %u: got %08X want %08X (%.3f %.3f)\n",i,px,want,d1,d2);assert(0);}
+    }
+    /* The other chains compile, link and draw (strict mode aborts on a
+     * failure); stage 3 / stage 2 sample the cube from cube_mode_test.
+     * DOT_STR_CUBE with N = (0, 0, 1) mapped 0..1 reads direction
+     * (tc1.z, tc2.z, tc3.z) = (1, 0.3, -0.6): face 0 texel (1, 0). */
+    const uint32_t cube=0x2e0000;
+    for(unsigned y=0;y<2;y++)for(unsigned x=0;x<2;x++)ts_put(nva,2,x,y,0xff0000ffu);
+    const uint32_t chains[][2]={{1u|(17u<<5)|(17u<<10)|(14u<<15),1},{1u|(17u<<5)|(17u<<10)|(12u<<15),1},
+        {1u|(17u<<5)|(11u<<10)|(12u<<15),1},{1u|(17u<<5)|(17u<<10)|(18u<<15),1},
+        {1u|(17u<<5)|(17u<<10)|(13u<<15),0},{1u|(17u<<5)|(10u<<10),0},{2u,0}};
+    for(unsigned i=0;i<sizeof chains/sizeof chains[0];i++){
+        TsStage cs[4]={{nva,ts_fmt(1,1,0)},{0,0},{chains[i][0]==(1u|(17u<<5)|(11u<<10)|(12u<<15))?cube:cva,
+                       chains[i][0]==(1u|(17u<<5)|(11u<<10)|(12u<<15))?ts_fmt(1,2,1):ts_fmt(2,1,0)},
+                       {chains[i][1]?cube:cva,chains[i][1]?ts_fmt(1,2,1):ts_fmt(2,1,0)}};
+        float tc[4][4]={{.5f,.5f,0,1},{0,0,1,1},{0,0,.3f,1},{0,0,-.6f,1}};
+        uint32_t px=ts_draw(cs,chains[i][0],0,0,tc,3);
+        if(i==0&&px!=ts_texel(0,1,0)){fprintf(stderr,"dot_str_cube: got %08X want %08X\n",px,ts_texel(0,1,0));assert(0);}
+    }
+    puts("PASS real GL DOTPRODUCT + DOT_ST with SET_DOT_RGBMAPPING -1..1 matches the CPU reference;"
+         " DOT_STR_CUBE reads the reference texel; RFLCT_DIFF/SPEC/SPEC_CONST, STR_3D, ZW, PROJECT3D compile and draw");
+}
 static void render_target_feedback_test(void)
 {
     Nv2aSurface src=surface(8,8,32);uint32_t *c=color_ram(&src);
@@ -288,7 +437,7 @@ int main(int argc,char **argv)
         fflush(stdout);_Exit(0);
     }
     assert(ready());
-    clear_only_present_test();clear_depth_test();linear_color_formats_test();draw_sample_test();border_mip_test();render_target_feedback_test();wide_reset_test();cpu_only_present_test();flipped_present_test();
+    clear_only_present_test();clear_depth_test();linear_color_formats_test();draw_sample_test();border_mip_test();cube_mode_test();bump_mode_test();dot_mode_test();render_target_feedback_test();wide_reset_test();cpu_only_present_test();flipped_present_test();
     packed_cmp_draw_test();
     puts("PASS real GL production-path synthetic suite; gameplay/hardware parity UNVERIFIED");
     return 0;

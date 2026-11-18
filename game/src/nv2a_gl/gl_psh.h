@@ -26,6 +26,14 @@ extern int nv2a_shader_vk;
  * batch's transform path (2 = vertex program). */
 void nv2a_fog_params(const uint32_t *regs, uint32_t xform, float out[4]);
 
+/* MANHUNT_GL_TEXSHADER (default 1): the cube, bump-environment and
+ * dot-product texture modes on GL; 0 restores cube maps reading black and the
+ * rest sampling as plain 2D. nv2a_gl_texshader_on: -1 until read (tests set
+ * it). nv2a_gl_texshader_cube_mode: the modes that sample a samplerCube. */
+extern int nv2a_gl_texshader_on;
+int nv2a_gl_texshader(void);
+int nv2a_gl_texshader_cube_mode(uint32_t mode);
+
 /* Fragment shader source for `k`. Returns bytes written, -1 on overflow. */
 int nv2a_gl_psh_supported(const Nv2aPshKey *k);
 int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap);

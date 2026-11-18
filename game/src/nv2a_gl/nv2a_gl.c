@@ -1624,6 +1624,268 @@ static void rt_scale(uint32_t w, uint32_t h, uint32_t sw, uint32_t sh,
     if (h < lh) scale[1] *= (float)h / (float)lh;
 }
 
+/* ── Cube maps (gl_psh.c: texture modes 3, 11, 12, 14 and 18) ──────────
+ *
+ * Kept apart from the 2D texture cache: six faces of level 0, uploaded as one
+ * GL_TEXTURE_CUBE_MAP and bound to the unit's cube target. The program's
+ * samplerCube reads that target; the unit's 2D binding is left as it is.
+ * MANHUNT_GL_TEXSHADER=0: nothing here runs and cube stages bind as 2D. */
+
+/* Bytes one texel of a non-DXT format takes: tex_texel_bytes in
+ * nv2a_pb_exec.c, for the face stride. */
+static uint32_t cube_texel_bytes(uint32_t color)
+{
+    switch (color) {
+    case 0x00: case 0x01: case 0x0B: case 0x13: case 0x19: case 0x1F:
+        return 1;
+    case 0x02: case 0x03: case 0x04: case 0x05: case 0x10: case 0x11:
+    case 0x1C: case 0x1D:
+        return 2;
+    default:
+        return 4;
+    }
+}
+
+/* Bytes between faces: one face with all its mip levels (FORMAT's
+ * MIPMAP_LEVELS), rounded up to the NV2A's 128-byte face alignment --
+ * tex_face_stride in nv2a_pb_exec.c, after xemu's texture upload. */
+static uint32_t cube_face_stride(uint32_t format, uint32_t color, uint32_t n)
+{
+    uint32_t levels = (format >> 16) & 0xF, lv, total = 0;
+    uint32_t block = color == 0x0C ? 8u : (color == 0x0E || color == 0x0F) ? 16u : 0u;
+
+    if (!levels)
+        levels = 1;
+    for (lv = 0; lv < levels; lv++) {
+        uint32_t l = (n >> lv) ? (n >> lv) : 1;
+        total += block ? ((l + 3) / 4) * ((l + 3) / 4) * block : l * l * cube_texel_bytes(color);
+    }
+    return (total + 127u) & ~127u;
+}
+
+typedef struct {
+    GLuint   tex;
+    uint32_t va, color, size, stride, pal, hash, checked, used;
+    uint8_t *snap;                   /* RAM-publishing modes: exact compare */
+    size_t   snap_bytes;
+    uint32_t param_key, param_border;
+    int      param_valid;
+} GlCube;
+#define GL_MAX_CUBE 16
+static GlCube s_cube[GL_MAX_CUBE];
+
+/* Level 0 of one face, n x n, from guest RAM at va. 0 if it cannot decode. */
+static int cube_upload_face(GLenum target, uint32_t va, uint32_t color, uint32_t n)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    static int s3tc = -1;
+    Nv2aTexture nt;
+
+    if (s3tc < 0) {
+        const char *e = getenv("RECOMP_GL_DXT");
+        s3tc = !(e && *e == '0');
+    }
+    if (s3tc && (color == 0x0C || color == 0x0E || color == 0x0F)) {
+        GLenum fmt = color == 0x0C ? GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+                   : color == 0x0E ? GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
+                                   : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        uint32_t bytes = ((n + 3) / 4) * ((n + 3) / 4) * (color == 0x0C ? 8u : 16u);
+        while (glGetError() != GL_NO_ERROR) { }
+        glCompressedTexImage2D(target, 0, fmt, (GLsizei)n, (GLsizei)n, 0, (GLsizei)bytes, mem + va);
+        if (glGetError() == GL_NO_ERROR)
+            return 1;
+    }
+    if ((size_t)n * n > s_decode_cap) {
+        free(s_decode);
+        s_decode_cap = (size_t)n * n;
+        s_decode = (uint32_t *)malloc(s_decode_cap * 4);
+    }
+    if (!s_decode) {
+        s_decode_cap = 0;
+        return 0;
+    }
+    if (color == 0x06 || color == 0x07) {
+        const uint32_t *src = (const uint32_t *)(mem + va);
+        uint32_t x, y, fill = color == 0x07 ? 0xFF000000u : 0;
+        for (y = 0; y < n; y++)
+            for (x = 0; x < n; x++)
+                s_decode[(size_t)y * n + x] = src[swizzle_index(x, y, n, n)] | fill;
+    } else if (color == 0x0B) {
+        if (!decode_indexed(va, n, n, s_decode))
+            return 0;
+    } else {
+        memset(&nt, 0, sizeof nt);
+        nt.offset = va; nt.width = nt.height = n; nt.color = color;
+        nt.addr_u = nt.addr_v = 1;
+        if (!nv2a_backend_decode_texture(&nt, s_decode))
+            return 0;
+    }
+    glTexImage2D(target, 0, GL_RGBA8, (GLsizei)n, (GLsizei)n, 0, GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+    return 1;
+}
+
+/* The cube texture for six n x n faces at va, uploaded when new or changed
+ * (once a frame by hash in gpu mode, exact compare otherwise), bound to the
+ * active unit's cube target. */
+static GlCube *cube_get(uint32_t va, uint32_t format, uint32_t color, uint32_t n)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t stride = cube_face_stride(format, color, n), bytes = stride * 6, hash = 0, f;
+    uint32_t pal = color == 0x0B ? s_palette_va : 0, pal_bytes = pal ? 1024u : 0;
+    GlCube *c = NULL, *victim = NULL;
+    unsigned i;
+
+    if (!ram_span(va, bytes) || (pal && !ram_span(pal, pal_bytes)))
+        return NULL;
+    for (i = 0; i < GL_MAX_CUBE; i++) {
+        GlCube *e = &s_cube[i];
+        if (e->tex && e->va == va && e->color == color && e->size == n && e->stride == stride
+            && e->pal == pal) {
+            c = e;
+            break;
+        }
+        if (!victim || (victim->tex && (!e->tex || e->used < victim->used)))
+            victim = e;
+    }
+    if (gl_gpu()) {
+        if (c && c->checked == s_frame) {
+            c->used = s_frame;
+            glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+            return c;
+        }
+        hash = bytes_hash(va, bytes);
+        if (pal)
+            hash ^= bytes_hash(pal, pal_bytes) * 31u;
+        if (c && c->hash == hash) {
+            c->used = c->checked = s_frame;
+            glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+            return c;
+        }
+    } else if (c && c->snap && c->snap_bytes == (size_t)bytes + pal_bytes
+               && !memcmp(c->snap, mem + va, bytes)
+               && (!pal || !memcmp(c->snap + bytes, mem + pal, pal_bytes))) {
+        c->used = c->checked = s_frame;
+        glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+        return c;
+    }
+    if (!c) {
+        c = victim;
+        if (c->tex)
+            glDeleteTextures(1, &c->tex);
+        free(c->snap);
+        memset(c, 0, sizeof *c);
+        glGenTextures(1, &c->tex);
+        c->va = va; c->color = color; c->size = n; c->stride = stride; c->pal = pal;
+    }
+    c->hash = hash;
+    c->used = c->checked = s_frame;
+    if (!gl_gpu()) {
+        free(c->snap);
+        c->snap_bytes = (size_t)bytes + pal_bytes;
+        c->snap = (uint8_t *)malloc(c->snap_bytes);
+        if (c->snap) {
+            memcpy(c->snap, mem + va, bytes);
+            if (pal)
+                memcpy(c->snap + bytes, mem + pal, pal_bytes);
+        }
+    }
+    s_new_obj = 1;
+    glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    for (f = 0; f < 6; f++)
+        if (!cube_upload_face(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, va + f * stride, color, n)) {
+            /* Undecodable: magenta, every face the same size. */
+            uint32_t k, *px = (uint32_t *)malloc((size_t)n * n * 4);
+            if (!px)
+                gl_fail("cube map decode allocation failed");
+            for (k = 0; k < n * n; k++)
+                px[k] = 0xFFFF00FFu;
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA8, (GLsizei)n, (GLsizei)n, 0,
+                         GL_BGRA, GL_UNSIGNED_BYTE, px);
+            free(px);
+        }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 0);
+    c->param_valid = 0;
+    {
+        static int logged;
+        if (logged < 16) {
+            logged++;
+            fprintf(stderr, "  [GL] cube map upload frame %u format 0x%02X %ux%u face stride %u at 0x%08X\n",
+                    (unsigned)s_frame, (unsigned)color, (unsigned)n, (unsigned)n, (unsigned)stride,
+                    (unsigned)va);
+        }
+    }
+    gl_check("cube map upload");
+    gl_step_done("texture upload");
+    return c;
+}
+
+/* bind_stage's hook: when stage i's texture mode samples a cube (gl_psh.c),
+ * bind its cube texture -- or none, so it reads black, when the texture is
+ * not a cube map -- with its sampler state, and return 1. 0: not a cube
+ * mode, bind_stage carries on as before. */
+static int cube_bind_stage(const uint32_t *regs, int i, uint32_t format, uint32_t va,
+                           uint32_t w, uint32_t h)
+{
+    uint32_t base = (0x1B00u + (uint32_t)i * 0x40u) / 4;
+    uint32_t mode = (regs[0x1E70 / 4] >> (5 * i)) & 0x1F, color = (format >> 8) & 0xFF;
+    GlCube *c = NULL;
+
+    if (!nv2a_gl_texshader() || !nv2a_gl_texshader_cube_mode(mode))
+        return 0;
+    if ((format & 4u) && w == h && tex_size_from_format(color)) {
+        texture_surface_sync(va, (size_t)cube_face_stride(format, color, w) * 6);
+        if (color == 0x0B)
+            texture_surface_sync(s_palette_va, 1024);
+        active_unit(i);                      /* a sync may have reset the unit */
+        c = cube_get(va, format, color, w);
+    } else {
+        static int logged;
+        if (logged < 8) {
+            logged++;
+            fprintf(stderr, "  [GL] cube texture mode %u on stage %d with a non-cube texture"
+                    " (format 0x%08X): reads black\n", (unsigned)mode, i, (unsigned)format);
+        }
+    }
+    if (!c) {
+        active_unit(i);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+        return 1;
+    }
+    {
+        uint32_t addr = regs[base + 2], filter = regs[base + 5];
+        int border_source = (format >> 3) & 1;
+        GLint ws = stage_wrap(addr & 0xF, border_source);
+        GLint wt = stage_wrap((addr >> 8) & 0xF, border_source);
+        GLint wr = stage_wrap((addr >> 16) & 0xF, border_source);
+        GLint mag = ((filter >> 24) & 0xF) == 1 ? GL_NEAREST : GL_LINEAR;
+        GLint min = min_filter((filter >> 16) & 0xFF, 1);
+        int use_border = gl_border() && (ws == GL_CLAMP_TO_BORDER || wt == GL_CLAMP_TO_BORDER
+                                         || wr == GL_CLAMP_TO_BORDER);
+        uint32_t border = use_border ? regs[base + 9] : 0;
+        uint32_t key = (addr & 0xF0F0F) | ((uint32_t)border_source << 4) | ((uint32_t)use_border << 5)
+                     | ((uint32_t)(mag == GL_NEAREST) << 24) | (min_filter_code(min) << 25);
+        if (!c->param_valid || c->param_key != key || c->param_border != border) {
+            c->param_valid = 1;
+            c->param_key = key;
+            c->param_border = border;
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, ws);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, wt);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, wr);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, mag);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, min);
+            if (use_border) {
+                const GLfloat bc[4] = {
+                    (float)((border >> 16) & 0xFF) / 255.0f, (float)((border >> 8) & 0xFF) / 255.0f,
+                    (float)(border & 0xFF) / 255.0f, (float)(border >> 24) / 255.0f };
+                glTexParameterfv(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BORDER_COLOR, bc);
+            }
+        }
+    }
+    return 1;
+}
+
 /* Bind stage `i` from the method shadow; returns the texcoord scale. */
 static void bind_stage(const uint32_t *regs, int i, float scale[2])
 {
@@ -1664,6 +1926,8 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
     }
     s_palette_reg = regs[base + 8];          /* SET_TEXTURE_PALETTE */
     s_palette_va = s_batch->pal_va[i];
+    if (cube_bind_stage(regs, i, format, va, w, h))
+        return;                              /* a cube-sampling texture mode */
     if (gl_gpu() && (rt = surf_find(va)) != NULL) {
         tex = rt->tex;
         /* The image the title samples is the logical one; the FBO holds it
@@ -1858,6 +2122,9 @@ typedef struct {
         float c0[8][4], c1[8][4], fog[4], fc[2][4], aref, fogp[4], wide[2];
         int   xform, afunc;
     } uni;
+    GLint      u_bump, u_eye;   /* texture-shader registers (texshader_uniforms) */
+    int        ts_valid;
+    float      ts[9][4];
 } GlProg;
 
 #define GL_MAX_PROG 1024
@@ -2255,6 +2522,8 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->u_fc1 = glGetUniformLocation(p->prog, "u_fc1");
     p->u_afunc = glGetUniformLocation(p->prog, "u_alpha_func");
     p->u_aref = glGetUniformLocation(p->prog, "u_alpha_ref");
+    p->u_bump = glGetUniformLocation(p->prog, "u_bump");
+    p->u_eye = glGetUniformLocation(p->prog, "u_eye");
     glUseProgram(p->prog);
     s_cur_prog = p->prog;
     for (i = 0; i < 4; i++) {
@@ -2633,6 +2902,48 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
     }
 }
 
+/* Bump-environment registers (SET_TEXTURE_SET_BUMP_ENV_MAT / _SCALE /
+ * _OFFSET, stages 1-3) and SET_EYE_VECTOR for programs that read them
+ * (gl_psh.c's u_bump and u_eye). */
+static void texshader_uniforms(GlProg *p, const uint32_t *r)
+{
+    float v[9][4];
+    int i;
+
+    if (p->u_bump < 0 && p->u_eye < 0)
+        return;
+    memset(v, 0, sizeof v);
+    for (i = 1; i < 4; i++) {
+        uint32_t b = (0x1B28u + (uint32_t)i * 0x40u) / 4;
+        memcpy(v[2 * i], &r[b], 16);                 /* matrix 00 01 10 11 */
+        memcpy(&v[2 * i + 1][0], &r[b + 4], 4);      /* 0x1B38 scale */
+        memcpy(&v[2 * i + 1][1], &r[b + 5], 4);      /* 0x1B3C offset */
+    }
+    memcpy(v[8], &r[0x181C / 4], 12);                /* SET_EYE_VECTOR */
+    if (p->ts_valid && !memcmp(v, p->ts, sizeof v))
+        return;
+    if (p->u_bump >= 0) glUniform4fv(p->u_bump, 8, v[0]);
+    if (p->u_eye >= 0) glUniform4fv(p->u_eye, 1, v[8]);
+    memcpy(p->ts, v, sizeof v);
+    p->ts_valid = 1;
+}
+
+/* SET_DOT_RGBMAPPING into the key's other_input [11:0] (xemu's SHADERCTL)
+ * when a dot-product mode reads it; other programs keep their key. */
+static void texshader_key(const uint32_t *r, Nv2aPshKey *k)
+{
+    int t;
+    if (!nv2a_gl_texshader())
+        return;
+    for (t = 0; t < 4; t++) {
+        uint32_t m = (k->shader_program >> (5 * t)) & 0x1F;
+        if ((m >= 9 && m <= 14) || m == 17 || m == 18) {
+            k->other_input |= r[0x1E74 / 4] & 0xFFFu;
+            return;
+        }
+    }
+}
+
 static void psh_key(const uint32_t *r, Nv2aPshKey *k)
 {
     int i;
@@ -2649,6 +2960,7 @@ static void psh_key(const uint32_t *r, Nv2aPshKey *k)
     k->final1 = r[0x28C / 4];
     k->shader_program = r[0x1E70 / 4];
     k->other_input = r[0x1E78 / 4];
+    texshader_key(r, k);
 }
 
 /* NV097 primitive -> GL, rewriting the ones core GL lacks. */
@@ -3823,6 +4135,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
             p->uni = u;
             p->uni_valid = 1;
         }
+        texshader_uniforms(p, r);
     }
 
     PF_STAGE(uniform_ns);

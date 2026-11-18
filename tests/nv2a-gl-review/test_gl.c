@@ -264,13 +264,48 @@ static void shader_modes_test(void)
 {
     Nv2aPshKey k={0};char buf[65536];
     nv2a_shader_vk=0;
+    /* MANHUNT_GL_TEXSHADER=0: the old set. */
+    nv2a_gl_texshader_on=0;
     for(unsigned stage=0;stage<4;stage++)for(unsigned mode=0;mode<32;mode++) {
         k.shader_program=mode<<(stage*5);
         int supported=mode==0||mode==1||mode==4||mode==5||((mode==15||mode==16)&&stage>0);
         int n=nv2a_gl_psh(&k,buf,sizeof buf);
         assert((n>=0)==supported);
+        if(mode==3&&n>=0)assert(!strstr(buf,"samplerCube"));
     }
-    puts("PASS all GL texture modes: implemented modes emit, other modes reject");
+    /* On: PROJECT3D, CUBEMAP anywhere; bump env from stage 1; the dot
+     * chains with their DOTPRODUCT stages; BRDF and 19+ still rejected. */
+    nv2a_gl_texshader_on=1;
+    for(unsigned stage=0;stage<4;stage++)for(unsigned mode=0;mode<32;mode++) {
+        k.shader_program=mode<<(stage*5);
+        int supported=mode==0||mode==1||mode==2||mode==3||mode==4||mode==5||
+            ((mode==15||mode==16||mode==6||mode==7)&&stage>0)||(mode==17&&(stage==1||stage==2));
+        int n=nv2a_gl_psh(&k,buf,sizeof buf);
+        assert((n>=0)==supported);
+        if(mode==3&&n>=0){char want[32];snprintf(want,sizeof want,"uniform samplerCube t%u;",stage);assert(strstr(buf,want));}
+        if((mode==6||mode==7)&&n>=0)assert(strstr(buf,"u_bump"));
+    }
+    const uint32_t chains[]={
+        (1u)|(17u<<5)|(9u<<10),                     /* DOT_ST */
+        (1u)|(17u<<5)|(10u<<10),                    /* DOT_ZW */
+        (1u)|(17u<<5)|(17u<<10)|(13u<<15),          /* DOT_STR_3D */
+        (1u)|(17u<<5)|(17u<<10)|(14u<<15),          /* DOT_STR_CUBE */
+        (1u)|(17u<<5)|(17u<<10)|(12u<<15),          /* DOT_RFLCT_SPEC */
+        (1u)|(17u<<5)|(11u<<10)|(12u<<15),          /* DOT_RFLCT_DIFF + SPEC */
+        (1u)|(17u<<5)|(17u<<10)|(18u<<15),          /* DOT_RFLCT_SPEC_CONST */
+    };
+    for(unsigned c=0;c<sizeof chains/sizeof chains[0];c++){
+        k.shader_program=chains[c];k.other_input=0x333;
+        assert(nv2a_gl_psh(&k,buf,sizeof buf)>=0);
+        assert(strstr(buf,"nv2a_dotmap(T0, 3)"));
+    }
+    k.shader_program=(1u)|(1u<<5)|(9u<<10);         /* DOT_ST without DOTPRODUCT */
+    assert(!nv2a_gl_psh_supported(&k));
+    k.shader_program=(1u)|(17u<<5)|(8u<<10);         /* BRDF */
+    assert(!nv2a_gl_psh_supported(&k));
+    k.shader_program=0;k.other_input=0;
+    nv2a_gl_texshader_on=-1;
+    puts("PASS all GL texture modes: implemented modes emit, other modes reject, MANHUNT_GL_TEXSHADER=0 keeps the old set");
 }
 static void widescreen_classification_test(void)
 {
