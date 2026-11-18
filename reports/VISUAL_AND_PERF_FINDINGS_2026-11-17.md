@@ -190,3 +190,33 @@ Three scripted runs of the same NRO (`54fc058f…`, commit eb187e0), same pad sc
 - **Mipmaps (item 5): no effect in Manhunt. An earlier version of this line was wrong.** It said mipmaps made the scene 16–24% darker, from frame 3600 of each run. Those frames show different places, because the scripted runs drift. Over frames 2700–9000 the mean luminance is 7.74 with mipmaps, 7.35 without and 7.67 with all fixes off. All 5,428 textures in `levels/**` store one level, and older console records ask for `levels=1` only, so the mip path uploads level 0 and filters `GL_LINEAR` as before. Mipmaps stay off by default (54adcb6). They cannot fix distant shimmer, because the data has no lower levels. `MANHUNT_GL_MIP_TRACE=1` logs the level count and per-level luminance of each upload (9cc0f67).
 - **Items 1, 2, 4, 8, 12, 14:** no visible harm in these runs. Wall see-through (item 1) is not judged: it needs a camera placed against a wall by hand.
 - The dark player remains with every fix on and with every fix off, with the game's own ambient (`MANHUNT_AMBIENT_LIGHT=-1`). Item 3 still needs a comparison against the default ambient.
+
+## Console A/B of the second batch — 2026-11-18
+
+NRO `a0aeffbd…` (commit ba2a70b). It adds items 6, 7, 9, 11, 13 and P6–P8, and keeps the first batch. Same scripted run as above, sent with nxlink. In the "off" run every new path from both batches is switched off. Clocks: CPU 1020, GPU 307, EMC 1331 MHz. Logs and frames: `game/build/hw-test/2026-11-18-ab2-{on,off}/`.
+
+The two runs are compared on whole-run averages, not single frames, because the scripted path drifts.
+
+| | All on | All off |
+|---|---|---|
+| Median FPS (samples over 20k vertices) | 64.5 (n 96) | 63.0 (n 100) |
+| Draws / kverts per frame | 366 / 38.4 | 341 / 36.5 |
+| GL draw µs per draw | 18.0 | 17.5 |
+| APU voice processing | 361 ms/s | 424 ms/s |
+| CPU guest / gl / apu thread | 63% / 42% / 41% | 62% / 39% / 47% |
+| Sum of three cores | 187% | 190% |
+| Underruns | 0 | 0 |
+| Mean frame luminance (frames 2700+) | 8.59 | 8.10 |
+
+- **P6:** the ack loop makes 110–560 passes per second, against about 5,000 before.
+- **P7:** about 284 draws per frame go through the direct ring, with no full fallbacks.
+- **P2–P5:** voice processing is 15% lower in this pair.
+- **Frame rate:** 2% higher while drawing 7% more draws. That is within noise for one pair of runs, and shows no regression.
+- **Item 9:** no `[MH-GL] texture modes` line was printed, so in this run Manhunt used no cube, bump-env or dot-product mode.
+- **Visual:**
+  - The screenshots show no broken geometry or texturing.
+  - The camcorder overlay ("REC", "TCR") in the intro sometimes looks smeared. It does so in both runs, and is likely the game's VHS effect.
+  - In `abon09000` the moon has a straight cut on its right and bottom edges. A dark building in front of it is likely, but not confirmed.
+- **Not judged:** wall see-through (item 1), HUD grouping in a pause menu (item 11b) and the dark player. They need a hand-played check.
+
+The card now holds this NRO at `/switch/manhunt1_nx/manhunt.nro`. The previous NRO is kept as `manhunt.nro.prev`.
