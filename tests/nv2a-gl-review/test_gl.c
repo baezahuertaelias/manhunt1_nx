@@ -134,6 +134,84 @@ static void palette_test(void)
     assert(uploads>before&&image[t].pixels[0]==0x91);
     puts("PASS palette change in same frame reaches decoded texture");
 }
+/* Mip chain: level sizes and offsets as xemu lays them out, every level
+ * uploaded from its own offset, change detection over the whole chain. */
+static struct { int level; unsigned w,h,size,off; uint32_t px; } mip_rec[16];
+static unsigned mip_n, mip_base;
+static void mip_upload(GLenum t,GLint level,GLint fmt,GLsizei w,GLsizei h,GLint border,GLenum ext,GLenum type,const void *pixels)
+{
+    (void)t;(void)fmt;(void)border;(void)ext;(void)type;
+    assert(mip_n<16);mip_rec[mip_n].level=level;mip_rec[mip_n].w=w;mip_rec[mip_n].h=h;
+    mip_rec[mip_n].px=pixels?*(const uint32_t*)pixels:0;mip_n++;
+}
+static void mip_cupload(GLenum t,GLint level,GLenum fmt,GLsizei w,GLsizei h,GLint border,GLsizei n,const void *d)
+{
+    (void)t;(void)fmt;(void)border;
+    assert(mip_n<16);mip_rec[mip_n].level=level;mip_rec[mip_n].w=w;mip_rec[mip_n].h=h;
+    mip_rec[mip_n].size=n;mip_rec[mip_n].off=(unsigned)((const uint8_t*)d-guest)-mip_base;mip_n++;
+}
+static GLint mip_max_level=-1;
+static void mip_param(GLenum t,GLenum n,GLint v) {(void)t;if(n==GL_TEXTURE_MAX_LEVEL)mip_max_level=v;}
+static void mip_test(void)
+{
+    const uint32_t f2d=2u<<4;
+    /* Level counts: FORMAT bits 16-19, capped at the 1x1 level; cube maps,
+     * linear images and other dimensionalities keep level 0 only. */
+    assert(tex_mip_levels(f2d|(0x06u<<8)|(3u<<16)|(2u<<20)|(2u<<24),4,4)==3);
+    assert(tex_mip_levels(f2d|(0x06u<<8)|(9u<<16)|(2u<<20)|(2u<<24),4,4)==3);
+    assert(tex_mip_levels(f2d|(0x0Cu<<8)|(4u<<16),8,2)==4);
+    assert(tex_mip_levels(f2d|(0x06u<<8)|(1u<<16),4,4)==1);
+    assert(tex_mip_levels(f2d|4u|(0x06u<<8)|(3u<<16),4,4)==1);       /* cube */
+    assert(tex_mip_levels((3u<<4)|(0x06u<<8)|(3u<<16),4,4)==1);      /* 3D */
+    assert(tex_mip_levels(f2d|(0x12u<<8)|(3u<<16),4,4)==1);          /* linear */
+    assert(tex_mip_levels(f2d|(0x3Au<<8)|(3u<<16),4,4)==1);          /* size unknown */
+    /* Sizes: DXT levels are whole 4x4 blocks; others halve to 1x1. */
+    assert(tex_level_bytes(0x0C,8,8)==32&&tex_level_bytes(0x0C,2,2)==8&&tex_level_bytes(0x0C,1,1)==8);
+    assert(tex_level_bytes(0x0E,2,1)==16&&tex_level_bytes(0x05,4,2)==16&&tex_level_bytes(0x0B,2,2)==4);
+    assert(tex_chain_bytes(0x0C,8,8,0,4)==32+8+8+8);
+    assert(tex_chain_bytes(0x06,4,4,0,3)==64+16+4);
+    assert(tex_chain_bytes(0x06,8,2,0,4)==64+16+8+4);    /* 8x2 4x1 2x1 1x1 */
+    assert(tex_chain_bytes(0x06,4,4,0,1)==tex_bytes(0x06,4,4,0));
+    /* Upload: a 4x4 A8R8G8B8 with three levels, one colour per level. */
+    {
+        const unsigned va=0x1d0000;uint32_t *p=(uint32_t*)(guest+va);GLuint t;
+        for(unsigned i=0;i<16;i++)p[i]=0xff000011u;
+        for(unsigned i=0;i<4;i++)p[16+i]=0xff000022u;
+        p[20]=0xff000033u;
+        mip_n=0;p_glTexImage2D=mip_upload;p_glTexParameteri=mip_param;mip_max_level=-1;
+        t=tex_get_levels(va,0x06,4,4,0,3);
+        assert(mip_n==3&&s_tex_cur&&s_tex_cur->tex==t&&s_tex_cur->levels_gl==3&&mip_max_level==2);
+        assert(mip_rec[0].level==0&&mip_rec[0].w==4&&mip_rec[0].px==0xff000011u);
+        assert(mip_rec[1].level==1&&mip_rec[1].w==2&&mip_rec[1].h==2&&mip_rec[1].px==0xff000022u);
+        assert(mip_rec[2].level==2&&mip_rec[2].w==1&&mip_rec[2].h==1&&mip_rec[2].px==0xff000033u);
+        /* A change in the last level alone re-uploads (the chain is content). */
+        mip_n=0;assert(tex_get_levels(va,0x06,4,4,0,3)==t&&mip_n==0);
+        p[20]=0xff000044u;assert(tex_get_levels(va,0x06,4,4,0,3)==t&&mip_n==3&&mip_rec[2].px==0xff000044u);
+        /* The same address with level 0 only is a texture of its own. */
+        mip_n=0;assert(tex_get_levels(va,0x06,4,4,0,1)!=t&&mip_n==1&&s_tex_cur->levels_gl==1);
+    }
+    /* DXT1 8x8, four levels: compressed from offsets 0, 32, 40, 48. */
+    {
+        const unsigned va=0x1e0000;GLuint t;
+        memset(guest+va,0x5a,56);
+        mip_n=0;mip_base=va;p_glCompressedTexImage2D=mip_cupload;mip_max_level=-1;
+        t=tex_get_levels(va,0x0C,8,8,0,4);(void)t;
+        assert(mip_n==4&&s_tex_cur->levels_gl==4&&mip_max_level==3);
+        assert(mip_rec[0].size==32&&mip_rec[0].off==0);
+        assert(mip_rec[1].level==1&&mip_rec[1].w==4&&mip_rec[1].size==8&&mip_rec[1].off==32);
+        assert(mip_rec[2].level==2&&mip_rec[2].w==2&&mip_rec[2].size==8&&mip_rec[2].off==40);
+        assert(mip_rec[3].level==3&&mip_rec[3].w==1&&mip_rec[3].size==8&&mip_rec[3].off==48);
+    }
+    p_glTexImage2D=upload;p_glTexParameteri=fake_glTexParameteri;p_glCompressedTexImage2D=fake_glCompressedTexImage2D;
+    /* Filters: modes 3-6 take mipmaps only with levels to choose from. */
+    assert(min_filter(1,3)==GL_NEAREST&&min_filter(2,3)==GL_LINEAR);
+    assert(min_filter(3,3)==GL_NEAREST_MIPMAP_NEAREST&&min_filter(4,3)==GL_LINEAR_MIPMAP_NEAREST);
+    assert(min_filter(5,3)==GL_NEAREST_MIPMAP_LINEAR&&min_filter(6,3)==GL_LINEAR_MIPMAP_LINEAR);
+    assert(min_filter(3,1)==GL_NEAREST&&min_filter(6,1)==GL_LINEAR&&min_filter(7,3)==GL_LINEAR);
+    /* Border source: mode 4 clamps to the edge unless FORMAT bit 3 is set. */
+    assert(stage_wrap(4,1)==GL_CLAMP_TO_BORDER&&stage_wrap(4,0)==GL_CLAMP_TO_EDGE&&stage_wrap(1,0)==GL_REPEAT);
+    puts("PASS mip chain levels, sizes, offsets, uploads, chain change detection, filters and border source");
+}
 static void shader_modes_test(void)
 {
     Nv2aPshKey k={0};char buf[65536];
@@ -190,7 +268,10 @@ static void widescreen_classification_test(void)
      * x 498..592 in 640 coordinates must still anchor right. */
     {Nv2aRawBatch ba=b;GlSurf sa=s;sa.w=1280;sa.h=960;ba.aa_sx=ba.aa_sy=2;
      attrs[0]=498;attrs[64]=592;wide_2d(&ba,&sa,hud,out);assert(out[1]==1280);
-     attrs[0]=49;attrs[64]=164;wide_2d(&ba,&sa,hud,out);assert(out[1]==0);}
+     attrs[0]=49;attrs[64]=164;wide_2d(&ba,&sa,hud,out);assert(out[1]==0);
+     /* A full-screen 0..640 draw (fade, grain) is left alone with AA too. */
+     attrs[0]=0;attrs[64]=640;wide_2d(&ba,&sa,hud,out);assert(out[0]==0&&out[1]==0);
+     attrs[0]=0;attrs[64]=600;wide_2d(&ba,&sa,hud,out);assert(out[0]==.75f);}
     /* Not a level frame (menu, movie): the centred 4:3 block, as before. */
     s_wide_level=0;
     attrs[0]=48;attrs[64]=165;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==320);
@@ -391,7 +472,7 @@ int main(int argc,char **argv)
     setenv("RECOMP_PROG_CACHE","0",1);
     if(argc>1&&!strcmp(argv[1],"gpu")){setenv("MANHUNT_GL_SYNC","gpu",1);init_fake();gpu_mode_test();return 0;}
     if(argc>1){setenv("MANHUNT_GL_SYNC","fenced",1);init_fake();fenced_ownership_test();return 0;}
-    init_fake();cache_test();palette_test();shader_modes_test();
+    init_fake();cache_test();palette_test();mip_test();shader_modes_test();
     widescreen_classification_test();
     surface_sync_test();clear_pitch_test();
     expect_success(queued_completion);

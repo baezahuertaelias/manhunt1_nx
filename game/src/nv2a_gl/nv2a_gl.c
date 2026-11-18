@@ -337,7 +337,7 @@ static void pf_begin_query(GLenum t, GLuint q) { s_gl_change++; p_glBeginQuery(t
 static GLuint        s_cur_prog;         /* what glUseProgram last got */
 static void state_dirty(void);
 /* Last sampler state set on a GL texture (bind_stage). */
-typedef struct { GLuint id; uint32_t key; } TexParam;
+typedef struct { GLuint id; uint32_t key, border, lod; } TexParam;
 #define TEX_PARAM_SLOTS 4096
 static TexParam s_tex_param[TEX_PARAM_SLOTS];
 static void tex_param_forget(GLuint id)
@@ -798,6 +798,8 @@ typedef struct {
     uint8_t *source;
     size_t source_bytes;
     uint32_t palette_word;
+    uint32_t levels;            /* mip levels asked for (part of the identity) */
+    uint32_t levels_gl;         /* levels the GL texture holds (1..levels) */
 } GlTex;
 
 #define GL_MAX_TEX 1024
@@ -928,6 +930,87 @@ static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch
     return (uint32_t)n;
 }
 
+/* Mipmaps. The NV2A keeps a swizzled or DXT texture's levels one after
+ * another from the texture offset, each level swizzled on its own and half
+ * the size of the one before, down to 1 texel (a DXT level is at least one
+ * 4x4 block): xemu's texture upload, and tex_face_stride in nv2a_pb_exec.c.
+ * Linear images have no levels. Only level 0 used to be uploaded, so distant
+ * floors and walls shimmered. MANHUNT_GL_MIPMAPS=0 restores level 0 only. */
+static int gl_mipmaps(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_MIPMAPS");
+        on = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "  [GL] mipmaps: %s (MANHUNT_GL_MIPMAPS)\n", on ? "on" : "off");
+    }
+    return on;
+}
+
+/* Bytes per texel of the swizzled formats whose levels are uploaded; 0 for
+ * the rest, which keep level 0 only. */
+static uint32_t mip_texel_bytes(uint32_t color)
+{
+    switch (color) {
+    case 0x00: case 0x01: case 0x0B: case 0x19: return 1;
+    case 0x02: case 0x03: case 0x04: case 0x05: return 2;
+    case 0x06: case 0x07: return 4;
+    default: return 0;
+    }
+}
+
+static uint32_t dxt_block_bytes(uint32_t color)
+{
+    return color == 0x0C ? 8u : (color == 0x0E || color == 0x0F) ? 16u : 0u;
+}
+
+/* Size of one level, w and h already at least 1. */
+static uint32_t tex_level_bytes(uint32_t color, uint32_t w, uint32_t h)
+{
+    uint32_t bb = dxt_block_bytes(color);
+    if (bb)
+        return ((w + 3) / 4) * ((h + 3) / 4) * bb;
+    return w * h * mip_texel_bytes(color);
+}
+
+static uint32_t mip_dim(uint32_t d, uint32_t level)
+{
+    d >>= level;
+    return d ? d : 1;
+}
+
+/* Levels to upload for a stage's FORMAT word: MIPMAP_LEVELS (bits 16-19) for
+ * a 2D, non-cube, swizzled or DXT texture of a format with a known texel
+ * size, no more than the levels down to 1x1 (xemu does the same). 1 for
+ * everything else, and when switched off. */
+static uint32_t tex_mip_levels(uint32_t format, uint32_t w, uint32_t h)
+{
+    uint32_t color = (format >> 8) & 0xFF, levels = (format >> 16) & 0xF, top = 1;
+
+    if (levels <= 1 || (format & 4u) || ((format >> 4) & 0xF) != 2
+        || !tex_size_from_format(color)
+        || (!dxt_block_bytes(color) && !mip_texel_bytes(color)) || !gl_mipmaps())
+        return 1;
+    while ((w >> top) || (h >> top))
+        top++;                              /* log2(max(w, h)) + 1 */
+    return levels < top ? levels : top;
+}
+
+/* Guest bytes of a texture with `levels` levels: what change detection and
+ * surface syncs cover. Never less than the level-0 span tex_bytes gives. */
+static uint32_t tex_chain_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch,
+                                uint32_t levels)
+{
+    uint32_t b = tex_bytes(color, w, h, pitch), l;
+    uint64_t chain = 0;
+
+    if (levels <= 1)
+        return b;
+    for (l = 0; l < levels; l++)
+        chain += tex_level_bytes(color, mip_dim(w, l), mip_dim(h, l));
+    return chain > b ? (uint32_t)chain : b;
+}
+
 /* Xbox swizzle: texel (u, v) of a power-of-two image sits at the index made
  * by interleaving the coordinate bits, u in the even positions and v in the
  * odd ones, until the smaller dimension runs out; the larger one's remaining
@@ -1036,12 +1119,64 @@ static void tex_account(GlTex *t, uint32_t bytes)
     }
 }
 
-static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
-                      uint32_t pitch)
+/* Levels 1.. of t once level 0 is up and t's texture is bound. dxt: the
+ * compressed GL format, 0 for a decoded upload (nt0 is level 0's decoder
+ * request). An undecodable or refused level ends the chain there; the
+ * texture's GL_TEXTURE_MAX_LEVEL is set to the last level it holds. Adds
+ * the GPU bytes uploaded to *bytes and returns the levels held. */
+static uint32_t tex_upload_mips(const GlTex *t, GLenum dxt, const Nv2aTexture *nt0,
+                                uint32_t *bytes)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t l, off = tex_level_bytes(t->color, t->w, t->h);
+
+    if (t->levels <= 1)
+        return 1;
+    for (l = 1; l < t->levels; l++) {
+        uint32_t lw = mip_dim(t->w, l), lh = mip_dim(t->h, l), va = t->va + off;
+        uint32_t n = tex_level_bytes(t->color, lw, lh);
+        if (dxt) {
+            while (glGetError() != GL_NO_ERROR) { }
+            glCompressedTexImage2D(GL_TEXTURE_2D, (GLint)l, dxt, (GLsizei)lw, (GLsizei)lh, 0,
+                                   (GLsizei)n, mem + va);
+            if (glGetError() != GL_NO_ERROR)
+                break;
+            *bytes += n;
+        } else {
+            if (!s_decode)
+                break;
+            if (t->color == 0x06 || t->color == 0x07) {
+                const uint32_t *src = (const uint32_t *)(mem + va);
+                uint32_t x, y, fill = t->color == 0x07 ? 0xFF000000u : 0;
+                for (y = 0; y < lh; y++)
+                    for (x = 0; x < lw; x++)
+                        s_decode[(size_t)y * lw + x] = src[swizzle_index(x, y, lw, lh)] | fill;
+            } else {
+                Nv2aTexture nt = *nt0;
+                nt.offset = va; nt.width = lw; nt.height = lh;
+                if (!(t->color == 0x0B ? decode_indexed(va, lw, lh, s_decode)
+                                       : nv2a_backend_decode_texture(&nt, s_decode)))
+                    break;
+            }
+            glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, (GLsizei)lw, (GLsizei)lh, 0,
+                         GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+            *bytes += lw * lh * 4;
+        }
+        off += n;
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)(l - 1));
+    return l;
+}
+
+/* The texture a stage last got from tex_get_levels, for its level count. */
+static const GlTex *s_tex_cur;
+
+static GLuint tex_get_levels(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+                             uint32_t pitch, uint32_t levels)
 {
     GlTex *t = NULL, *victim = NULL;
     uint32_t hash = 0;
-    uint32_t i, bytes = tex_bytes(color, w, h, pitch);
+    uint32_t i, bytes = tex_chain_bytes(color, w, h, pitch, levels);
     uint32_t pal_bytes = color == 0x0B ? (256u >> ((s_palette_reg >> 2) & 3u)) * 4u : 0;
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     Nv2aTexture nt;
@@ -1066,11 +1201,12 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
         GlTex *c = &s_tex[i - 1];
         if (c->tex && c->va == va && c->color == color && c->w == w && c->h == h
-            && c->pal == pal) {
+            && c->pal == pal && c->levels == levels) {
             t = c;
             break;
         }
     }
+    s_tex_cur = t;
     if (!t)                                  /* a new texture: find a slot */
         for (i = 0; i < GL_MAX_TEX; i++) {
             GlTex *c = &s_tex[i];
@@ -1110,6 +1246,7 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         free(t->source);
         memset(t, 0, sizeof *t);
         t->va = va; t->color = color; t->w = w; t->h = h; t->pal = pal;
+        t->levels = levels; t->levels_gl = 1;
         tex_index_add(t);
         glGenTextures(1, &t->tex);
         tex_param_forget(t->tex);
@@ -1132,6 +1269,8 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch;
     t->hash = hash;
     t->used = t->checked = s_frame;
+    t->levels_gl = 1;
+    s_tex_cur = t;
     if (!gl_gpu()) {
         free(t->source);
         t->source_bytes = (size_t)bytes + pal_bytes;
@@ -1190,6 +1329,7 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
             glCompressedTexImage2D(GL_TEXTURE_2D, 0, fmt, (GLsizei)w, (GLsizei)h, 0,
                                    (GLsizei)size, (const uint8_t *)xbox_GetMemoryOffset() + va);
             if (glGetError() == GL_NO_ERROR) {
+                t->levels_gl = tex_upload_mips(t, fmt, NULL, &size);
                 tex_account(t, size);
                 gl_step_done("texture upload");
                 return t->tex;
@@ -1239,13 +1379,17 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
                 s_decode[(size_t)y * w + x] = src[swizzle_index(x, y, w, h)] | fill;
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
-        tex_account(t, w * h * 4);
+        uint32_t up = w * h * 4;
+        t->levels_gl = tex_upload_mips(t, 0, &nt, &up);
+        tex_account(t, up);
         gl_step_done("texture upload");
     } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)
                                     : nv2a_backend_decode_texture(&nt, s_decode))) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
-        tex_account(t, w * h * 4);
+        uint32_t up = w * h * 4;
+        t->levels_gl = tex_upload_mips(t, 0, &nt, &up);
+        tex_account(t, up);
         gl_step_done("texture upload");
     } else if (gl_gpu()) {
         static const uint32_t magenta = 0xFFFF00FFu;
@@ -1262,6 +1406,12 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     return t->tex;
 }
 
+/* Level 0 only (render targets' source images, the host tests). */
+static inline GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, uint32_t pitch)
+{
+    return tex_get_levels(va, color, w, h, pitch, 1);
+}
+
 static GLint wrap_mode(uint32_t m)
 {
     switch (m) {
@@ -1270,6 +1420,62 @@ static GLint wrap_mode(uint32_t m)
     case 4:  return GL_CLAMP_TO_BORDER;
     case 5:  return GL_CLAMP_TO_EDGE;
     default: return GL_REPEAT;
+    }
+}
+
+/* SET_TEXTURE_BORDER_COLOR. Address mode 4 (border) reads the border colour
+ * register when FORMAT's BORDER_SOURCE bit (3) selects the colour, and is
+ * clamped to the edge otherwise -- exactly as the CPU renderer's sample_tex
+ * (nv2a_pb_exec.c). GL's default border is transparent black, and projected
+ * shadow maps rely on the register: without it the shadow's frustum is drawn
+ * as a dark wedge. MANHUNT_GL_BORDER=0 restores the old GL_CLAMP_TO_BORDER
+ * with GL's default colour. */
+static int gl_border(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_BORDER");
+        on = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "  [GL] texture border colour: %s (MANHUNT_GL_BORDER)\n", on ? "on" : "off");
+    }
+    return on;
+}
+
+/* Wrap mode for one axis's address nibble, honouring the border source. */
+static GLint stage_wrap(uint32_t m, int border_source)
+{
+    if (m == 4 && !border_source && gl_border())
+        return GL_CLAMP_TO_EDGE;
+    return wrap_mode(m);
+}
+
+/* SET_TEXTURE_FILTER MIN (bits 16-23): 1 box and 2 tent at LOD 0; 3 box and
+ * 4 tent at the nearest LOD; 5 box and 6 tent between two LODs; 7 the
+ * convolution kernel at LOD 0 (tent here). xemu's table. A texture holding
+ * one level takes the in-level filter of the mode, so it stays complete. */
+static GLint min_filter(uint32_t mode, uint32_t levels)
+{
+    if (!gl_mipmaps())
+        return mode == 1 ? GL_NEAREST : GL_LINEAR;     /* the old mapping */
+    switch (mode) {
+    case 1: return GL_NEAREST;
+    case 3: return levels > 1 ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST;
+    case 4: return levels > 1 ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR;
+    case 5: return levels > 1 ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST;
+    case 6: return levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
+    default: return GL_LINEAR;
+    }
+}
+
+static uint32_t min_filter_code(GLint f)
+{
+    switch (f) {
+    case GL_NEAREST:                return 1;
+    case GL_NEAREST_MIPMAP_NEAREST: return 2;
+    case GL_LINEAR_MIPMAP_NEAREST:  return 3;
+    case GL_NEAREST_MIPMAP_LINEAR:  return 4;
+    case GL_LINEAR_MIPMAP_LINEAR:   return 5;
+    default:                        return 0;    /* GL_LINEAR */
     }
 }
 
@@ -1293,7 +1499,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
     uint32_t control0 = regs[base + 3];
     uint32_t format = regs[base + 1];
     uint32_t color = (format >> 8) & 0xFF;
-    uint32_t va, w, h, pitch = 0;
+    uint32_t va, w, h, pitch = 0, levels = 1, levels_gl = 1;
     GLuint tex = 0;
     GlSurf *rt;
 
@@ -1332,13 +1538,21 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
          * at the anti-aliased size. Normalised coordinates cover both. */
         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
     } else {
+        if (!pitch) {
+            levels = tex_mip_levels(format, w, h);
+            if (levels > 1 && !ram_span(va, tex_chain_bytes(color, w, h, 0, levels)))
+                levels = 1;
+        }
         /* Prior callbacks publish their pixels to RAM; do not reuse a GPU
          * surface by address (CPU writes or allocation reuse can replace it). */
-        texture_surface_sync(va,tex_bytes(color,w,h,pitch));
+        texture_surface_sync(va,tex_chain_bytes(color,w,h,pitch,levels));
         if (color == 0x0B)
             texture_surface_sync(s_palette_va,(256u >> ((s_palette_reg >> 2)&3u))*4u);
         /* A source overlap flush can change framebuffer bindings/state. */
-        tex = tex_get(va, color, w, h, pitch);
+        s_tex_cur = NULL;
+        tex = tex_get_levels(va, color, w, h, pitch, levels);
+        if (s_tex_cur && s_tex_cur->tex == tex)
+            levels_gl = s_tex_cur->levels_gl;
     }
     bind_tex(tex);
     {
@@ -1348,18 +1562,45 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
          * by id and invalidated where textures are created (tex_param_forget). */
         uint32_t addr = regs[base + 2];
         uint32_t filter = regs[base + 5];
+        int border_source = (format >> 3) & 1;
+        GLint wrap_s = stage_wrap(addr & 0xF, border_source);
+        GLint wrap_t = stage_wrap((addr >> 8) & 0xF, border_source);
         GLint mag = ((filter >> 24) & 0xF) == 1 ? GL_NEAREST : GL_LINEAR;
-        GLint min = ((filter >> 16) & 0xFF) == 1 ? GL_NEAREST : GL_LINEAR;
-        uint32_t key = (addr & 0xF0F) | ((uint32_t)(mag == GL_NEAREST) << 16)
-                     | ((uint32_t)(min == GL_NEAREST) << 17) | 0x80000000u;
+        GLint min = min_filter((filter >> 16) & 0xFF, levels_gl);
+        /* The border colour matters only when an axis reads it; the LOD
+         * clamps (CONTROL0 MIN_LOD_CLAMP bits 18-29, MAX_LOD_CLAMP bits 6-17,
+         * 4.8 fixed point, as xemu reads them) only with levels to choose. */
+        int use_border = gl_border() && (wrap_s == GL_CLAMP_TO_BORDER || wrap_t == GL_CLAMP_TO_BORDER);
+        uint32_t border = use_border ? regs[base + 9] : 0;   /* SET_TEXTURE_BORDER_COLOR */
+        uint32_t lod = levels_gl > 1 ? (control0 >> 6) & 0xFFFFFFu : 0;
+        uint32_t key = (addr & 0xF0F) | ((uint32_t)border_source << 4)
+                     | ((uint32_t)use_border << 5) | ((uint32_t)(mag == GL_NEAREST) << 16)
+                     | (min_filter_code(min) << 17) | ((uint32_t)(levels_gl > 1) << 20)
+                     | 0x80000000u;
         TexParam *tp = &s_tex_param[tex % TEX_PARAM_SLOTS];
-        if (tp->id != tex || tp->key != key) {
+        if (tp->id != tex || tp->key != key || tp->border != border || tp->lod != lod) {
             tp->id = tex;
             tp->key = key;
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(addr & 0xF));
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode((addr >> 8) & 0xF));
+            tp->border = border;
+            tp->lod = lod;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_s);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_t);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min);
+            if (use_border) {
+                const GLfloat bc[4] = {
+                    (float)((border >> 16) & 0xFF) / 255.0f, (float)((border >> 8) & 0xFF) / 255.0f,
+                    (float)(border & 0xFF) / 255.0f, (float)(border >> 24) / 255.0f };
+                glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, bc);
+            }
+            if (levels_gl > 1) {
+                /* min > max would make GL's LOD range empty: no clamp then. */
+                GLfloat lo = (float)((control0 >> 18) & 0xFFF) / 256.0f;
+                GLfloat hi = (float)((control0 >> 6) & 0xFFF) / 256.0f;
+                if (lo > hi) { lo = -1000.0f; hi = 1000.0f; }
+                glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, &lo);
+                glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, &hi);
+            }
         }
     }
 }
@@ -2035,6 +2276,8 @@ typedef struct {
     uint32_t stencil, smask, sfunc, sref, sread, sop[3];
     uint32_t cull, cullface, front, cm;
     GLint    sc[4];                     /* scissor, stored pixels; sc[2] 0 = off */
+    uint32_t poff;                      /* polygon offset: 1 point, 2 line, 4 fill */
+    float    pfactor, punits;           /* glPolygonOffset arguments while poff */
 } GlState;
 static GlState s_st;
 static int s_st_valid;
@@ -2060,6 +2303,44 @@ static void surface_scissor(const uint32_t *r, const GlSurf *s, GLint sc[4])
     sc[1] = to_stored(y0, s->ph, s->h);
     sc[2] = to_stored(x1, s->pw, s->w) - sc[0];
     sc[3] = to_stored(y1, s->ph, s->h) - sc[1];
+}
+
+/* Depth bias. SET_POLY_OFFSET_{POINT,LINE,FILL}_ENABLE (0x318, 0x31C, 0x320)
+ * and SET_POLYGON_OFFSET_SCALE_FACTOR / _BIAS (0x384, 0x388, floats) go to
+ * glPolygonOffset as xemu passes them. The bias is in units of the guest's
+ * depth format; the GL depth buffer here is always 24-bit, so a Z16 bias
+ * (zmax 0xFFFF) is scaled by 256 to stay the same fraction of the depth
+ * range. Without it decals z-fought the surface beneath them.
+ * MANHUNT_GL_POLY_OFFSET=0 leaves polygon offset untouched, the old path. */
+static int gl_poly_offset(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_POLY_OFFSET");
+        on = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "  [GL] polygon offset: %s (MANHUNT_GL_POLY_OFFSET)\n", on ? "on" : "off");
+    }
+    return on;
+}
+
+static float reg_float(uint32_t v)
+{
+    float f;
+    memcpy(&f, &v, sizeof f);
+    return f;
+}
+
+static uint32_t zmax_of(const uint32_t *r);
+
+static void poly_offset_state(const uint32_t *r, int has_depth, GlState *want)
+{
+    if (!has_depth)
+        return;
+    want->poff = (r[0x318 / 4] ? 1u : 0u) | (r[0x31C / 4] ? 2u : 0u) | (r[0x320 / 4] ? 4u : 0u);
+    if (want->poff) {
+        want->pfactor = reg_float(r[0x384 / 4]);
+        want->punits = reg_float(r[0x388 / 4]) * (zmax_of(r) == 0xFFFFu ? 256.0f : 1.0f);
+    }
 }
 
 static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
@@ -2095,6 +2376,8 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
         }
     }
     want.cm = cm;
+    if (gl_poly_offset())
+        poly_offset_state(r, has_depth, &want);
     if (s_st_valid && !memcmp(&want, &s_st, sizeof want))
         return;
     s_gl_change++;
@@ -2135,6 +2418,16 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
         if (want.sc[2] > 0 && (!valid || memcmp(want.sc, old.sc, sizeof want.sc)))
             glScissor(want.sc[0], want.sc[1], want.sc[2], want.sc[3]);
         if (!valid) glEnable(0x864F); /* GL_DEPTH_CLAMP */
+        if (gl_poly_offset()) {
+            if (CHANGED(poff)) {
+                const uint32_t was = valid ? old.poff : ~want.poff;
+                if ((want.poff ^ was) & 1) { if (want.poff & 1) glEnable(GL_POLYGON_OFFSET_POINT); else glDisable(GL_POLYGON_OFFSET_POINT); }
+                if ((want.poff ^ was) & 2) { if (want.poff & 2) glEnable(GL_POLYGON_OFFSET_LINE); else glDisable(GL_POLYGON_OFFSET_LINE); }
+                if ((want.poff ^ was) & 4) { if (want.poff & 4) glEnable(GL_POLYGON_OFFSET_FILL); else glDisable(GL_POLYGON_OFFSET_FILL); }
+            }
+            if (want.poff && (!valid || !old.poff || CHANGED(pfactor) || CHANGED(punits)))
+                glPolygonOffset(want.pfactor, want.punits);
+        }
 #undef TOGGLE
 #undef CHANGED
         s_st = want;
@@ -2193,6 +2486,13 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
      * (NFSU2's loading screen, z = 1.0 through its vertex program) vanished
      * whenever rounding put it a hair beyond. */
     glEnable(0x864F);                               /* GL_DEPTH_CLAMP */
+    if (gl_poly_offset()) {
+        if (want.poff & 1) glEnable(GL_POLYGON_OFFSET_POINT); else glDisable(GL_POLYGON_OFFSET_POINT);
+        if (want.poff & 2) glEnable(GL_POLYGON_OFFSET_LINE); else glDisable(GL_POLYGON_OFFSET_LINE);
+        if (want.poff & 4) glEnable(GL_POLYGON_OFFSET_FILL); else glDisable(GL_POLYGON_OFFSET_FILL);
+        if (want.poff)
+            glPolygonOffset(want.pfactor, want.punits);
+    }
 }
 
 static void psh_key(const uint32_t *r, Nv2aPshKey *k)
@@ -2814,12 +3114,18 @@ static int wide_movie_mode(void)
 
 static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float out[2])
 {
-    float minx, maxx, w = (float)s->w;
+    float minx, maxx, w = (float)s->w, lw;
 
     out[0] = out[1] = 0.0f;
     if (!xbox_video_widescreen() || !wide_target(b, s) || !wide_xrange(b, &minx, &maxx))
         return;
-    if (minx <= 2.0f && maxx >= w - 2.0f && vkey != 0xBA9E387C24FCECE1ull)
+    /* wide_xrange gives xform 1 in scaled pixels (aa_sx applied) and xform 0
+     * and 2 as the draw's own 640-wide coordinates, so the full-width test
+     * and the edge thresholds below take the width in the same units. With
+     * anti-aliasing on, comparing a 0..640 draw against the 1280-wide surface
+     * squeezed full-screen fades and grain to 4:3. */
+    lw = (b->xform != 1 && b->aa_sx > 0.0f) ? w / b->aa_sx : w;
+    if (minx <= 2.0f && maxx >= lw - 2.0f && vkey != 0xBA9E387C24FCECE1ull)
         return;
     if (vkey == 0xBA9E387C24FCECE1ull) {
         /* A movie is 4:3. MANHUNT_WIDE_MOVIE: crop (default) scales it to the
@@ -2837,10 +3143,6 @@ static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float
     out[0] = 0.75f;
     out[1] = w * 0.5f;
     if (s_wide_level && wide_hud_edges()) {
-        /* wide_xrange gives xform 1 in scaled pixels (aa_sx applied) and
-         * xform 0 and 2 as the draw's own 640-wide coordinates, so the
-         * thresholds are taken against the width in the same units. */
-        float lw = (b->xform != 1 && b->aa_sx > 0.0f) ? w / b->aa_sx : w;
         float cx = (minx + maxx) * 0.5f;
         if (cx < lw * 0.28f)
             out[1] = 0.0f;

@@ -115,6 +115,56 @@ static void draw_sample_test(void)
     tex[0]=0xff00ff00;triangle(s,1,0,0,8,0,0,8);assert(c[1*8+1]==0xff00ff00);
     puts("PASS real GL production triangle/combiner, CPU same-frame texture mutation, resampling");
 }
+/* One textured triangle over the 8x8 surface with explicit stage-0 state
+ * and per-vertex texcoords (texels for linear images, normalised else). */
+static void tex_triangle(Nv2aSurface s,uint32_t va,uint32_t format,uint32_t addr,uint32_t filter,
+                         uint32_t control0,uint32_t border,uint32_t rect,uint32_t pitch,const float tc[6])
+{
+    float attrs[3*64]={0};uint32_t indices[3]={0,1,2};Nv2aRawBatch b={0};
+    const float pos[6]={0,0,8,0,0,8};
+    for(unsigned v=0;v<3;v++){
+        float *a=attrs+v*64;a[0]=pos[v*2];a[1]=pos[v*2+1];a[2]=0;a[3]=1;
+        a[12]=1;a[15]=1;a[36]=tc[v*2];a[37]=tc[v*2+1];a[39]=1;
+    }
+    regs[0x288/4]=8;regs[0x28c/4]=0x18<<8;regs[0x1e70/4]=1;
+    regs[0x1b00/4]=va;regs[0x1b04/4]=format;regs[0x1b08/4]=addr;regs[0x1b0c/4]=control0;
+    regs[0x1b10/4]=pitch<<16;regs[0x1b14/4]=filter;regs[0x1b1c/4]=rect;regs[0x1b24/4]=border;
+    b.surface=s;b.regs=regs;b.prim=5;b.vertex_count=b.index_count=3;b.indices=indices;b.attrs=attrs;
+    b.attr_present=(1u<<0)|(1u<<3)|(1u<<9);b.tex_va[0]=va;
+    gl_draw_raw(&b);
+    regs[0x1b08/4]=0;regs[0x1b24/4]=0;
+}
+static void border_mip_test(void)
+{
+    Nv2aSurface s=surface(8,8,32);uint32_t *c=color_ram(&s);
+    const float outside[6]={10,10,10,10,10,10};
+    /* Linear 2x2 red, address mode 4 on both axes, sampled outside. */
+    uint32_t *lin=(uint32_t*)(guest+0x2c0000);for(unsigned i=0;i<4;i++)lin[i]=0xffff0000;
+    const uint32_t lfmt=(0x12u<<8)|(2u<<4),near=(1u<<16)|(1u<<24),addr4=4u|(4u<<8);
+    memset(c,0,256);tex_triangle(s,0x2c0000,lfmt|8u,addr4,near,0x4003ffc0,0xff0000ff,(2u<<16)|2u,8,outside);
+    assert(c[1*8+1]==0xff0000ff);                  /* BORDER_SOURCE colour: the register */
+    memset(c,0,256);tex_triangle(s,0x2c0000,lfmt|8u,addr4,near,0x4003ffc0,0xff00ff00,(2u<<16)|2u,8,outside);
+    assert(c[1*8+1]==0xff00ff00);                  /* a new border colour reaches the sampler */
+    memset(c,0,256);tex_triangle(s,0x2c0000,lfmt,addr4,near,0x4003ffc0,0xff0000ff,(2u<<16)|2u,8,outside);
+    assert(c[1*8+1]==0xffff0000);                  /* texture source: clamped to the edge */
+    /* Swizzled 4x4 A8R8G8B8, three levels of one colour each, minified 4:1
+     * (texcoords 0..8 over 8 pixels): nearest-LOD box filtering reads level 2. */
+    uint32_t *sw=(uint32_t*)(guest+0x2d0000);
+    for(unsigned i=0;i<16;i++)sw[i]=0xffff0000;
+    for(unsigned i=0;i<4;i++)sw[16+i]=0xff00ff00;
+    sw[20]=0xff0000ff;
+    const uint32_t sfmt=(2u<<4)|(0x06u<<8)|(3u<<16)|(2u<<20)|(2u<<24);
+    const float mini[6]={0,0,8,0,0,8};
+    memset(c,0,256);tex_triangle(s,0x2d0000,sfmt,0,(3u<<16)|(1u<<24),0x4003ffc0,0,0,0,mini);
+    assert(c[3*8+3]==0xff0000ff);
+    /* MAX_LOD_CLAMP 0 (CONTROL0 bits 6-17) keeps it at level 0. */
+    memset(c,0,256);tex_triangle(s,0x2d0000,sfmt,0,(3u<<16)|(1u<<24),0x40000000,0,0,0,mini);
+    assert(c[3*8+3]==0xffff0000);
+    /* LOD-0 box filtering ignores the levels. */
+    memset(c,0,256);tex_triangle(s,0x2d0000,sfmt,0,(1u<<16)|(1u<<24),0x4003ffc0,0,0,0,mini);
+    assert(c[3*8+3]==0xffff0000);
+    puts("PASS real GL texture border colour and source bit, mip level selection and LOD clamp");
+}
 static void render_target_feedback_test(void)
 {
     Nv2aSurface src=surface(8,8,32);uint32_t *c=color_ram(&src);
@@ -213,7 +263,7 @@ int main(int argc,char **argv)
         fflush(stdout);_Exit(0);
     }
     assert(ready());
-    clear_only_present_test();clear_depth_test();linear_color_formats_test();draw_sample_test();render_target_feedback_test();wide_reset_test();cpu_only_present_test();
+    clear_only_present_test();clear_depth_test();linear_color_formats_test();draw_sample_test();border_mip_test();render_target_feedback_test();wide_reset_test();cpu_only_present_test();
     packed_cmp_draw_test();
     puts("PASS real GL production-path synthetic suite; gameplay/hardware parity UNVERIFIED");
     return 0;

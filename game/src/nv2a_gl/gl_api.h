@@ -88,6 +88,17 @@ typedef struct __GLsync *GLsync;
 #define GL_TEXTURE_MIN_FILTER             0x2801
 #define GL_TEXTURE_WRAP_S                 0x2802
 #define GL_TEXTURE_WRAP_T                 0x2803
+#define GL_NEAREST_MIPMAP_NEAREST         0x2700
+#define GL_LINEAR_MIPMAP_NEAREST          0x2701
+#define GL_NEAREST_MIPMAP_LINEAR          0x2702
+#define GL_TEXTURE_BORDER_COLOR           0x1004
+#define GL_TEXTURE_MIN_LOD                0x813A
+#define GL_TEXTURE_MAX_LOD                0x813B
+#define GL_TEXTURE_BASE_LEVEL             0x813C
+#define GL_TEXTURE_MAX_LEVEL              0x813D
+#define GL_POLYGON_OFFSET_POINT           0x2A01
+#define GL_POLYGON_OFFSET_LINE            0x2A02
+#define GL_POLYGON_OFFSET_FILL            0x8037
 #define GL_REPEAT                         0x2901
 #define GL_COLOR_BUFFER_BIT               0x00004000
 #define GL_DEPTH_BUFFER_BIT               0x00000100
@@ -165,6 +176,8 @@ typedef struct __GLsync *GLsync;
     X(void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *)) \
     X(void, glCompressedTexImage2D, (GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *)) \
     X(void, glTexParameteri, (GLenum, GLenum, GLint)) \
+    X(void, glTexParameterfv, (GLenum, GLenum, const GLfloat *)) \
+    X(void, glPolygonOffset, (GLfloat, GLfloat)) \
     X(void, glGenFramebuffers, (GLsizei, GLuint *)) \
     X(void, glDeleteFramebuffers, (GLsizei, const GLuint *)) \
     X(void, glBindFramebuffer, (GLenum, GLuint)) \
@@ -272,6 +285,8 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
 #define glTexSubImage2D          p_glTexSubImage2D
 #define glTexParameteri          p_glTexParameteri
+#define glTexParameterfv         p_glTexParameterfv
+#define glPolygonOffset          p_glPolygonOffset
 #define glGenFramebuffers        p_glGenFramebuffers
 #define glDeleteFramebuffers     p_glDeleteFramebuffers
 #define glBindFramebuffer        p_glBindFramebuffer
