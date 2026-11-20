@@ -17,6 +17,12 @@ static void count_stencilop(GLenum a,GLenum b,GLenum c) {(void)a;(void)b;(void)c
 static void count_scissor(GLint a,GLint b,GLsizei c,GLsizei d) {(void)a;(void)b;(void)c;(void)d;state_calls++;}
 static void count_active(GLenum a) {(void)a;active_calls++;}
 static void count_bind(GLenum a,GLuint b) {(void)a;(void)b;bind_calls++;}
+static unsigned poff_calls, fill_on;
+static float poff_factor, poff_units;
+static void count_poff(GLfloat f,GLfloat u) {poff_calls++;poff_factor=f;poff_units=u;}
+static void track_enable(GLenum cap) {state_calls++;if(cap==GL_POLYGON_OFFSET_FILL)fill_on=1;}
+static void track_disable(GLenum cap) {state_calls++;if(cap==GL_POLYGON_OFFSET_FILL)fill_on=0;}
+static uint32_t fbits(float f) {uint32_t v;memcpy(&v,&f,4);return v;}
 int main(int argc,char **argv)
 {
     (void)argv;
@@ -54,6 +60,18 @@ int main(int argc,char **argv)
     r[0x304/4]=0;apply_state(r,1,&sf);r[0x344/4]=0x302;apply_state(r,1,&sf);
     last=state_calls;r[0x304/4]=1;apply_state(r,1,&sf);
     if(improved)assert(state_calls==last+4);
+    /* Depth bias: FILL enable and the raw float factor/bias reach GL; a Z16
+     * surface's bias is scaled to the 24-bit buffer; no depth buffer, none. */
+    p_glEnable=track_enable;p_glDisable=track_disable;p_glPolygonOffset=count_poff;
+    state_dirty();apply_state(r,1,&sf);assert(!fill_on&&poff_calls==0);
+    r[0x320/4]=1;r[0x384/4]=fbits(-1.0f);r[0x388/4]=fbits(-2.0f);r[0x208/4]=0x0128;
+    apply_state(r,1,&sf);assert(fill_on&&poff_calls==1&&poff_factor==-1.0f&&poff_units==-2.0f);
+    apply_state(r,1,&sf);assert(poff_calls==1);
+    r[0x208/4]=0x0118;apply_state(r,1,&sf);assert(poff_calls==2&&poff_units==-512.0f);
+    apply_state(r,0,&sf);assert(!fill_on);
+    r[0x320/4]=0;apply_state(r,1,&sf);assert(!fill_on&&poff_calls==2);
+    r[0x384/4]=r[0x388/4]=r[0x208/4]=0;
+    p_glEnable=count_cap;p_glDisable=count_cap;
     /* Disabled stages already bound to zero need no active-unit churn. */
     memset(r,0,sizeof r);p_glActiveTexture=count_active;p_glBindTexture=count_bind;
     tex_bind_forget();float scale[2];

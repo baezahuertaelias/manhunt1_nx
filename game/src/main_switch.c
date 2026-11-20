@@ -13,7 +13,7 @@
  *   - guest code runs on a thread with a large stack, because every guest
  *     call is a host call in the lifted code;
  *   - an evidence thread dumps the guest framebuffer as BMP to
- *     sdmc:/manhunt-frames every MANHUNT_DUMP_SECS seconds.
+ *     sdmc:/manhunt-frames every MANHUNT_DUMP_SECS seconds (off by default).
  * Memory: win32_compat_horizon.inc (patch 0003) backs the guest window with
  * code-memory mappings; no RAM mirrors (not needed to boot: FEASIBILITY.md).
  */
@@ -541,6 +541,7 @@ static void auto_exit_start(void)
  *     submission, clears, flip (of which swap: blocked on the GPU), and the
  *     rest (game code, pushbuffer decode, audio register traffic);
  *   textures uploaded and programs compiled in the period;
+ *   indirect guest calls per frame (each one is a dispatch-table lookup);
  *   CPU use of each registered thread (100% = one core) and of each core;
  *   CPU / GPU / memory clocks and the battery.
  * The thread runs at high priority (the guest can starve a default-priority
@@ -636,6 +637,7 @@ static void perf_main(void *arg)
     Nv2aGlPerf g_last, g;
     ManhuntAudioStats a_last, a;
     uint64_t apu_last[7], apu[7];
+    uint64_t icall_last = g_icall_count;
     int psm_ok = R_SUCCEEDED(psmInitialize());
 
     for (int c = 0; c < 3; c++)
@@ -659,19 +661,22 @@ static void perf_main(void *arg)
             const double flip = (g.flip_ns - g_last.flip_ns) / per / 1e6;
             const double swap = (g.swap_ns - g_last.swap_ns) / per / 1e6;
             const double frame = secs * 1e3 / per;
+            const uint64_t icall = g_icall_count;
             double rest = frame - draw - clear - flip;
             if (rest < 0)
                 rest = 0;
             PERF_PUT("[perf] %.1fs fps %.1f max %.0fms slow %llu | per frame %.1fms: draws %.0f verts %.0f idx %.0f"
                      " | gl draw %.1f clear %.1f flip %.1f (swap %.1f) rest %.1f ms"
-                     " | tex %llu %.1fMB %.0fms progs %llu %.0fms",
+                     " | tex %llu %.1fMB %.0fms progs %llu %.0fms | icalls %.0f",
                      secs, fr / secs, g.max_frame_ns / 1e6,
                      (unsigned long long)(g.slow_frames - g_last.slow_frames), frame,
                      (g.draws - g_last.draws) / per, (g.verts - g_last.verts) / per,
                      (g.indices - g_last.indices) / per, draw, clear, flip, swap, rest,
                      (unsigned long long)(g.texs - g_last.texs),
                      (g.tex_bytes - g_last.tex_bytes) / 1048576.0, (g.tex_ns - g_last.tex_ns) / 1e6,
-                     (unsigned long long)(g.progs - g_last.progs), (g.prog_ns - g_last.prog_ns) / 1e6);
+                     (unsigned long long)(g.progs - g_last.progs), (g.prog_ns - g_last.prog_ns) / 1e6,
+                     (icall - icall_last) / per);
+            icall_last = icall;
         }
         {
             const double per = g.frames > g_last.frames ? (double)(g.frames - g_last.frames) : 1.0;
@@ -679,12 +684,16 @@ static void perf_main(void *arg)
 #define GL_CALLS(f) ((g.f - g_last.f) / per)
             printf("[perf-gl] lookup %.3f upload %.3f uniform %.3f bind %.3f state %.3f submit %.3f other %.3f ms"
                    " | maps %.1f uniforms %.1f bytes %.0f binds %.1f convattrs %.1f convverts %.0f"
-                   " | types %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f | qattr %.0f qsaved %.0f\n",
+                   " | types %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f | qattr %.0f qsaved %.0f | samestate %.1f kept %.1f constreuse %.1f"
+                   " | ring %.1f %.0fKB full %.1f wraps %.2f qvert %.3f ms\n",
                    GL_MS(lookup_ns), GL_MS(upload_ns), GL_MS(uniform_ns), GL_MS(bind_ns), GL_MS(state_ns), GL_MS(submit_ns), GL_MS(other_ns),
                    GL_CALLS(maps), GL_CALLS(uniform_calls), GL_CALLS(uniform_bytes), GL_CALLS(texture_binds), GL_CALLS(converted_attrs), GL_CALLS(converted_verts),
                    GL_CALLS(converted_type[0]), GL_CALLS(converted_type[1]), GL_CALLS(converted_type[2]), GL_CALLS(converted_type[3]),
                    GL_CALLS(converted_type[4]), GL_CALLS(converted_type[5]), GL_CALLS(converted_type[6]), GL_CALLS(converted_type[7]),
-                   GL_CALLS(queue_attr_bytes), GL_CALLS(queue_attr_saved_bytes));
+                   GL_CALLS(queue_attr_bytes), GL_CALLS(queue_attr_saved_bytes), GL_CALLS(same_state_draws),
+                   GL_CALLS(kept_attr_draws), GL_CALLS(const_reuses),
+                   GL_CALLS(ring_draws), GL_CALLS(ring_bytes) / 1024.0, GL_CALLS(ring_full),
+                   GL_CALLS(ring_wraps), GL_MS(queue_vertex_ns));
 #undef GL_MS
 #undef GL_CALLS
         }
@@ -1029,7 +1038,12 @@ static void config_init(void)
         {"RECOMP_PB_EXEC", "1"}, {"RECOMP_PB_WALK", "dma"},
         {"RECOMP_TITLE_KEVENTS", "1"}, {"RECOMP_VBLANK", "paced"},
         {"RECOMP_DISPATCH_GATE", "1"}, {"RECOMP_FLIP_PACING", "1"},
-        {"MANHUNT_DUMP_SECS", "15"},
+        /* The dump reads the software framebuffer, which the GL backend does not
+         * keep (fb_present.c), so it only woke a thread 10 times a second. */
+        {"MANHUNT_DUMP_SECS", "0"},
+        /* GL submission on its own thread: 25.0 FPS against 22.25 without
+         * (reports/PERF_AUDIO_STATUS_2026-11-10.md); every console run since used it. */
+        {"RECOMP_GL_THREAD", "1"},
         /* Accepted on the console 2026-11-11/12 (reports/SWITCH_RUN_2026-11-11.md):
          * GL upload/state paths, APU history window, critical-section resolver
          * cache, contiguous reuse. Each takes =0 in manhunt.env or as an

@@ -32,6 +32,7 @@ MANHUNT_GPU_BACKEND=2
 MANHUNT_AUDIO_APU=1
 MANHUNT_WIDESCREEN=1
 MANHUNT_LANGUAGE=spanish
+MANHUNT_AMBIENT_LIGHT=-1
 """
 
 INSTALL = """Manhunt for Nintendo Switch (recompiled), version {version}

@@ -134,17 +134,178 @@ static void palette_test(void)
     assert(uploads>before&&image[t].pixels[0]==0x91);
     puts("PASS palette change in same frame reaches decoded texture");
 }
+/* Mip chain: level sizes and offsets as xemu lays them out, every level
+ * uploaded from its own offset, change detection over the whole chain. */
+static struct { int level; unsigned w,h,size,off; uint32_t px; } mip_rec[16];
+static unsigned mip_n, mip_base;
+static void mip_upload(GLenum t,GLint level,GLint fmt,GLsizei w,GLsizei h,GLint border,GLenum ext,GLenum type,const void *pixels)
+{
+    (void)t;(void)fmt;(void)border;(void)ext;(void)type;
+    assert(mip_n<16);mip_rec[mip_n].level=level;mip_rec[mip_n].w=w;mip_rec[mip_n].h=h;
+    mip_rec[mip_n].px=pixels?*(const uint32_t*)pixels:0;mip_n++;
+}
+static void mip_cupload(GLenum t,GLint level,GLenum fmt,GLsizei w,GLsizei h,GLint border,GLsizei n,const void *d)
+{
+    (void)t;(void)fmt;(void)border;
+    assert(mip_n<16);mip_rec[mip_n].level=level;mip_rec[mip_n].w=w;mip_rec[mip_n].h=h;
+    mip_rec[mip_n].size=n;mip_rec[mip_n].off=(unsigned)((const uint8_t*)d-guest)-mip_base;mip_n++;
+}
+static GLint mip_max_level=-1;
+static void mip_param(GLenum t,GLenum n,GLint v) {(void)t;if(n==GL_TEXTURE_MAX_LEVEL)mip_max_level=v;}
+static void mip_test(void)
+{
+    const uint32_t f2d=2u<<4;
+    /* Level counts: FORMAT bits 16-19, capped at the 1x1 level; cube maps,
+     * linear images and other dimensionalities keep level 0 only. */
+    assert(tex_mip_levels(f2d|(0x06u<<8)|(3u<<16)|(2u<<20)|(2u<<24),4,4)==3);
+    assert(tex_mip_levels(f2d|(0x06u<<8)|(9u<<16)|(2u<<20)|(2u<<24),4,4)==3);
+    assert(tex_mip_levels(f2d|(0x0Cu<<8)|(4u<<16),8,2)==4);
+    assert(tex_mip_levels(f2d|(0x06u<<8)|(1u<<16),4,4)==1);
+    assert(tex_mip_levels(f2d|4u|(0x06u<<8)|(3u<<16),4,4)==1);       /* cube */
+    assert(tex_mip_levels((3u<<4)|(0x06u<<8)|(3u<<16),4,4)==1);      /* 3D */
+    assert(tex_mip_levels(f2d|(0x12u<<8)|(3u<<16),4,4)==1);          /* linear */
+    assert(tex_mip_levels(f2d|(0x3Au<<8)|(3u<<16),4,4)==1);          /* size unknown */
+    /* Sizes: DXT levels are whole 4x4 blocks; others halve to 1x1. */
+    assert(tex_level_bytes(0x0C,8,8)==32&&tex_level_bytes(0x0C,2,2)==8&&tex_level_bytes(0x0C,1,1)==8);
+    assert(tex_level_bytes(0x0E,2,1)==16&&tex_level_bytes(0x05,4,2)==16&&tex_level_bytes(0x0B,2,2)==4);
+    assert(tex_chain_bytes(0x0C,8,8,0,4)==32+8+8+8);
+    assert(tex_chain_bytes(0x06,4,4,0,3)==64+16+4);
+    assert(tex_chain_bytes(0x06,8,2,0,4)==64+16+8+4);    /* 8x2 4x1 2x1 1x1 */
+    assert(tex_chain_bytes(0x06,4,4,0,1)==tex_bytes(0x06,4,4,0));
+    /* Upload: a 4x4 A8R8G8B8 with three levels, one colour per level. */
+    {
+        const unsigned va=0x1d0000;uint32_t *p=(uint32_t*)(guest+va);GLuint t;
+        for(unsigned i=0;i<16;i++)p[i]=0xff000011u;
+        for(unsigned i=0;i<4;i++)p[16+i]=0xff000022u;
+        p[20]=0xff000033u;
+        mip_n=0;p_glTexImage2D=mip_upload;p_glTexParameteri=mip_param;mip_max_level=-1;
+        t=tex_get_levels(va,0x06,4,4,0,3);
+        assert(mip_n==3&&s_tex_cur&&s_tex_cur->tex==t&&s_tex_cur->levels_gl==3&&mip_max_level==2);
+        assert(mip_rec[0].level==0&&mip_rec[0].w==4&&mip_rec[0].px==0xff000011u);
+        assert(mip_rec[1].level==1&&mip_rec[1].w==2&&mip_rec[1].h==2&&mip_rec[1].px==0xff000022u);
+        assert(mip_rec[2].level==2&&mip_rec[2].w==1&&mip_rec[2].h==1&&mip_rec[2].px==0xff000033u);
+        /* A change in the last level alone re-uploads (the chain is content). */
+        mip_n=0;assert(tex_get_levels(va,0x06,4,4,0,3)==t&&mip_n==0);
+        p[20]=0xff000044u;assert(tex_get_levels(va,0x06,4,4,0,3)==t&&mip_n==3&&mip_rec[2].px==0xff000044u);
+        /* The same address with level 0 only is a texture of its own. */
+        mip_n=0;assert(tex_get_levels(va,0x06,4,4,0,1)!=t&&mip_n==1&&s_tex_cur->levels_gl==1);
+    }
+    /* DXT1 8x8, four levels: compressed from offsets 0, 32, 40, 48. */
+    {
+        const unsigned va=0x1e0000;GLuint t;
+        memset(guest+va,0x5a,56);
+        mip_n=0;mip_base=va;p_glCompressedTexImage2D=mip_cupload;mip_max_level=-1;
+        t=tex_get_levels(va,0x0C,8,8,0,4);(void)t;
+        assert(mip_n==4&&s_tex_cur->levels_gl==4&&mip_max_level==3);
+        assert(mip_rec[0].size==32&&mip_rec[0].off==0);
+        assert(mip_rec[1].level==1&&mip_rec[1].w==4&&mip_rec[1].size==8&&mip_rec[1].off==32);
+        assert(mip_rec[2].level==2&&mip_rec[2].w==2&&mip_rec[2].size==8&&mip_rec[2].off==40);
+        assert(mip_rec[3].level==3&&mip_rec[3].w==1&&mip_rec[3].size==8&&mip_rec[3].off==48);
+    }
+    p_glTexImage2D=upload;p_glTexParameteri=fake_glTexParameteri;p_glCompressedTexImage2D=fake_glCompressedTexImage2D;
+    /* Filters: modes 3-6 take mipmaps only with levels to choose from. */
+    assert(min_filter(1,3)==GL_NEAREST&&min_filter(2,3)==GL_LINEAR);
+    assert(min_filter(3,3)==GL_NEAREST_MIPMAP_NEAREST&&min_filter(4,3)==GL_LINEAR_MIPMAP_NEAREST);
+    assert(min_filter(5,3)==GL_NEAREST_MIPMAP_LINEAR&&min_filter(6,3)==GL_LINEAR_MIPMAP_LINEAR);
+    assert(min_filter(3,1)==GL_NEAREST&&min_filter(6,1)==GL_LINEAR&&min_filter(7,3)==GL_LINEAR);
+    /* Border source: mode 4 clamps to the edge unless FORMAT bit 3 is set. */
+    assert(stage_wrap(4,1)==GL_CLAMP_TO_BORDER&&stage_wrap(4,0)==GL_CLAMP_TO_EDGE&&stage_wrap(1,0)==GL_REPEAT);
+    puts("PASS mip chain levels, sizes, offsets, uploads, chain change detection, filters and border source");
+}
+/* Item 5 follow-up. Manhunt's TXDs store one level per texture (level 0 is
+ * followed by the next texture's RW chunk headers) and its FORMAT words carry
+ * MIPMAP_LEVELS 1, with MIN filter 6 (tent between LODs). Such a texture must
+ * upload exactly level 0 and filter GL_LINEAR, as with mipmaps off: the chain
+ * path is not what made the 2026-11-18 frames darker. A chain that runs past
+ * the real data (zeros after level 0) is what MANHUNT_GL_MIP_TRACE exposes:
+ * level 0 bright, the rest 0. */
+static void manhunt_mip_test(void)
+{
+    const uint32_t f2d=2u<<4;
+    const uint32_t fmt1=f2d|(0x0Cu<<8)|(1u<<16)|(7u<<20)|(7u<<24);   /* DXT1 128x128, 1 level */
+    assert(tex_mip_levels(fmt1,128,128)==1);
+    assert(min_filter(6,1)==GL_LINEAR&&min_filter(2,1)==GL_LINEAR);
+    {
+        const unsigned va=0x200000;
+        memset(guest+va,0xab,128*128/2+0x80+4096);        /* level 0, chunk headers, next texture */
+        mip_n=0;mip_base=va;p_glCompressedTexImage2D=mip_cupload;p_glTexParameteri=mip_param;mip_max_level=-1;
+        tex_get_levels(va,0x0C,128,128,0,tex_mip_levels(fmt1,128,128));
+        assert(mip_n==1&&mip_rec[0].level==0&&mip_rec[0].size==8192&&s_tex_cur->levels_gl==1);
+        assert(mip_max_level==-1);                        /* no chain: MAX_LEVEL untouched */
+    }
+    /* Luminance helpers: white and black DXT1 blocks, DXT1 transparent texels. */
+    {
+        uint8_t blk[16]={0xff,0xff,0,0,0,0,0,0};          /* c0 white > c1 black, all index 0 */
+        uint32_t px[4]={0xffffffffu,0xff000000u,0xffffffffu,0xff000000u};
+        assert(luma_dxt(blk,4,4,0x0C)==255);
+        memset(blk,0,sizeof blk);assert(luma_dxt(blk,4,4,0x0C)==0);
+        blk[0]=0xff;blk[1]=0xff;blk[2]=0xff;blk[3]=0xff;memset(blk+4,0xff,4);  /* c0==c1: index 3 transparent black */
+        assert(luma_dxt(blk,4,4,0x0C)==0);
+        assert(luma_bgra(px,4)==127);
+    }
+    /* Trace of a chain that runs past the data: DXT1 8x8, four levels asked,
+     * level 0 white, the 24 bytes after it zero. */
+    {
+        const unsigned va=0x210000;unsigned i;
+        memset(guest+va,0,64);
+        for(i=0;i<4;i++){guest[va+i*8]=0xff;guest[va+i*8+1]=0xff;}
+        s_mt_format=f2d|(0x0Cu<<8)|(4u<<16)|(3u<<20)|(3u<<24);s_mt_filter=6u<<16;s_mt_control0=0x40000000u|(0xFFFu<<6);
+        mip_n=0;mip_base=va;p_glCompressedTexImage2D=mip_cupload;
+        tex_get_levels(va,0x0C,8,8,0,4);
+        assert(mip_n==4&&s_tex_cur->levels_gl==4);
+        s_mt_format=s_mt_control0=s_mt_filter=0;
+        assert(s_mt_len==-1&&s_mt_lines>0);
+        assert(strstr(s_mt_line,"fmt 0x0C 8x8 format-levels 4 asked 4 min 6 lod-clamp 0..4095 luma 255 0 0 0 held 4\n"));
+    }
+    p_glTexParameteri=fake_glTexParameteri;p_glCompressedTexImage2D=fake_glCompressedTexImage2D;
+    puts("PASS Manhunt-like single-level textures upload level 0 only, mip trace luminance per level");
+}
 static void shader_modes_test(void)
 {
     Nv2aPshKey k={0};char buf[65536];
     nv2a_shader_vk=0;
+    /* MANHUNT_GL_TEXSHADER=0: the old set. */
+    nv2a_gl_texshader_on=0;
     for(unsigned stage=0;stage<4;stage++)for(unsigned mode=0;mode<32;mode++) {
         k.shader_program=mode<<(stage*5);
         int supported=mode==0||mode==1||mode==4||mode==5||((mode==15||mode==16)&&stage>0);
         int n=nv2a_gl_psh(&k,buf,sizeof buf);
         assert((n>=0)==supported);
+        if(mode==3&&n>=0)assert(!strstr(buf,"samplerCube"));
     }
-    puts("PASS all GL texture modes: implemented modes emit, other modes reject");
+    /* On: PROJECT3D, CUBEMAP anywhere; bump env from stage 1; the dot
+     * chains with their DOTPRODUCT stages; BRDF and 19+ still rejected. */
+    nv2a_gl_texshader_on=1;
+    for(unsigned stage=0;stage<4;stage++)for(unsigned mode=0;mode<32;mode++) {
+        k.shader_program=mode<<(stage*5);
+        int supported=mode==0||mode==1||mode==2||mode==3||mode==4||mode==5||
+            ((mode==15||mode==16||mode==6||mode==7)&&stage>0)||(mode==17&&(stage==1||stage==2));
+        int n=nv2a_gl_psh(&k,buf,sizeof buf);
+        assert((n>=0)==supported);
+        if(mode==3&&n>=0){char want[32];snprintf(want,sizeof want,"uniform samplerCube t%u;",stage);assert(strstr(buf,want));}
+        if((mode==6||mode==7)&&n>=0)assert(strstr(buf,"u_bump"));
+    }
+    const uint32_t chains[]={
+        (1u)|(17u<<5)|(9u<<10),                     /* DOT_ST */
+        (1u)|(17u<<5)|(10u<<10),                    /* DOT_ZW */
+        (1u)|(17u<<5)|(17u<<10)|(13u<<15),          /* DOT_STR_3D */
+        (1u)|(17u<<5)|(17u<<10)|(14u<<15),          /* DOT_STR_CUBE */
+        (1u)|(17u<<5)|(17u<<10)|(12u<<15),          /* DOT_RFLCT_SPEC */
+        (1u)|(17u<<5)|(11u<<10)|(12u<<15),          /* DOT_RFLCT_DIFF + SPEC */
+        (1u)|(17u<<5)|(17u<<10)|(18u<<15),          /* DOT_RFLCT_SPEC_CONST */
+    };
+    for(unsigned c=0;c<sizeof chains/sizeof chains[0];c++){
+        k.shader_program=chains[c];k.other_input=0x333;
+        assert(nv2a_gl_psh(&k,buf,sizeof buf)>=0);
+        assert(strstr(buf,"nv2a_dotmap(T0, 3)"));
+    }
+    k.shader_program=(1u)|(1u<<5)|(9u<<10);         /* DOT_ST without DOTPRODUCT */
+    assert(!nv2a_gl_psh_supported(&k));
+    k.shader_program=(1u)|(17u<<5)|(8u<<10);         /* BRDF */
+    assert(!nv2a_gl_psh_supported(&k));
+    k.shader_program=0;k.other_input=0;
+    nv2a_gl_texshader_on=-1;
+    puts("PASS all GL texture modes: implemented modes emit, other modes reject, MANHUNT_GL_TEXSHADER=0 keeps the old set");
 }
 static void widescreen_classification_test(void)
 {
@@ -190,7 +351,10 @@ static void widescreen_classification_test(void)
      * x 498..592 in 640 coordinates must still anchor right. */
     {Nv2aRawBatch ba=b;GlSurf sa=s;sa.w=1280;sa.h=960;ba.aa_sx=ba.aa_sy=2;
      attrs[0]=498;attrs[64]=592;wide_2d(&ba,&sa,hud,out);assert(out[1]==1280);
-     attrs[0]=49;attrs[64]=164;wide_2d(&ba,&sa,hud,out);assert(out[1]==0);}
+     attrs[0]=49;attrs[64]=164;wide_2d(&ba,&sa,hud,out);assert(out[1]==0);
+     /* A full-screen 0..640 draw (fade, grain) is left alone with AA too. */
+     attrs[0]=0;attrs[64]=640;wide_2d(&ba,&sa,hud,out);assert(out[0]==0&&out[1]==0);
+     attrs[0]=0;attrs[64]=600;wide_2d(&ba,&sa,hud,out);assert(out[0]==.75f);}
     /* Not a level frame (menu, movie): the centred 4:3 block, as before. */
     s_wide_level=0;
     attrs[0]=48;attrs[64]=165;wide_2d(&b,&s,hud,out);assert(out[0]==.75f&&out[1]==320);
@@ -200,6 +364,129 @@ static void widescreen_classification_test(void)
     s.w=640;fake_widescreen=0;wide_2d(&b,&s,movie,out);assert(out[0]==0&&out[1]==0);
     assert(!wide_prog_2d(hud));
     puts("PASS widescreen immutable allowlist, reused addresses, full movie/HUD/overlay bounds and off/target resets");
+}
+/* One 2D draw on the 640x480 target at x mn..mx; the anchor (out[1]) or -1
+ * when left unsqueezed. Counts as a target draw, as the draw path does. */
+static float hud_attrs[2*64];
+static float hud_draw(Nv2aRawBatch *b,const GlSurf *s,uint64_t prog,float mn,float mx)
+{
+    float out[2];
+    hud_attrs[0]=mn;hud_attrs[64]=mx;b->attrs=hud_attrs;
+    wide_2d(b,s,prog,out);s_wide_frame_draws++;
+    return out[0]==0?-1.0f:out[1];
+}
+/* Item 11a: a HUD element of several draws keeps one anchor. Draw extents
+ * are the console's (run 44 and the 2026-11-18 frames 1800/2700). */
+static void widescreen_runs_test(void)
+{
+    const uint64_t hud=0x43720A569E4D3893ull,bar=0xAA8C102096129062ull;
+    GlSurf s={0},other={0};Nv2aRawBatch b={0};
+    s.w=other.w=640;s.h=other.h=480;b.vertex_count=2;b.xform=2;b.tex_va[0]=0x805B0080u;
+    fake_widescreen=1;s_wide_level=1;s_wide_menu=0;s_wide_frame_draws=s_wide_frame_fit=0;
+    unsetenv("MANHUNT_WIDE_HUD_GROUP");s_wide_group_on=-1;
+    /* Tutorial box, then its lines: the short last line (centre 103) used
+     * to go to the left edge while the box and long lines stayed centred. */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,311.8f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,304.8f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==320);
+    /* The right cluster, then the radar: no overlap, so apart, each at its
+     * own edge, though the radar shares the hand panel's texture. */
+    b.tex_va[0]=0x80583D80u;
+    assert(hud_draw(&b,&s,hud,531.5f,584.3f)==640);
+    assert(hud_draw(&b,&s,bar,51.2f,162.1f)==0);
+    assert(hud_draw(&b,&s,hud,48.8f,164.5f)==0);
+    assert(hud_draw(&b,&s,hud,103.7f,109.6f)==0);
+    assert(hud_draw(&b,&s,hud,510.1f,562.6f)==640);
+    assert(hud_draw(&b,&s,hud,567.0f,582.0f)==640);
+    assert(hud_draw(&b,&s,hud,577.0f,592.0f)==640);
+    /* Overlap with the previous draw, not the run's first: a chain. */
+    assert(hud_draw(&b,&s,hud,300.0f,340.0f)==320);
+    assert(hud_draw(&b,&s,hud,336.0f,470.0f)==320);
+    assert(hud_draw(&b,&s,hud,468.0f,600.0f)==320);
+    /* A run ends at any other draw on the target (a world draw, here, and a
+     * full-width overlay), at the next frame and on another surface. */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    /* (the left run would take the box in: the box overlaps it) */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==0);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,bar,-128.0f,768.0f)==-1);
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    s_frame++;
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    s_wide_frame_draws++;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&other,hud,58.9f,147.6f)==0);
+    /* 4 pixels of slack, no more. */
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,hud,326.9f,600.0f)==320);     /* 3.9 apart: joins */
+    assert(hud_draw(&b,&s,hud,604.5f,630.0f)==640);     /* 4.5 apart: its own */
+    assert(hud_draw(&b,&s,hud,560.0f,600.5f)==640);     /* left of it, 4 apart */
+    /* MANHUNT_WIDE_HUD_GROUP=0: each draw by its own centre, as before. */
+    s_wide_group_on=0;
+    assert(hud_draw(&b,&s,bar,50.7f,323.0f)==320);
+    assert(hud_draw(&b,&s,hud,58.9f,147.6f)==0);
+    s_wide_group_on=1;
+    s_wide_level=0;s_wide_frame_draws=0;fake_widescreen=0;
+    puts("PASS widescreen HUD anchored per element: multi-draw box stays together, clusters apart, runs end at other draws/frames/surfaces, rollback");
+}
+/* Item 11b: a menu drawn over a live level (the pause menu: 495 draws on
+ * the target, a 2D bar spanning exactly 0..640) stays centred. */
+static void widescreen_menu_test(void)
+{
+    const uint64_t hud=0x43720A569E4D3893ull,bar=0xAA8C102096129062ull,movie=0xBA9E387C24FCECE1ull;
+    GlSurf s={0};Nv2aRawBatch b={0};
+    s.w=640;s.h=480;b.vertex_count=2;b.xform=2;b.tex_va[0]=0x80611580u;
+    fake_widescreen=1;s_wide_level=1;s_wide_menu=0;s_wide_frame_draws=s_wide_frame_fit=0;
+    unsetenv("MANHUNT_WIDE_MENU");s_wide_menu_on=-1;s_frame++;
+    assert(wide_level_now());
+    /* The first pause frame is anchored from the frame before (in play). */
+    s_wide_frame_draws=470;
+    assert(hud_draw(&b,&s,bar,96.0f,196.4f)==0);
+    assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1&&s_wide_frame_fit==1);
+    s_wide_frame_draws=495;wide_frame_end();
+    assert(s_wide_level==1&&s_wide_menu==1&&!wide_level_now());
+    /* While paused: the list, the title panel and the legends stay centred. */
+    s_frame++;s_wide_frame_draws=470;
+    assert(hud_draw(&b,&s,bar,230.4f,409.6f)==320);
+    assert(hud_draw(&b,&s,bar,96.0f,196.4f)==320);
+    assert(hud_draw(&b,&s,bar,96.0f,252.2f)==320);
+    assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1);
+    assert(hud_draw(&b,&s,hud,47.4f,126.1f)==320);
+    assert(hud_draw(&b,&s,hud,534.1f,592.6f)==320);
+    s_wide_frame_draws=495;wide_frame_end();assert(!wide_level_now());
+    /* Back in play: overscanned overlays, an untextured full-screen quad (a
+     * fade) and the movie quad are not menus; the HUD goes to the edges. */
+    s_frame++;s_wide_frame_draws=470;
+    assert(hud_draw(&b,&s,bar,-128.0f,768.0f)==-1);
+    assert(hud_draw(&b,&s,hud,-289.6f,938.5f)==-1);
+    b.tex_va[0]=0;assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1);b.tex_va[0]=0x80611580u;
+    {float out[2];hud_attrs[0]=0;hud_attrs[64]=640;b.attrs=hud_attrs;wide_2d(&b,&s,movie,out);}
+    assert(s_wide_frame_fit==0);
+    s_wide_frame_draws=495;wide_frame_end();
+    assert(wide_level_now());
+    s_frame++;
+    assert(hud_draw(&b,&s,bar,96.0f,196.4f)==0);
+    /* AA target (1280 wide, factor 2): the bar at 0..640 title pixels counts. */
+    {GlSurf sa=s;Nv2aRawBatch ba=b;sa.w=1280;sa.h=960;ba.aa_sx=ba.aa_sy=2;
+     assert(hud_draw(&ba,&sa,bar,0.0f,640.0f)==-1&&s_wide_frame_fit==1);s_wide_frame_fit=0;}
+    /* MANHUNT_WIDE_MENU=0: the draw count alone, as before. */
+    s_wide_menu_on=0;
+    assert(hud_draw(&b,&s,bar,0.0f,640.0f)==-1);
+    s_wide_frame_draws=495;wide_frame_end();
+    assert(s_wide_menu==1&&wide_level_now());
+    s_frame++;assert(hud_draw(&b,&s,bar,96.0f,196.4f)==0);
+    s_wide_menu_on=1;
+    /* A menu with no level behind it stays centred either way. */
+    s_wide_frame_draws=10;wide_frame_end();s_wide_frame_draws=10;wide_frame_end();
+    assert(!s_wide_level&&!wide_level_now());
+    s_wide_menu=0;s_wide_frame_draws=s_wide_frame_fit=0;fake_widescreen=0;
+    puts("PASS widescreen menu over a live level: exact 0..640 textured 2D marks a menu frame, HUD centred; overlays/fades/movie excluded; rollback");
 }
 static Nv2aSurface surface(void)
 {
@@ -388,11 +675,12 @@ static void gpu_mode_test(void)
 }
 int main(int argc,char **argv)
 {
-    setenv("RECOMP_PROG_CACHE","0",1);
+    setenv("MANHUNT_GL_MIPMAPS","1",1);setenv("MANHUNT_GL_MIP_TRACE","1",1);setenv("RECOMP_PROG_CACHE","0",1);
+    if(argc>1&&!strcmp(argv[1],"wide")){init_fake();widescreen_classification_test();widescreen_runs_test();widescreen_menu_test();return 0;}
     if(argc>1&&!strcmp(argv[1],"gpu")){setenv("MANHUNT_GL_SYNC","gpu",1);init_fake();gpu_mode_test();return 0;}
     if(argc>1){setenv("MANHUNT_GL_SYNC","fenced",1);init_fake();fenced_ownership_test();return 0;}
-    init_fake();cache_test();palette_test();shader_modes_test();
-    widescreen_classification_test();
+    init_fake();cache_test();palette_test();mip_test();manhunt_mip_test();shader_modes_test();
+    widescreen_classification_test();widescreen_runs_test();widescreen_menu_test();
     surface_sync_test();clear_pitch_test();
     expect_success(queued_completion);
     expect_abort(context_failure);

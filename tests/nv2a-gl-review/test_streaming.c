@@ -88,22 +88,65 @@ static void packed_contract(void)
     Nv2aRawBatch b={0}; b.vertex_count=3;b.attr_present=1;b.attr_direct=1;
     b.direct[0].ptr=(const uint8_t *)positions;b.direct[0].type=2;b.direct[0].size=4;b.direct[0].stride=16;b.attrs=attrs;
     s_streaming=1;s_vring=new_ring(1024,0);unsigned maps=stream_maps,unmaps=stream_unmaps;
-    GLintptr at; assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at));
+    GLintptr at; GLint bv; assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at,&bv) && !bv);
     assert(stream_maps==maps+1 && stream_unmaps==unmaps+1 && stream_bound[1]==s_vring.buf);
     StreamBuffer *buf=&stream_buffer[s_vring.buf];const uint16_t expect16[]={2,0,1};
     assert(!memcmp(buf->data,positions,sizeof positions) && !memcmp(buf->data+at,expect16,sizeof expect16));
-    stream_fail_map=1; assert(upload_vertices(&b,indices,3,GL_UNSIGNED_INT,&at));stream_fail_map=0;
+    stream_fail_map=1; assert(upload_vertices(&b,indices,3,GL_UNSIGNED_INT,&at,&bv) && !bv);stream_fail_map=0;
     assert(!memcmp(buf->data+at,indices,sizeof indices));
     s_vring=new_ring(1024,1);maps=stream_maps;unmaps=stream_unmaps;
-    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at));
+    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at,&bv) && !bv);
     assert(stream_maps==maps && stream_unmaps==unmaps && !memcmp(s_vring.mapped+at,expect16,sizeof expect16));
     puts("PASS one packed vertex/index map, 16/32-bit indices, map-failure staging and persistent no-map uploads");
 }
+static unsigned attr_pointers;
+static void count_pointer(GLuint a, GLint s, GLenum t, GLboolean n, GLsizei st, const void *p)
+{ (void)a;(void)s;(void)t;(void)n;(void)st;(void)p; attr_pointers++; }
+/* Interleaved draws with one layout keep the pointers and land a whole number
+ * of vertices on; anything else points the attributes again. */
+static void base_vertex_contract(void)
+{
+    const uint32_t indices[]={0,1,2};
+    struct { float pos[3]; uint8_t col[4]; } v1[3], v2[3];   /* 16-byte stride, two attributes */
+    for (int i=0;i<3;i++) { for (int k=0;k<3;k++) { v1[i].pos[k]=(float)(i*3+k); v2[i].pos[k]=(float)(100+i*3+k); }
+        memset(v1[i].col,0x10+i,4); memset(v2[i].col,0x20+i,4); }
+    Nv2aRawBatch b={0}; b.vertex_count=3; b.attr_present=b.attr_direct=(1u<<0)|(1u<<3);
+    b.direct[0].type=2; b.direct[0].size=3; b.direct[0].stride=16;
+    b.direct[3].type=0; b.direct[3].size=4; b.direct[3].stride=16;
+    p_glVertexAttribPointer=count_pointer; s_streaming=1; s_vring=new_ring(4096,1); s_kept.valid=0;
+    GLintptr at1, at2; GLint bv1, bv2; unsigned before=attr_pointers;
+    b.direct[0].ptr=(const uint8_t *)&v1[0].pos; b.direct[3].ptr=v1[0].col;
+    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at1,&bv1) && !bv1 && attr_pointers==before+2);
+    GLintptr base=s_kept.at; assert(s_kept.valid && !memcmp(s_vring.mapped+base,v1,sizeof v1));
+    b.direct[0].ptr=(const uint8_t *)&v2[0].pos; b.direct[3].ptr=v2[0].col;
+    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at2,&bv2) && bv2>0 && attr_pointers==before+2);
+    assert(!memcmp(s_vring.mapped+base+(GLintptr)bv2*16,v2,sizeof v2));     /* vertex bv2 is v2[0] */
+    const uint16_t expect16[]={0,1,2}; assert(!memcmp(s_vring.mapped+at2,expect16,sizeof expect16));
+    b.direct[3].stride=20;                                                  /* two strides: not a candidate */
+    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at2,&bv2) && !bv2 && attr_pointers==before+4 && !s_kept.valid);
+    b.direct[3].stride=16;
+    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at2,&bv2) && !bv2 && attr_pointers==before+6 && s_kept.valid);
+    b.direct[3].type=4;                                                     /* same stride, other format */
+    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at2,&bv2) && !bv2 && attr_pointers==before+8);
+    assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at2,&bv2) && bv2>0 && attr_pointers==before+8);
+    /* Through every segment and back to the first: an earlier offset must point again. */
+    int wrapped=0;
+    for (int n=0; n<100000 && !wrapped; n++) {
+        GLintptr kept_at=s_kept.at; unsigned seen=attr_pointers;
+        assert(upload_vertices(&b,indices,3,GL_UNSIGNED_SHORT,&at2,&bv2) && bv2>=0);
+        if (at2<kept_at) { wrapped=1; assert(!bv2 && attr_pointers==seen+2); }
+        else if (bv2) assert(attr_pointers==seen && !memcmp(s_vring.mapped+s_kept.at+(GLintptr)bv2*16,v2,sizeof v2));
+    }
+    assert(wrapped);
+    puts("PASS kept attribute pointers: whole-vertex placement, base vertex, re-point on layout change and wrap");
+}
 static void bad_fence(void) { GlRing g=new_ring(192,1);put(&g,4,1);stream_fail_fence=1;ring_flip(&g); }
 static void bad_wait(void) { GlRing g=new_ring(192,1);for(int i=0;i<3;i++){put(&g,4,1);if(i==2)stream_fail_wait=1;ring_flip(&g);} }
+#ifndef STREAMING_NO_MAIN   /* test_narrow_indices.c reuses the fake driver */
 int main(void)
 {
     setenv("MANHUNT_PERF_LOG","2",1); init_stream();
-    persistent_contract();mutable_contract();packed_contract();expect_abort(bad_fence);expect_abort(bad_wait);
+    persistent_contract();mutable_contract();packed_contract();base_vertex_contract();expect_abort(bad_fence);expect_abort(bad_wait);
     puts("PASS persistent fence allocation/wait errors stop before unsafe reuse");return 0;
 }
+#endif

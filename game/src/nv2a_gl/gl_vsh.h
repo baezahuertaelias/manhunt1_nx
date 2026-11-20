@@ -25,6 +25,19 @@ const char *nv2a_gl_vsh_main_program(void);
 /* main() for fixed-function / pre-transformed batches (no program body). */
 const char *nv2a_gl_vsh_fixed(void);
 const char *nv2a_gl_vsh_lighting(void);
+/* GL fixed-function fog generation uniform u_fogm[5] from the register file
+ * (see gl_vsh.c). MANHUNT_GL_FF_FOG=0: all zero, no fog coordinate. */
+void nv2a_gl_vsh_fog_uniforms(const uint32_t *r, float out[5][4]);
+/* GL fixed-function spot lights and texture-coordinate generation: uniform
+ * u_ffx[NV2A_FFX_ROWS] from the register file and the batch's lighting bits
+ * (layout in gl_vsh.c). MANHUNT_GL_FF_SPOT=0 lights spots as point lights,
+ * MANHUNT_GL_FF_TEXGEN=0 passes texture coordinates through unchanged. */
+#define NV2A_FFX_ROWS 50
+void nv2a_gl_vsh_ffx_uniforms(const uint32_t *r, uint32_t lighting,
+                              float out[NV2A_FFX_ROWS][4]);
+/* Nonzero unless MANHUNT_GL_SHADER_MINOR=0: LIT pow(0, 0) = 1 and the alpha
+ * test on alpha rounded to 8 bits (the interpreter's and CPU path's forms). */
+int nv2a_gl_shader_minor(void);
 
 const char *nv2a_gl_vsh_attributes(void);
 

@@ -68,6 +68,9 @@ void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch)
     /* MANHUNT_GPU_BACKEND=2 swaps its own window, on the same native window, and leaves guest RAM alone. */
     extern int manhunt_gl_active;
     if (manhunt_gl_active) {
+        /* The flip that follows presents this surface (nv2a_gl.c, flip_surface). */
+        extern void nv2a_gl_note_flip(uint32_t va);
+        nv2a_gl_note_flip(fb_va);
         s_last_va = fb_va;
         s_last_pitch = pitch;
         s_presents++;

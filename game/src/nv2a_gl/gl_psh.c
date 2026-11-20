@@ -18,10 +18,16 @@
  * 8-11 T0-T3, 12 R0, 13 R1, and for the final combiner only 14 V1R0_SUM and
  * 15 EF_PROD. R0.a starts as T0.a.
  *
- * ponytail: the bump-map and dot-product texture modes (DOT_ST and friends)
- * sample as plain 2D, and cube maps read black on GL (Vulkan samples them);
- * the dependent AR/GB lookups are done. They are the
- * next thing to add when a title's surfaces need them.
+ * Texture modes (PS_TEXTUREMODES, xemu's numbering): 0 NONE, 1 PROJECT2D,
+ * 2 PROJECT3D, 3 CUBEMAP, 4 PASSTHRU, 5 CLIPPLANE, 6 BUMPENVMAP,
+ * 7 BUMPENVMAP_LUM, 8 BRDF, 9 DOT_ST, 10 DOT_ZW, 11 DOT_RFLCT_DIFF,
+ * 12 DOT_RFLCT_SPEC, 13 DOT_STR_3D, 14 DOT_STR_CUBE, 15 DPNDNT_AR,
+ * 16 DPNDNT_GB, 17 DOTPRODUCT, 18 DOT_RFLCT_SPEC_CONST. On GL, modes 2, 3,
+ * 6, 7, 9-14, 17 and 18 follow xemu's psh.c (texshader_fetch below);
+ * MANHUNT_GL_TEXSHADER=0 restores the old GL behaviour (cube maps black, the
+ * rest a plain 2D sample). Not done: BRDF (xemu has none either), DOT_ZW's
+ * depth replacement, volume textures (DOT_STR_3D samples the 2D image), and
+ * the HILO hemisphere dot mappings 5-7 (plain rgb, as xemu).
  */
 #include "gl_psh.h"
 
@@ -239,8 +245,202 @@ static int input_stage(const Nv2aPshKey *k, int t)
     return s < t ? s : t - 1;
 }
 
+/* MANHUNT_GL_TEXSHADER: the cube, bump-environment and dot-product texture
+ * modes on GL. -1 until read; tests may set it. */
+int nv2a_gl_texshader_on = -1;
+
+int nv2a_gl_texshader(void)
+{
+    if (nv2a_gl_texshader_on < 0) {
+        const char *e = getenv("MANHUNT_GL_TEXSHADER");
+        nv2a_gl_texshader_on = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "[MH-GL] cube/bump/dot-product texture modes: %s (MANHUNT_GL_TEXSHADER)\n",
+                nv2a_gl_texshader_on ? "on" : "off");
+    }
+    return nv2a_gl_texshader_on;
+}
+
+int nv2a_gl_texshader_cube_mode(uint32_t mode)
+{
+    return mode == 3 || mode == 11 || mode == 12 || mode == 14 || mode == 18;
+}
+
+static uint32_t stage_mode(const Nv2aPshKey *k, int t)
+{
+    return (k->shader_program >> (5 * t)) & 0x1F;
+}
+
+static int mode_dot(uint32_t m)  { return (m >= 9 && m <= 14) || m == 17 || m == 18; }
+static int mode_bump(uint32_t m) { return m == 6 || m == 7 || m == 18; }
+
+/* Whether this GL program uses texshader_fetch at all: when it does not, the
+ * shader source stays byte for byte what it was. */
+static int texshader_active(const Nv2aPshKey *k)
+{
+    int t;
+    if (nv2a_shader_vk || !nv2a_gl_texshader())
+        return 0;
+    for (t = 0; t < 4; t++) {
+        uint32_t m = stage_mode(k, t);
+        if (m == 2 || m == 3 || mode_bump(m) || mode_dot(m))
+            return 1;
+    }
+    return 0;
+}
+
+static int texshader_any(const Nv2aPshKey *k, int (*pred)(uint32_t))
+{
+    int t;
+    for (t = 0; t < 4; t++)
+        if (pred(stage_mode(k, t)))
+            return 1;
+    return 0;
+}
+
+/* xemu's signed conversions and dot mappings. The mapping per stage 1-3 is
+ * SET_DOT_RGBMAPPING, which the renderer folds into other_input [11:0]. */
+#define NV2A_TEXSHADER_GLSL \
+    "float nv2a_s1(float x) { x *= 255.0; return (x - 128.0) / 127.0; }\n" \
+    "float nv2a_s2(float x) { x *= 255.0; return x >= 128.0 ? (x - 255.5) / 127.5 : (x + 0.5) / 127.5; }\n" \
+    "float nv2a_s3(float x) { x *= 255.0; return x >= 128.0 ? (x - 256.0) / 127.0 : x / 127.0; }\n" \
+    "vec3 nv2a_dotmap(vec4 c, int m) {\n" \
+    "    if (m == 1) return vec3(nv2a_s1(c.r), nv2a_s1(c.g), nv2a_s1(c.b));\n" \
+    "    if (m == 2) return vec3(nv2a_s2(c.r), nv2a_s2(c.g), nv2a_s2(c.b));\n" \
+    "    if (m == 3) return vec3(nv2a_s3(c.r), nv2a_s3(c.g), nv2a_s3(c.b));\n" \
+    "    if (m == 4) {\n" \
+    "        uint hi = (uint(c.a * 255.0) << 8) | uint(c.r * 255.0);\n" \
+    "        uint lo = (uint(c.g * 255.0) << 8) | uint(c.b * 255.0);\n" \
+    "        return vec3(float(hi) / 65535.0, float(lo) / 65535.0, 1.0);\n" \
+    "    }\n" \
+    "    return c.rgb;\n" \
+    "}\n"
+
+static int dot_map(const Nv2aPshKey *k, int t)
+{
+    return t < 1 ? 0 : (int)((k->other_input >> (4 * (t - 1))) & 0xF);
+}
+
+static int input_stage(const Nv2aPshKey *k, int t);
+
+/* ndT = dot(vTT.xyz, map(T<input stage>)) */
+static void emit_dot(Out *o, int t, const Nv2aPshKey *k)
+{
+    emit(o, "    nd%d = dot(vT%d.xyz, nv2a_dotmap(T%d, %d));\n", t, t, input_stage(k, t), dot_map(k, t));
+}
+
+/* One stage of the modes xemu's psh.c has beyond the basic ones. Returns 0
+ * for a mode it leaves to tex_fetch. Cube lookups take the direction as it
+ * is; 2D ones the stage's texcoord scale (texels for linear images). A mode
+ * at a stage position the hardware cannot run reads zero. */
+static int texshader_fetch(Out *o, int t, uint32_t mode, const Nv2aPshKey *k)
+{
+    uint32_t prev = t > 0 ? stage_mode(k, t - 1) : 0;
+    int dots3 = t == 3 && stage_mode(k, 1) == 17 &&
+                (stage_mode(k, 2) == 17 || stage_mode(k, 2) == 11);
+
+    switch (mode) {
+    case 2:                                          /* PROJECT3D on a 2D image */
+        emit(o, "    vec4 T%d = texture(t%d, (abs(vT%d.w) > 1e-8 ? vT%d.xy / vT%d.w : vT%d.xy)"
+                " * u_tscale[%d]);\n", t, t, t, t, t, t, t);
+        return 1;
+    case 3:                                          /* CUBEMAP: (s, t, r), no divide */
+        emit(o, "    vec4 T%d = texture(t%d, vT%d.xyz);\n", t, t, t);
+        return 1;
+    case 6:                                          /* BUMPENVMAP */
+    case 7:                                          /* BUMPENVMAP_LUM */
+        if (t == 0)
+            break;
+        {
+            int s = input_stage(k, t);
+            emit(o, "    vec2 ds%d = mat2(u_bump[%d].xy, u_bump[%d].zw)"
+                    " * vec2(nv2a_s3(T%d.b), nv2a_s3(T%d.g));\n", t, 2 * t, 2 * t, s, s);
+            emit(o, "    vec4 T%d = texture(t%d, (vT%d.xy + ds%d) * u_tscale[%d]);\n", t, t, t, t, t);
+            if (mode == 7)
+                emit(o, "    T%d *= u_bump[%d].x * T%d.r + u_bump[%d].y;\n", t, 2 * t + 1, s, 2 * t + 1);
+        }
+        return 1;
+    case 17:                                         /* DOTPRODUCT */
+        if (t != 1 && t != 2)
+            break;
+        emit_dot(o, t, k);
+        emit(o, "    vec4 T%d = vec4(0.0);\n", t);
+        return 1;
+    case 9:                                          /* DOT_ST */
+        if (t < 2 || prev != 17)
+            break;
+        emit_dot(o, t, k);
+        emit(o, "    vec4 T%d = texture(t%d, vec2(nd%d, nd%d) * u_tscale[%d]);\n", t, t, t - 1, t, t);
+        return 1;
+    case 10:                                         /* DOT_ZW: depth not replaced */
+        if (t < 2 || prev != 17)
+            break;
+        emit_dot(o, t, k);
+        emit(o, "    vec4 T%d = vec4(0.0);\n", t);
+        return 1;
+    case 11:                                         /* DOT_RFLCT_DIFF */
+        if (t != 2 || prev != 17)
+            break;
+        emit_dot(o, t, k);
+        if (input_stage(k, 3) < 2)
+            emit(o, "    float nd2n = dot(vT3.xyz, nv2a_dotmap(T%d, %d));\n",
+                 input_stage(k, 3), dot_map(k, 3));
+        else
+            emit(o, "    float nd2n = 0.0;\n");
+        emit(o, "    vec4 T%d = texture(t%d, vec3(nd1, nd2, nd2n));\n", t, t);
+        return 1;
+    case 12:                                         /* DOT_RFLCT_SPEC */
+    case 18:                                         /* DOT_RFLCT_SPEC_CONST */
+        if (!dots3)
+            break;
+        emit_dot(o, t, k);
+        emit(o, "    {\n"
+                "        vec3 n = vec3(nd1, nd2, nd3), e = %s;\n"
+                "        float nn = dot(n, n);\n"
+                "        rv3 = nn != 0.0 ? 2.0 * n * dot(n, e) / nn - e : -e;\n"
+                "    }\n", mode == 12 ? "vec3(vT1.w, vT2.w, vT3.w)" : "u_eye.xyz");
+        emit(o, "    vec4 T%d = texture(t%d, rv3);\n", t, t);
+        return 1;
+    case 13:                                         /* DOT_STR_3D, on the 2D image */
+        if (!dots3)
+            break;
+        emit_dot(o, t, k);
+        emit(o, "    vec4 T%d = texture(t%d, vec2(nd1, nd2) * u_tscale[%d]);\n", t, t, t);
+        return 1;
+    case 14:                                         /* DOT_STR_CUBE */
+        if (!dots3)
+            break;
+        emit_dot(o, t, k);
+        emit(o, "    vec4 T%d = texture(t%d, vec3(nd1, nd2, nd3));\n", t, t);
+        return 1;
+    case 8:                                          /* BRDF: not done (nor in xemu) */
+        break;
+    default:
+        return 0;
+    }
+    emit(o, "    vec4 T%d = vec4(0.0);\n", t);
+    return 1;
+}
+
+/* Each combination of these modes once, so a console log shows what a title
+ * uses without RECOMP_GL_TRACE. */
+static void texshader_note(const Nv2aPshKey *k)
+{
+    static uint32_t seen[32];
+    static unsigned nseen;
+    unsigned i;
+    for (i = 0; i < nseen && seen[i] != k->shader_program; i++) { }
+    if (i < nseen || nseen >= 32)
+        return;
+    seen[nseen++] = k->shader_program;
+    fprintf(stderr, "[MH-GL] texture modes 0x%05X (stages %u %u %u %u) other 0x%08X\n",
+            (unsigned)k->shader_program, (unsigned)stage_mode(k, 0), (unsigned)stage_mode(k, 1),
+            (unsigned)stage_mode(k, 2), (unsigned)stage_mode(k, 3), (unsigned)k->other_input);
+}
+
 static void tex_fetch(Out *o, int t, uint32_t mode, const Nv2aPshKey *k)
 {
+    if (texshader_active(k) && texshader_fetch(o, t, mode, k))
+        return;
     switch (mode) {
     case 15:                                         /* DEPENDENT_AR */
     case 16:                                         /* DEPENDENT_GB */
@@ -316,9 +516,10 @@ void nv2a_fog_params(const uint32_t *regs, uint32_t xform, float out[4])
     default:     out[2] = 0.0f; break;          /* LINEAR (0x2601) */
     }
     /* A vertex program's oFog.x is the fog distance. The fixed-function
-     * path does not generate one (vFog is 0). This runtime's CPU path runs its
-     * fog_factor on that 0 too, with factor 1 when fog is off, so both paths
-     * do here; RECOMP_GL_FOG_RAW=1 keeps the renderer's original raw read. */
+     * path generates one per SET_FOG_GEN_MODE (gl_vsh.c, u_fogm); with
+     * MANHUNT_GL_FF_FOG=0 it is 0, as this runtime's CPU path still has it.
+     * Factor 1 when fog is off; RECOMP_GL_FOG_RAW=1 keeps the renderer's
+     * original raw read (and no generated coordinate). */
     static int fog_raw = -1;
     if (fog_raw < 0) {
         const char *e = getenv("RECOMP_GL_FOG_RAW");
@@ -332,12 +533,34 @@ void nv2a_fog_params(const uint32_t *regs, uint32_t xform, float out[4])
 }
 
 int nv2a_gl_gpu_mode(void);            /* nv2a_gl.c */
+int nv2a_gl_shader_minor(void);        /* gl_vsh.c */
+
+/* Whether texshader_fetch runs mode m at stage i (the positions xemu
+ * accepts; the dot-product chains need their DOTPRODUCT stages). */
+static int texshader_supported(const Nv2aPshKey *k, unsigned i, unsigned m)
+{
+    uint32_t m1 = stage_mode(k, 1), m2 = stage_mode(k, 2);
+    uint32_t prev = i ? stage_mode(k, (int)i - 1) : 0;
+    if (nv2a_shader_vk || !nv2a_gl_texshader())
+        return 0;
+    switch (m) {
+    case 2: case 3:  return 1;
+    case 6: case 7:  return i >= 1;
+    case 17:         return i == 1 || i == 2;
+    case 9: case 10: return i >= 2 && prev == 17;
+    case 11:         return i == 2 && prev == 17;
+    case 12: case 13: case 14: case 18:
+        return i == 3 && m1 == 17 && (m2 == 17 || m2 == 11);
+    default:         return 0;
+    }
+}
 
 int nv2a_gl_psh_supported(const Nv2aPshKey *k)
 {
     for (unsigned i = 0; i < 4; i++) {
         unsigned m = (k->shader_program >> (5 * i)) & 31u;
-        if (m != 0 && m != 1 && m != 4 && m != 5 && m != 15 && m != 16)
+        if (m != 0 && m != 1 && m != 4 && m != 5 && m != 15 && m != 16 &&
+            !texshader_supported(k, i, m))
             return 0;
         if ((m == 15 || m == 16) && (i == 0 ||
             (i > 1 && ((k->other_input >> (i == 2 ? 16 : 20)) & 15u) >= i)))
@@ -381,6 +604,35 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
             "layout(location = 0) out vec4 fragColor;\n"
             NV2A_FOG_GLSL
             "void main() {\n");
+    } else if (texshader_active(k)) {
+        /* Cube-sampling stages take a samplerCube; the bump and constant-eye
+         * modes their registers (u_bump[2i]: stage i's matrix 00 01 10 11,
+         * [2i + 1]: luminance scale and offset). */
+        emit(&o,
+            "#version 330 core\n"
+            "in vec4 vD0; in vec4 vD1; in vec4 vT0; in vec4 vT1;\n"
+            "in vec4 vT2; in vec4 vT3; in float vFog;\n");
+        for (i = 0; i < 4; i++)
+            emit(&o, "uniform %s t%u;\n",
+                 nv2a_gl_texshader_cube_mode(stage_mode(k, (int)i)) ? "samplerCube" : "sampler2D", i);
+        if (texshader_any(k, mode_bump))
+            emit(&o, "uniform vec4 u_bump[8]; uniform vec4 u_eye;\n");
+        if (texshader_any(k, mode_bump) || texshader_any(k, mode_dot))
+            emit(&o, NV2A_TEXSHADER_GLSL);
+        emit(&o,
+            "uniform vec2 u_tscale[4];\n"
+            "uniform vec4 u_c0[8]; uniform vec4 u_c1[8];\n"
+            "uniform vec4 u_fc0; uniform vec4 u_fc1;\n"
+            "uniform vec4 u_fogcolor;\n"
+            "uniform int u_alpha_func; uniform float u_alpha_ref;\n"
+            "uniform vec4 u_fogp;\n"
+            "out vec4 fragColor;\n"
+            NV2A_FOG_GLSL
+            "void main() {\n");
+        if (texshader_any(k, mode_dot))
+            emit(&o, "    float nd0 = 0.0, nd1 = 0.0, nd2 = 0.0, nd3 = 0.0;\n"
+                     "    vec3 rv3 = vec3(0.0);\n");
+        texshader_note(k);
     } else
     emit(&o,
         "#version 330 core\n"
@@ -427,10 +679,15 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         emit(&o, "    float fG = "); final_input(&o, cw1 >> 8, 1, k); emit(&o, ";\n");
         emit(&o, "    fragColor = vec4(fA * fB + (1.0 - fA) * fC + fD, fG);\n");
     }
+    /* The alpha test compares 8-bit alpha with the 8-bit reference, as the
+     * CPU path's alpha_test_pass does (rounded): unrounded, EQUAL almost
+     * never passed. MANHUNT_GL_SHADER_MINOR=0: the old unrounded compare. */
     emit(&o,
         "    fragColor = clamp(fragColor, 0.0, 1.0);\n"
-        "    float ar = fragColor.a * 255.0;\n"
-        "    bool pass = true;\n"
+        "    float ar = %s;\n"
+        "    bool pass = true;\n",
+        nv2a_gl_shader_minor() ? "floor(fragColor.a * 255.0 + 0.5)" : "fragColor.a * 255.0");
+    emit(&o,
         "    if (u_alpha_func == 0x200) pass = false;\n"
         "    else if (u_alpha_func == 0x201) pass = ar <  u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x202) pass = ar == u_alpha_ref;\n"

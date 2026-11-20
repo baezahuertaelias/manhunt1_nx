@@ -133,6 +133,36 @@ int main(int argc, char **argv)
     glBeginTransformFeedback(GL_POINTS); glDrawArrays(GL_POINTS, 0, 1); glEndTransformFeedback();
     glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 16, result);
     for (int k = 0; k < 4; ++k) assert(result[k] == unlit[k]);
+    /* Colour-material sources with no lights (xemu vsh-ff.c): ambient source *
+     * SET_MATERIAL_EMISSION + emission source. Manhunt's prelit world sends
+     * colmat 0x01 with scene ambient 0: the base colour is the vertex colour. */
+    {
+        static const struct { uint32_t colmat; int vc; } cases[] = {{0x01, 1}, {0x04, 1}, {0x00, 1}, {0x01, 0}, {0x11, 1}};
+        const float e[3] = {0.5f, 0.25f, 1.0f}, s[3] = {0.1f, 0.2f, 0.3f}, mvc[4] = {0.6f, 0.4f, 0.2f, 0.7f};
+        for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; ++c) {
+            uint32_t regs[0x2000 / 4] = {0};
+            float light[46][4], want[3];
+            regs[0x0298 / 4] = cases[c].colmat;
+            for (int k = 0; k < 3; ++k) { reg_float(regs, 0x03A8 + 4 * k, e[k]); reg_float(regs, 0x0A10 + 4 * k, s[k]); }
+            reg_float(regs, 0x03B4, 0.5f);
+            nv2a_gl_light_uniforms(regs, 1u | (cases[c].vc ? 4u : 0u), light);
+            if (ubo) glBufferSubData(GL_UNIFORM_BUFFER, alignment, sizeof light, light);
+            else glUniform4fv(uniform, 46, &light[0][0]);
+            glVertexAttrib4fv(2, mvc);
+            glBeginTransformFeedback(GL_POINTS); glDrawArrays(GL_POINTS, 0, 1); glEndTransformFeedback();
+            glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 16, result);
+            const int as = cases[c].vc && ((cases[c].colmat >> 2) & 3) == 1, es = cases[c].vc && (cases[c].colmat & 3) == 1;
+            for (int k = 0; k < 3; ++k) {
+                want[k] = (as ? mvc[k] : s[k]) * e[k] + (es ? mvc[k] : s[k]);
+                if (want[k] > 1) want[k] = 1;
+                if (fabsf(result[k] - want[k]) > 0.0001f) {
+                    fprintf(stderr, "colour material 0x%02X vc %d component %d want %g got %g\n",
+                            cases[c].colmat, cases[c].vc, k, want[k], result[k]);
+                    return 1;
+                }
+            }
+        }
+    }
     /* Every constant row is read through the production std140 declaration,
      * at a nonzero aligned offset. Transform feedback bypasses rasterization. */
     const char *constant_sources[] = {nv2a_gl_vsh_prelude_mode(ubo),

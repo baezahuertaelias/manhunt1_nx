@@ -208,6 +208,44 @@ static int s_streaming; /* one packed vertex/index upload, even without buffer s
 static int s_persistent; /* MANHUNT_GL_PERSISTENT: opt-in until console acceptance */
 static void ring_init(GlRing *g, int persistent);
 static void ring_flip(GlRing *g);
+/* Manhunt port addition (P7): the direct vertex ring. With RECOMP_GL_THREAD=1
+ * and persistent streaming, the executor thread copies a draw's vertex data
+ * from guest memory straight into this persistently mapped buffer, instead
+ * of into the queue record and from there into s_vring on the GL thread.
+ *
+ * Ownership: the GL thread creates and maps the buffer, then publishes
+ * `ready`. Only the executor allocates (`head`, bytes ever allocated, with
+ * wrap filler). The record for the draw carries the region's offset and its
+ * end in `head` terms. The GL thread counts what it has consumed, puts a
+ * fence after the draws that read it (every cap/8 bytes, and at each flip),
+ * and moves `tail` up to a fence's end once the GPU has passed that fence.
+ * The executor reuses bytes only below `tail` + cap, and when the ring is
+ * full it does not wait: the draw takes the old path through the queue.
+ * The GL thread never reads the region (it is mapped write-only): draws whose
+ * vertices the GL thread reads (the widescreen 2D placement) take the old
+ * path. MANHUNT_GL_DIRECT_RING=0 turns it off. */
+typedef struct {
+    uint64_t end;                /* s_xr.head after this region */
+    uint32_t at, bytes;          /* buffer offset and size of the region */
+} QRingRef;
+#define XR_FENCES 64
+static struct {
+    GLuint buf;
+    uint8_t *map;
+    size_t cap;
+    int ready;                   /* atomic; GL thread publishes buf/map/cap */
+    uint64_t tail;               /* atomic; GL thread: GPU done below this */
+    int starved;                 /* atomic; executor found the ring full */
+    /* Executor thread only. */
+    uint64_t head;
+    struct { int valid; size_t at; uint32_t stride, present, key[NV2A_RAW_ATTRS]; } anchor;
+    /* GL thread only. */
+    uint64_t consumed, fenced;
+    struct { GLsync sync; uint64_t end; } fence[XR_FENCES];
+    unsigned fence_first, fence_count;
+} s_xr = { .cap = 16u << 20 };
+static const QRingRef *s_draw_ring;     /* GL thread: this draw's vertices are in s_xr */
+static void xr_init(void);
 static const uint32_t *s_regs;          /* the executor's method shadow */
 static uint32_t      s_frame;
 /* Hitch accounting (gl_flip logs frames over 50 ms): per frame, programs
@@ -244,9 +282,51 @@ static float ambient_level(void)
     }
     return value;
 }
+/* MANHUNT_GL_FF_COLMAT=0: the old base colour, scene ambient only. Default:
+ * xemu's (vsh-ff.c) ambient source * SET_MATERIAL_EMISSION + emission source,
+ * so a prelit vertex colour routed in as emission is no longer dropped. */
+static int ff_colmat_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_FF_COLMAT");
+        on = !(e && *e == '0');
+        fprintf(stderr, "[MH-GL] fixed-function colour material: %s (MANHUNT_GL_FF_COLMAT)\n",
+                on ? "ambient/emission sources" : "scene ambient only");
+    }
+    return on;
+}
+/* The first distinct material set-ups of lit fixed-function draws, so a
+ * console run shows what the title routes where. */
+static void light_trace(const uint32_t *r, uint32_t lighting)
+{
+    static uint32_t seen[32];
+    static unsigned count;
+    const uint32_t key[] = {r[0x0298 / 4], r[0x03A8 / 4], r[0x03AC / 4], r[0x03B0 / 4],
+                            r[0x0A10 / 4], r[0x0A14 / 4], r[0x0A18 / 4], r[0x03BC / 4], lighting};
+    uint32_t h = 2166136261u;
+    for (unsigned i = 0; i < sizeof key / sizeof key[0]; i++)
+        h = (h ^ key[i]) * 16777619u;
+    for (unsigned i = 0; i < count; i++)
+        if (seen[i] == h)
+            return;
+    if (count == sizeof seen / sizeof seen[0])
+        return;
+    seen[count++] = h;
+    float f[6];
+    memcpy(f, &key[1], 12);
+    memcpy(f + 3, &key[4], 12);
+    fprintf(stderr, "[MH-GL] ffp material %u: colmat 0x%02X emission %.3f %.3f %.3f scene %.3f %.3f %.3f"
+            " lights 0x%04X vc %u\n", count, key[0], f[0], f[1], f[2], f[3], f[4], f[5], key[7],
+            (lighting >> 2) & 1u);
+}
 static void light_uniforms(const uint32_t *r, uint32_t lighting, float light[46][4])
 {
     nv2a_gl_light_uniforms(r, lighting, light);
+    if (lighting & 1u)
+        light_trace(r, lighting);
+    if (!ff_colmat_on())
+        memset(light[5], 0, sizeof light[5]);
     float ambient = ambient_level();
     if ((lighting & 1u) && ambient >= 0.0f)
         light[1][0] = light[1][1] = light[1][2] = ambient;
@@ -285,10 +365,59 @@ static void pf_bind_texture(GLenum target, GLuint tex)
 #define glUniform2fv pf_uniform2fv
 #define glUniform1i pf_uniform1i
 #define glUniform1f pf_uniform1f
+/* Manhunt port addition (MANHUNT_PERF_LOG): would merging draws pay? Every GL
+ * call that changes what a draw sees -- program, uniforms, textures and their
+ * contents or sampling, fixed state, framebuffer, constant attributes,
+ * queries -- bumps s_gl_change; a draw that finds it unchanged since the
+ * previous draw (same surface, primitive, index size and vertex layout) is
+ * counted as same_state_draws: it could have gone out in the same call. */
+static uint32_t s_gl_change;
+static void pf_bump_texture(GLenum target, GLuint tex) { s_gl_change++; pf_bind_texture(target, tex); }
+static void pf_use_program(GLuint p) { s_gl_change++; p_glUseProgram(p); }
+static void pf_clear(GLbitfield m) { s_gl_change++; p_glClear(m); }
+static void pf_bind_framebuffer(GLenum t, GLuint fb) { s_gl_change++; p_glBindFramebuffer(t, fb); }
+static void pf_blit_framebuffer(GLint a, GLint b, GLint c, GLint d, GLint e, GLint f, GLint g, GLint h,
+                                GLbitfield m, GLenum fl)
+{ s_gl_change++; p_glBlitFramebuffer(a, b, c, d, e, f, g, h, m, fl); }
+static void pf_tex_parameteri(GLenum t, GLenum n, GLint v) { s_gl_change++; p_glTexParameteri(t, n, v); }
+static void pf_tex_image(GLenum t, GLint l, GLint f, GLsizei w, GLsizei h, GLint b, GLenum fm, GLenum ty,
+                         const void *d)
+{ s_gl_change++; p_glTexImage2D(t, l, f, w, h, b, fm, ty, d); }
+static void pf_tex_sub_image(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum fm, GLenum ty,
+                             const void *d)
+{ s_gl_change++; p_glTexSubImage2D(t, l, x, y, w, h, fm, ty, d); }
+static void pf_compressed_tex_image(GLenum t, GLint l, GLenum f, GLsizei w, GLsizei h, GLint b, GLsizei n,
+                                    const void *d)
+{ s_gl_change++; p_glCompressedTexImage2D(t, l, f, w, h, b, n, d); }
+static void pf_vertex_attrib4f(GLuint a, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
+{ s_gl_change++; p_glVertexAttrib4f(a, x, y, z, w); }
+static void pf_begin_query(GLenum t, GLuint q) { s_gl_change++; p_glBeginQuery(t, q); }
+#undef glBindTexture
+#undef glUseProgram
+#undef glClear
+#undef glBindFramebuffer
+#undef glBlitFramebuffer
+#undef glTexParameteri
+#undef glTexImage2D
+#undef glTexSubImage2D
+#undef glCompressedTexImage2D
+#undef glVertexAttrib4f
+#undef glBeginQuery
+#define glBindTexture pf_bump_texture
+#define glUseProgram pf_use_program
+#define glClear pf_clear
+#define glBindFramebuffer pf_bind_framebuffer
+#define glBlitFramebuffer pf_blit_framebuffer
+#define glTexParameteri pf_tex_parameteri
+#define glTexImage2D pf_tex_image
+#define glTexSubImage2D pf_tex_sub_image
+#define glCompressedTexImage2D pf_compressed_tex_image
+#define glVertexAttrib4f pf_vertex_attrib4f
+#define glBeginQuery pf_begin_query
 static GLuint        s_cur_prog;         /* what glUseProgram last got */
 static void state_dirty(void);
 /* Last sampler state set on a GL texture (bind_stage). */
-typedef struct { GLuint id; uint32_t key; } TexParam;
+typedef struct { GLuint id; uint32_t key, border, lod; } TexParam;
 #define TEX_PARAM_SLOTS 4096
 static TexParam s_tex_param[TEX_PARAM_SLOTS];
 static void tex_param_forget(GLuint id)
@@ -749,6 +878,8 @@ typedef struct {
     uint8_t *source;
     size_t source_bytes;
     uint32_t palette_word;
+    uint32_t levels;            /* mip levels asked for (part of the identity) */
+    uint32_t levels_gl;         /* levels the GL texture holds (1..levels) */
 } GlTex;
 
 #define GL_MAX_TEX 1024
@@ -879,6 +1010,197 @@ static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch
     return (uint32_t)n;
 }
 
+/* Mipmaps. The NV2A keeps a swizzled or DXT texture's levels one after
+ * another from the texture offset, each level swizzled on its own and half
+ * the size of the one before, down to 1 texel (a DXT level is at least one
+ * 4x4 block): xemu's texture upload, and tex_face_stride in nv2a_pb_exec.c.
+ * Linear images have no levels. Only level 0 used to be uploaded, so distant
+ * floors and walls shimmered. Off by default: the console runs of 2026-11-18
+ * looked 16-24% darker with them, but that compared frame 3600 of runs that
+ * had drifted to different places (different framing, an alerted radar); over
+ * frames 2700-9000 the mean luminance is 7.7 on, 7.4 no-mip, 7.7 all off.
+ * Manhunt's TXDs hold one level per texture and its FORMAT words say 1, so for
+ * this game the chain path uploads level 0 alone and filters as before.
+ * MANHUNT_GL_MIPMAPS=1 turns them on; MANHUNT_GL_MIP_TRACE=1 logs the levels. */
+static int gl_mipmaps(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_MIPMAPS");
+        on = e && e[0] == '1' && !e[1];
+        fprintf(stderr, "  [GL] mipmaps: %s (MANHUNT_GL_MIPMAPS)\n", on ? "on" : "off");
+    }
+    return on;
+}
+
+/* Bytes per texel of the swizzled formats whose levels are uploaded; 0 for
+ * the rest, which keep level 0 only. */
+static uint32_t mip_texel_bytes(uint32_t color)
+{
+    switch (color) {
+    case 0x00: case 0x01: case 0x0B: case 0x19: return 1;
+    case 0x02: case 0x03: case 0x04: case 0x05: return 2;
+    case 0x06: case 0x07: return 4;
+    default: return 0;
+    }
+}
+
+static uint32_t dxt_block_bytes(uint32_t color)
+{
+    return color == 0x0C ? 8u : (color == 0x0E || color == 0x0F) ? 16u : 0u;
+}
+
+/* Size of one level, w and h already at least 1. */
+static uint32_t tex_level_bytes(uint32_t color, uint32_t w, uint32_t h)
+{
+    uint32_t bb = dxt_block_bytes(color);
+    if (bb)
+        return ((w + 3) / 4) * ((h + 3) / 4) * bb;
+    return w * h * mip_texel_bytes(color);
+}
+
+static uint32_t mip_dim(uint32_t d, uint32_t level)
+{
+    d >>= level;
+    return d ? d : 1;
+}
+
+/* MANHUNT_GL_MIP_TRACE=1 (default off): one line per swizzled or DXT texture
+ * upload with the stage's FORMAT level count, the levels asked for and held,
+ * the MIN filter mode, the CONTROL0 LOD clamps and the mean luminance (0-255)
+ * of every level uploaded, so a console run shows whether a level holds the
+ * texture's own image or something else. Manhunt's Xbox TXDs store one level
+ * per texture, and the console's stage-0 records (2026-11-05, [MH-DEKO-X])
+ * show MIPMAP_LEVELS 1 throughout; this confirms it for every stage. The
+ * luminance costs a pass over the level, made only while tracing. */
+static int gl_mip_trace(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_MIP_TRACE");
+        on = e && e[0] == '1' && !e[1];
+        if (on)
+            fprintf(stderr, "  [GL] mip trace: on (MANHUNT_GL_MIP_TRACE)\n");
+    }
+    return on;
+}
+
+/* The stage bind_stage is binding: FORMAT, CONTROL0, FILTER. 0 elsewhere. */
+static uint32_t s_mt_format, s_mt_control0, s_mt_filter;
+static char s_mt_line[400];
+static int s_mt_len = -1;
+static uint32_t s_mt_lines;
+
+/* Mean luminance, 0-255, of n A8R8G8B8 texels (alpha ignored). */
+static uint32_t luma_bgra(const uint32_t *p, size_t n)
+{
+    uint64_t s = 0;
+    size_t i;
+    for (i = 0; i < n; i++)
+        s += 299u * ((p[i] >> 16) & 0xFF) + 587u * ((p[i] >> 8) & 0xFF) + 114u * (p[i] & 0xFF);
+    return n ? (uint32_t)(s / ((uint64_t)n * 1000u)) : 0;
+}
+
+static uint32_t luma_565(uint32_t c)
+{
+    uint32_t r = ((c >> 11) & 31) * 255 / 31, g = ((c >> 5) & 63) * 255 / 63, b = (c & 31) * 255 / 31;
+    return 299u * r + 587u * g + 114u * b;          /* x1000 */
+}
+
+/* Mean luminance of a DXT level: each block's four colours (DXT1 with
+ * c0 <= c1: the third halfway, the fourth transparent black), weighted by
+ * the texels that pick them. Whole blocks, so a 2x2 level counts 16. */
+static uint32_t luma_dxt(const uint8_t *src, uint32_t w, uint32_t h, uint32_t color)
+{
+    uint32_t bb = dxt_block_bytes(color), nb = ((w + 3) / 4) * ((h + 3) / 4), i, k;
+    uint64_t s = 0;
+    if (!bb || !nb)
+        return 0;
+    for (i = 0; i < nb; i++) {
+        const uint8_t *b = src + (size_t)i * bb + (bb == 16 ? 8 : 0);
+        uint32_t c0 = b[0] | (uint32_t)b[1] << 8, c1 = b[2] | (uint32_t)b[3] << 8;
+        uint32_t bits = b[4] | (uint32_t)b[5] << 8 | (uint32_t)b[6] << 16 | (uint32_t)b[7] << 24;
+        uint32_t l[4];
+        l[0] = luma_565(c0);
+        l[1] = luma_565(c1);
+        if (bb == 16 || c0 > c1) {
+            l[2] = (2 * l[0] + l[1]) / 3;
+            l[3] = (l[0] + 2 * l[1]) / 3;
+        } else {
+            l[2] = (l[0] + l[1]) / 2;
+            l[3] = 0;
+        }
+        for (k = 0; k < 16; k++)
+            s += l[(bits >> (2 * k)) & 3];
+    }
+    return (uint32_t)(s / ((uint64_t)nb * 16u * 1000u));
+}
+
+static void mt_begin(uint32_t va, uint32_t color, uint32_t w, uint32_t h, uint32_t levels)
+{
+    s_mt_len = snprintf(s_mt_line, sizeof s_mt_line,
+        "  [GL] mip trace frame %u va 0x%08X fmt 0x%02X %ux%u format-levels %u asked %u"
+        " min %u lod-clamp %u..%u luma",
+        (unsigned)s_frame, (unsigned)va, (unsigned)color, (unsigned)w, (unsigned)h,
+        (unsigned)((s_mt_format >> 16) & 0xF), (unsigned)levels,
+        (unsigned)((s_mt_filter >> 16) & 0xFF), (unsigned)((s_mt_control0 >> 18) & 0xFFF),
+        (unsigned)((s_mt_control0 >> 6) & 0xFFF));
+}
+
+static void mt_level(uint32_t luma)
+{
+    if (s_mt_len < 0 || s_mt_len >= (int)sizeof s_mt_line - 16)
+        return;
+    s_mt_len += snprintf(s_mt_line + s_mt_len, sizeof s_mt_line - (size_t)s_mt_len,
+                         " %u", (unsigned)luma);
+}
+
+/* One write per line: the log splits lines written in pieces. Bounded. */
+static void mt_end(uint32_t held)
+{
+    if (s_mt_len < 0)
+        return;
+    if (s_mt_lines < 20000 && s_mt_len < (int)sizeof s_mt_line - 16) {
+        s_mt_lines++;
+        snprintf(s_mt_line + s_mt_len, sizeof s_mt_line - (size_t)s_mt_len,
+                 " held %u\n", (unsigned)held);
+        fputs(s_mt_line, stderr);
+    }
+    s_mt_len = -1;
+}
+
+/* Levels to upload for a stage's FORMAT word: MIPMAP_LEVELS (bits 16-19) for
+ * a 2D, non-cube, swizzled or DXT texture of a format with a known texel
+ * size, no more than the levels down to 1x1 (xemu does the same). 1 for
+ * everything else, and when switched off. */
+static uint32_t tex_mip_levels(uint32_t format, uint32_t w, uint32_t h)
+{
+    uint32_t color = (format >> 8) & 0xFF, levels = (format >> 16) & 0xF, top = 1;
+
+    if (levels <= 1 || (format & 4u) || ((format >> 4) & 0xF) != 2
+        || !tex_size_from_format(color)
+        || (!dxt_block_bytes(color) && !mip_texel_bytes(color)) || !gl_mipmaps())
+        return 1;
+    while ((w >> top) || (h >> top))
+        top++;                              /* log2(max(w, h)) + 1 */
+    return levels < top ? levels : top;
+}
+
+/* Guest bytes of a texture with `levels` levels: what change detection and
+ * surface syncs cover. Never less than the level-0 span tex_bytes gives. */
+static uint32_t tex_chain_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch,
+                                uint32_t levels)
+{
+    uint32_t b = tex_bytes(color, w, h, pitch), l;
+    uint64_t chain = 0;
+
+    if (levels <= 1)
+        return b;
+    for (l = 0; l < levels; l++)
+        chain += tex_level_bytes(color, mip_dim(w, l), mip_dim(h, l));
+    return chain > b ? (uint32_t)chain : b;
+}
+
 /* Xbox swizzle: texel (u, v) of a power-of-two image sits at the index made
  * by interleaving the coordinate bits, u in the even positions and v in the
  * odd ones, until the smaller dimension runs out; the larger one's remaining
@@ -898,6 +1220,30 @@ static uint32_t swizzle_index(uint32_t u, uint32_t v, uint32_t w, uint32_t h)
  * SET_TEXTURE_PALETTE (offset in the upper bits, length code in [3:2]:
  * 256, 128, 64 or 32 entries). The executor's decoder has no palette state,
  * so this format is decoded here. */
+/* Linear 4:2:2 YUV (0x24 YUY2: Y0 U Y1 V; 0x25 UYVY: U Y0 V Y1) to A8R8G8B8.
+ * The backend sampler's BT.601 maths exactly (nv2a_pb_exec.c, sample_tex), so
+ * both paths give the same colour; w is even. */
+static uint8_t yuv_clamp(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+static void yuv422_decode(const uint8_t *src, uint32_t w, uint32_t h, uint32_t pitch,
+                          uint32_t yoff, uint32_t *out)
+{
+    uint32_t x, y;
+
+    for (y = 0; y < h; y++) {
+        const uint8_t *g = src + (size_t)y * pitch;
+        uint32_t *o = out + (size_t)y * w;
+        for (x = 0; x < w; x += 2, g += 4) {
+            int cu = (int)g[1 - yoff] - 128, cv = (int)g[3 - yoff] - 128;
+            int dr = 409 * cv + 128, dg = -100 * cu - 208 * cv + 128, db = 516 * cu + 128;
+            int c0 = 298 * ((int)g[yoff] - 16), c1 = 298 * ((int)g[2 + yoff] - 16);
+            o[x]     = 0xFF000000u | (uint32_t)yuv_clamp((c0 + dr) >> 8) << 16
+                     | (uint32_t)yuv_clamp((c0 + dg) >> 8) << 8 | yuv_clamp((c0 + db) >> 8);
+            o[x + 1] = 0xFF000000u | (uint32_t)yuv_clamp((c1 + dr) >> 8) << 16
+                     | (uint32_t)yuv_clamp((c1 + dg) >> 8) << 8 | yuv_clamp((c1 + db) >> 8);
+        }
+    }
+}
+
 static uint32_t s_palette_reg, s_palette_va;   /* stage being bound */
 static const Nv2aRawBatch *s_batch;          /* draw being executed */
 
@@ -963,12 +1309,68 @@ static void tex_account(GlTex *t, uint32_t bytes)
     }
 }
 
-static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
-                      uint32_t pitch)
+/* Levels 1.. of t once level 0 is up and t's texture is bound. dxt: the
+ * compressed GL format, 0 for a decoded upload (nt0 is level 0's decoder
+ * request). An undecodable or refused level ends the chain there; the
+ * texture's GL_TEXTURE_MAX_LEVEL is set to the last level it holds. Adds
+ * the GPU bytes uploaded to *bytes and returns the levels held. */
+static uint32_t tex_upload_mips(const GlTex *t, GLenum dxt, const Nv2aTexture *nt0,
+                                uint32_t *bytes)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t l, off = tex_level_bytes(t->color, t->w, t->h);
+
+    if (t->levels <= 1)
+        return 1;
+    for (l = 1; l < t->levels; l++) {
+        uint32_t lw = mip_dim(t->w, l), lh = mip_dim(t->h, l), va = t->va + off;
+        uint32_t n = tex_level_bytes(t->color, lw, lh);
+        if (dxt) {
+            while (glGetError() != GL_NO_ERROR) { }
+            glCompressedTexImage2D(GL_TEXTURE_2D, (GLint)l, dxt, (GLsizei)lw, (GLsizei)lh, 0,
+                                   (GLsizei)n, mem + va);
+            if (glGetError() != GL_NO_ERROR)
+                break;
+            *bytes += n;
+            if (gl_mip_trace())
+                mt_level(luma_dxt(mem + va, lw, lh, t->color));
+        } else {
+            if (!s_decode)
+                break;
+            if (t->color == 0x06 || t->color == 0x07) {
+                const uint32_t *src = (const uint32_t *)(mem + va);
+                uint32_t x, y, fill = t->color == 0x07 ? 0xFF000000u : 0;
+                for (y = 0; y < lh; y++)
+                    for (x = 0; x < lw; x++)
+                        s_decode[(size_t)y * lw + x] = src[swizzle_index(x, y, lw, lh)] | fill;
+            } else {
+                Nv2aTexture nt = *nt0;
+                nt.offset = va; nt.width = lw; nt.height = lh;
+                if (!(t->color == 0x0B ? decode_indexed(va, lw, lh, s_decode)
+                                       : nv2a_backend_decode_texture(&nt, s_decode)))
+                    break;
+            }
+            glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, (GLsizei)lw, (GLsizei)lh, 0,
+                         GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+            *bytes += lw * lh * 4;
+            if (gl_mip_trace())
+                mt_level(luma_bgra(s_decode, (size_t)lw * lh));
+        }
+        off += n;
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)(l - 1));
+    return l;
+}
+
+/* The texture a stage last got from tex_get_levels, for its level count. */
+static const GlTex *s_tex_cur;
+
+static GLuint tex_get_levels(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+                             uint32_t pitch, uint32_t levels)
 {
     GlTex *t = NULL, *victim = NULL;
     uint32_t hash = 0;
-    uint32_t i, bytes = tex_bytes(color, w, h, pitch);
+    uint32_t i, bytes = tex_chain_bytes(color, w, h, pitch, levels);
     uint32_t pal_bytes = color == 0x0B ? (256u >> ((s_palette_reg >> 2) & 3u)) * 4u : 0;
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     Nv2aTexture nt;
@@ -993,11 +1395,12 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
         GlTex *c = &s_tex[i - 1];
         if (c->tex && c->va == va && c->color == color && c->w == w && c->h == h
-            && c->pal == pal) {
+            && c->pal == pal && c->levels == levels) {
             t = c;
             break;
         }
     }
+    s_tex_cur = t;
     if (!t)                                  /* a new texture: find a slot */
         for (i = 0; i < GL_MAX_TEX; i++) {
             GlTex *c = &s_tex[i];
@@ -1037,6 +1440,7 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         free(t->source);
         memset(t, 0, sizeof *t);
         t->va = va; t->color = color; t->w = w; t->h = h; t->pal = pal;
+        t->levels = levels; t->levels_gl = 1;
         tex_index_add(t);
         glGenTextures(1, &t->tex);
         tex_param_forget(t->tex);
@@ -1059,6 +1463,8 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch;
     t->hash = hash;
     t->used = t->checked = s_frame;
+    t->levels_gl = 1;
+    s_tex_cur = t;
     if (!gl_gpu()) {
         free(t->source);
         t->source_bytes = (size_t)bytes + pal_bytes;
@@ -1117,6 +1523,13 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
             glCompressedTexImage2D(GL_TEXTURE_2D, 0, fmt, (GLsizei)w, (GLsizei)h, 0,
                                    (GLsizei)size, (const uint8_t *)xbox_GetMemoryOffset() + va);
             if (glGetError() == GL_NO_ERROR) {
+                if (gl_mip_trace()) {
+                    mt_begin(va, color, w, h, t->levels);
+                    mt_level(luma_dxt((const uint8_t *)xbox_GetMemoryOffset() + va, w, h, color));
+                }
+                t->levels_gl = tex_upload_mips(t, fmt, NULL, &size);
+                if (gl_mip_trace())
+                    mt_end(t->levels_gl);
                 tex_account(t, size);
                 gl_step_done("texture upload");
                 return t->tex;
@@ -1129,6 +1542,27 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         free(s_decode);
         s_decode_cap = (size_t)w * h;
         s_decode = (uint32_t *)malloc(s_decode_cap * 4);
+    }
+    if (s_decode && (color == 0x24 || color == 0x25) && w && !(w & 1) && pitch >= w * 2
+        && ram_span(va, (size_t)pitch * h)) {
+        /* Manhunt port addition: 4:2:2 YUV, how the intro and cutscene movies
+         * hand over each frame. Through the backend's sampler (one call per
+         * texel) and a fresh allocation it cost ~57 ms a frame on the console,
+         * 16 FPS for every movie. Same BT.601 integer maths as the sampler,
+         * two texels per chroma pair, into the storage the texture already has. */
+        yuv422_decode((const uint8_t *)xbox_GetMemoryOffset() + va, w, h, pitch,
+                      color == 0x24 ? 0u : 1u, s_decode);
+        bind_tex(t->tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        if (t->bytes == w * h * 4)
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h,
+                            GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        else
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                         GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        tex_account(t, w * h * 4);
+        gl_step_done("texture upload");
+        return t->tex;
     }
     memset(&nt, 0, sizeof nt);
     nt.offset = va; nt.width = w; nt.height = h; nt.pitch = pitch; nt.color = color;
@@ -1145,13 +1579,29 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
                 s_decode[(size_t)y * w + x] = src[swizzle_index(x, y, w, h)] | fill;
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
-        tex_account(t, w * h * 4);
+        uint32_t up = w * h * 4;
+        if (gl_mip_trace()) {
+            mt_begin(va, color, w, h, t->levels);
+            mt_level(luma_bgra(s_decode, (size_t)w * h));
+        }
+        t->levels_gl = tex_upload_mips(t, 0, &nt, &up);
+        if (gl_mip_trace())
+            mt_end(t->levels_gl);
+        tex_account(t, up);
         gl_step_done("texture upload");
     } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)
                                     : nv2a_backend_decode_texture(&nt, s_decode))) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
-        tex_account(t, w * h * 4);
+        uint32_t up = w * h * 4;
+        if (gl_mip_trace()) {
+            mt_begin(va, color, w, h, t->levels);
+            mt_level(luma_bgra(s_decode, (size_t)w * h));
+        }
+        t->levels_gl = tex_upload_mips(t, 0, &nt, &up);
+        if (gl_mip_trace())
+            mt_end(t->levels_gl);
+        tex_account(t, up);
         gl_step_done("texture upload");
     } else if (gl_gpu()) {
         static const uint32_t magenta = 0xFFFF00FFu;
@@ -1168,6 +1618,12 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     return t->tex;
 }
 
+/* Level 0 only (render targets' source images, the host tests). */
+static inline GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, uint32_t pitch)
+{
+    return tex_get_levels(va, color, w, h, pitch, 1);
+}
+
 static GLint wrap_mode(uint32_t m)
 {
     switch (m) {
@@ -1176,6 +1632,62 @@ static GLint wrap_mode(uint32_t m)
     case 4:  return GL_CLAMP_TO_BORDER;
     case 5:  return GL_CLAMP_TO_EDGE;
     default: return GL_REPEAT;
+    }
+}
+
+/* SET_TEXTURE_BORDER_COLOR. Address mode 4 (border) reads the border colour
+ * register when FORMAT's BORDER_SOURCE bit (3) selects the colour, and is
+ * clamped to the edge otherwise -- exactly as the CPU renderer's sample_tex
+ * (nv2a_pb_exec.c). GL's default border is transparent black, and projected
+ * shadow maps rely on the register: without it the shadow's frustum is drawn
+ * as a dark wedge. MANHUNT_GL_BORDER=0 restores the old GL_CLAMP_TO_BORDER
+ * with GL's default colour. */
+static int gl_border(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_BORDER");
+        on = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "  [GL] texture border colour: %s (MANHUNT_GL_BORDER)\n", on ? "on" : "off");
+    }
+    return on;
+}
+
+/* Wrap mode for one axis's address nibble, honouring the border source. */
+static GLint stage_wrap(uint32_t m, int border_source)
+{
+    if (m == 4 && !border_source && gl_border())
+        return GL_CLAMP_TO_EDGE;
+    return wrap_mode(m);
+}
+
+/* SET_TEXTURE_FILTER MIN (bits 16-23): 1 box and 2 tent at LOD 0; 3 box and
+ * 4 tent at the nearest LOD; 5 box and 6 tent between two LODs; 7 the
+ * convolution kernel at LOD 0 (tent here). xemu's table. A texture holding
+ * one level takes the in-level filter of the mode, so it stays complete. */
+static GLint min_filter(uint32_t mode, uint32_t levels)
+{
+    if (!gl_mipmaps())
+        return mode == 1 ? GL_NEAREST : GL_LINEAR;     /* the old mapping */
+    switch (mode) {
+    case 1: return GL_NEAREST;
+    case 3: return levels > 1 ? GL_NEAREST_MIPMAP_NEAREST : GL_NEAREST;
+    case 4: return levels > 1 ? GL_LINEAR_MIPMAP_NEAREST : GL_LINEAR;
+    case 5: return levels > 1 ? GL_NEAREST_MIPMAP_LINEAR : GL_NEAREST;
+    case 6: return levels > 1 ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
+    default: return GL_LINEAR;
+    }
+}
+
+static uint32_t min_filter_code(GLint f)
+{
+    switch (f) {
+    case GL_NEAREST:                return 1;
+    case GL_NEAREST_MIPMAP_NEAREST: return 2;
+    case GL_LINEAR_MIPMAP_NEAREST:  return 3;
+    case GL_NEAREST_MIPMAP_LINEAR:  return 4;
+    case GL_LINEAR_MIPMAP_LINEAR:   return 5;
+    default:                        return 0;    /* GL_LINEAR */
     }
 }
 
@@ -1192,6 +1704,268 @@ static void rt_scale(uint32_t w, uint32_t h, uint32_t sw, uint32_t sh,
     if (h < lh) scale[1] *= (float)h / (float)lh;
 }
 
+/* ── Cube maps (gl_psh.c: texture modes 3, 11, 12, 14 and 18) ──────────
+ *
+ * Kept apart from the 2D texture cache: six faces of level 0, uploaded as one
+ * GL_TEXTURE_CUBE_MAP and bound to the unit's cube target. The program's
+ * samplerCube reads that target; the unit's 2D binding is left as it is.
+ * MANHUNT_GL_TEXSHADER=0: nothing here runs and cube stages bind as 2D. */
+
+/* Bytes one texel of a non-DXT format takes: tex_texel_bytes in
+ * nv2a_pb_exec.c, for the face stride. */
+static uint32_t cube_texel_bytes(uint32_t color)
+{
+    switch (color) {
+    case 0x00: case 0x01: case 0x0B: case 0x13: case 0x19: case 0x1F:
+        return 1;
+    case 0x02: case 0x03: case 0x04: case 0x05: case 0x10: case 0x11:
+    case 0x1C: case 0x1D:
+        return 2;
+    default:
+        return 4;
+    }
+}
+
+/* Bytes between faces: one face with all its mip levels (FORMAT's
+ * MIPMAP_LEVELS), rounded up to the NV2A's 128-byte face alignment --
+ * tex_face_stride in nv2a_pb_exec.c, after xemu's texture upload. */
+static uint32_t cube_face_stride(uint32_t format, uint32_t color, uint32_t n)
+{
+    uint32_t levels = (format >> 16) & 0xF, lv, total = 0;
+    uint32_t block = color == 0x0C ? 8u : (color == 0x0E || color == 0x0F) ? 16u : 0u;
+
+    if (!levels)
+        levels = 1;
+    for (lv = 0; lv < levels; lv++) {
+        uint32_t l = (n >> lv) ? (n >> lv) : 1;
+        total += block ? ((l + 3) / 4) * ((l + 3) / 4) * block : l * l * cube_texel_bytes(color);
+    }
+    return (total + 127u) & ~127u;
+}
+
+typedef struct {
+    GLuint   tex;
+    uint32_t va, color, size, stride, pal, hash, checked, used;
+    uint8_t *snap;                   /* RAM-publishing modes: exact compare */
+    size_t   snap_bytes;
+    uint32_t param_key, param_border;
+    int      param_valid;
+} GlCube;
+#define GL_MAX_CUBE 16
+static GlCube s_cube[GL_MAX_CUBE];
+
+/* Level 0 of one face, n x n, from guest RAM at va. 0 if it cannot decode. */
+static int cube_upload_face(GLenum target, uint32_t va, uint32_t color, uint32_t n)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    static int s3tc = -1;
+    Nv2aTexture nt;
+
+    if (s3tc < 0) {
+        const char *e = getenv("RECOMP_GL_DXT");
+        s3tc = !(e && *e == '0');
+    }
+    if (s3tc && (color == 0x0C || color == 0x0E || color == 0x0F)) {
+        GLenum fmt = color == 0x0C ? GL_COMPRESSED_RGBA_S3TC_DXT1_EXT
+                   : color == 0x0E ? GL_COMPRESSED_RGBA_S3TC_DXT3_EXT
+                                   : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+        uint32_t bytes = ((n + 3) / 4) * ((n + 3) / 4) * (color == 0x0C ? 8u : 16u);
+        while (glGetError() != GL_NO_ERROR) { }
+        glCompressedTexImage2D(target, 0, fmt, (GLsizei)n, (GLsizei)n, 0, (GLsizei)bytes, mem + va);
+        if (glGetError() == GL_NO_ERROR)
+            return 1;
+    }
+    if ((size_t)n * n > s_decode_cap) {
+        free(s_decode);
+        s_decode_cap = (size_t)n * n;
+        s_decode = (uint32_t *)malloc(s_decode_cap * 4);
+    }
+    if (!s_decode) {
+        s_decode_cap = 0;
+        return 0;
+    }
+    if (color == 0x06 || color == 0x07) {
+        const uint32_t *src = (const uint32_t *)(mem + va);
+        uint32_t x, y, fill = color == 0x07 ? 0xFF000000u : 0;
+        for (y = 0; y < n; y++)
+            for (x = 0; x < n; x++)
+                s_decode[(size_t)y * n + x] = src[swizzle_index(x, y, n, n)] | fill;
+    } else if (color == 0x0B) {
+        if (!decode_indexed(va, n, n, s_decode))
+            return 0;
+    } else {
+        memset(&nt, 0, sizeof nt);
+        nt.offset = va; nt.width = nt.height = n; nt.color = color;
+        nt.addr_u = nt.addr_v = 1;
+        if (!nv2a_backend_decode_texture(&nt, s_decode))
+            return 0;
+    }
+    glTexImage2D(target, 0, GL_RGBA8, (GLsizei)n, (GLsizei)n, 0, GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+    return 1;
+}
+
+/* The cube texture for six n x n faces at va, uploaded when new or changed
+ * (once a frame by hash in gpu mode, exact compare otherwise), bound to the
+ * active unit's cube target. */
+static GlCube *cube_get(uint32_t va, uint32_t format, uint32_t color, uint32_t n)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t stride = cube_face_stride(format, color, n), bytes = stride * 6, hash = 0, f;
+    uint32_t pal = color == 0x0B ? s_palette_va : 0, pal_bytes = pal ? 1024u : 0;
+    GlCube *c = NULL, *victim = NULL;
+    unsigned i;
+
+    if (!ram_span(va, bytes) || (pal && !ram_span(pal, pal_bytes)))
+        return NULL;
+    for (i = 0; i < GL_MAX_CUBE; i++) {
+        GlCube *e = &s_cube[i];
+        if (e->tex && e->va == va && e->color == color && e->size == n && e->stride == stride
+            && e->pal == pal) {
+            c = e;
+            break;
+        }
+        if (!victim || (victim->tex && (!e->tex || e->used < victim->used)))
+            victim = e;
+    }
+    if (gl_gpu()) {
+        if (c && c->checked == s_frame) {
+            c->used = s_frame;
+            glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+            return c;
+        }
+        hash = bytes_hash(va, bytes);
+        if (pal)
+            hash ^= bytes_hash(pal, pal_bytes) * 31u;
+        if (c && c->hash == hash) {
+            c->used = c->checked = s_frame;
+            glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+            return c;
+        }
+    } else if (c && c->snap && c->snap_bytes == (size_t)bytes + pal_bytes
+               && !memcmp(c->snap, mem + va, bytes)
+               && (!pal || !memcmp(c->snap + bytes, mem + pal, pal_bytes))) {
+        c->used = c->checked = s_frame;
+        glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+        return c;
+    }
+    if (!c) {
+        c = victim;
+        if (c->tex)
+            glDeleteTextures(1, &c->tex);
+        free(c->snap);
+        memset(c, 0, sizeof *c);
+        glGenTextures(1, &c->tex);
+        c->va = va; c->color = color; c->size = n; c->stride = stride; c->pal = pal;
+    }
+    c->hash = hash;
+    c->used = c->checked = s_frame;
+    if (!gl_gpu()) {
+        free(c->snap);
+        c->snap_bytes = (size_t)bytes + pal_bytes;
+        c->snap = (uint8_t *)malloc(c->snap_bytes);
+        if (c->snap) {
+            memcpy(c->snap, mem + va, bytes);
+            if (pal)
+                memcpy(c->snap + bytes, mem + pal, pal_bytes);
+        }
+    }
+    s_new_obj = 1;
+    glBindTexture(GL_TEXTURE_CUBE_MAP, c->tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    for (f = 0; f < 6; f++)
+        if (!cube_upload_face(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, va + f * stride, color, n)) {
+            /* Undecodable: magenta, every face the same size. */
+            uint32_t k, *px = (uint32_t *)malloc((size_t)n * n * 4);
+            if (!px)
+                gl_fail("cube map decode allocation failed");
+            for (k = 0; k < n * n; k++)
+                px[k] = 0xFFFF00FFu;
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA8, (GLsizei)n, (GLsizei)n, 0,
+                         GL_BGRA, GL_UNSIGNED_BYTE, px);
+            free(px);
+        }
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 0);
+    c->param_valid = 0;
+    {
+        static int logged;
+        if (logged < 16) {
+            logged++;
+            fprintf(stderr, "  [GL] cube map upload frame %u format 0x%02X %ux%u face stride %u at 0x%08X\n",
+                    (unsigned)s_frame, (unsigned)color, (unsigned)n, (unsigned)n, (unsigned)stride,
+                    (unsigned)va);
+        }
+    }
+    gl_check("cube map upload");
+    gl_step_done("texture upload");
+    return c;
+}
+
+/* bind_stage's hook: when stage i's texture mode samples a cube (gl_psh.c),
+ * bind its cube texture -- or none, so it reads black, when the texture is
+ * not a cube map -- with its sampler state, and return 1. 0: not a cube
+ * mode, bind_stage carries on as before. */
+static int cube_bind_stage(const uint32_t *regs, int i, uint32_t format, uint32_t va,
+                           uint32_t w, uint32_t h)
+{
+    uint32_t base = (0x1B00u + (uint32_t)i * 0x40u) / 4;
+    uint32_t mode = (regs[0x1E70 / 4] >> (5 * i)) & 0x1F, color = (format >> 8) & 0xFF;
+    GlCube *c = NULL;
+
+    if (!nv2a_gl_texshader() || !nv2a_gl_texshader_cube_mode(mode))
+        return 0;
+    if ((format & 4u) && w == h && tex_size_from_format(color)) {
+        texture_surface_sync(va, (size_t)cube_face_stride(format, color, w) * 6);
+        if (color == 0x0B)
+            texture_surface_sync(s_palette_va, 1024);
+        active_unit(i);                      /* a sync may have reset the unit */
+        c = cube_get(va, format, color, w);
+    } else {
+        static int logged;
+        if (logged < 8) {
+            logged++;
+            fprintf(stderr, "  [GL] cube texture mode %u on stage %d with a non-cube texture"
+                    " (format 0x%08X): reads black\n", (unsigned)mode, i, (unsigned)format);
+        }
+    }
+    if (!c) {
+        active_unit(i);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+        return 1;
+    }
+    {
+        uint32_t addr = regs[base + 2], filter = regs[base + 5];
+        int border_source = (format >> 3) & 1;
+        GLint ws = stage_wrap(addr & 0xF, border_source);
+        GLint wt = stage_wrap((addr >> 8) & 0xF, border_source);
+        GLint wr = stage_wrap((addr >> 16) & 0xF, border_source);
+        GLint mag = ((filter >> 24) & 0xF) == 1 ? GL_NEAREST : GL_LINEAR;
+        GLint min = min_filter((filter >> 16) & 0xFF, 1);
+        int use_border = gl_border() && (ws == GL_CLAMP_TO_BORDER || wt == GL_CLAMP_TO_BORDER
+                                         || wr == GL_CLAMP_TO_BORDER);
+        uint32_t border = use_border ? regs[base + 9] : 0;
+        uint32_t key = (addr & 0xF0F0F) | ((uint32_t)border_source << 4) | ((uint32_t)use_border << 5)
+                     | ((uint32_t)(mag == GL_NEAREST) << 24) | (min_filter_code(min) << 25);
+        if (!c->param_valid || c->param_key != key || c->param_border != border) {
+            c->param_valid = 1;
+            c->param_key = key;
+            c->param_border = border;
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, ws);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, wt);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, wr);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, mag);
+            glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, min);
+            if (use_border) {
+                const GLfloat bc[4] = {
+                    (float)((border >> 16) & 0xFF) / 255.0f, (float)((border >> 8) & 0xFF) / 255.0f,
+                    (float)(border & 0xFF) / 255.0f, (float)(border >> 24) / 255.0f };
+                glTexParameterfv(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BORDER_COLOR, bc);
+            }
+        }
+    }
+    return 1;
+}
+
 /* Bind stage `i` from the method shadow; returns the texcoord scale. */
 static void bind_stage(const uint32_t *regs, int i, float scale[2])
 {
@@ -1199,7 +1973,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
     uint32_t control0 = regs[base + 3];
     uint32_t format = regs[base + 1];
     uint32_t color = (format >> 8) & 0xFF;
-    uint32_t va, w, h, pitch = 0;
+    uint32_t va, w, h, pitch = 0, levels = 1, levels_gl = 1;
     GLuint tex = 0;
     GlSurf *rt;
 
@@ -1232,19 +2006,31 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
     }
     s_palette_reg = regs[base + 8];          /* SET_TEXTURE_PALETTE */
     s_palette_va = s_batch->pal_va[i];
+    if (cube_bind_stage(regs, i, format, va, w, h))
+        return;                              /* a cube-sampling texture mode */
     if (gl_gpu() && (rt = surf_find(va)) != NULL) {
         tex = rt->tex;
         /* The image the title samples is the logical one; the FBO holds it
          * at the anti-aliased size. Normalised coordinates cover both. */
         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
     } else {
+        if (!pitch) {
+            levels = tex_mip_levels(format, w, h);
+            if (levels > 1 && !ram_span(va, tex_chain_bytes(color, w, h, 0, levels)))
+                levels = 1;
+        }
         /* Prior callbacks publish their pixels to RAM; do not reuse a GPU
          * surface by address (CPU writes or allocation reuse can replace it). */
-        texture_surface_sync(va,tex_bytes(color,w,h,pitch));
+        texture_surface_sync(va,tex_chain_bytes(color,w,h,pitch,levels));
         if (color == 0x0B)
             texture_surface_sync(s_palette_va,(256u >> ((s_palette_reg >> 2)&3u))*4u);
         /* A source overlap flush can change framebuffer bindings/state. */
-        tex = tex_get(va, color, w, h, pitch);
+        s_tex_cur = NULL;
+        s_mt_format = format; s_mt_control0 = control0; s_mt_filter = regs[base + 5];
+        tex = tex_get_levels(va, color, w, h, pitch, levels);
+        s_mt_format = s_mt_control0 = s_mt_filter = 0;
+        if (s_tex_cur && s_tex_cur->tex == tex)
+            levels_gl = s_tex_cur->levels_gl;
     }
     bind_tex(tex);
     {
@@ -1254,18 +2040,45 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
          * by id and invalidated where textures are created (tex_param_forget). */
         uint32_t addr = regs[base + 2];
         uint32_t filter = regs[base + 5];
+        int border_source = (format >> 3) & 1;
+        GLint wrap_s = stage_wrap(addr & 0xF, border_source);
+        GLint wrap_t = stage_wrap((addr >> 8) & 0xF, border_source);
         GLint mag = ((filter >> 24) & 0xF) == 1 ? GL_NEAREST : GL_LINEAR;
-        GLint min = ((filter >> 16) & 0xFF) == 1 ? GL_NEAREST : GL_LINEAR;
-        uint32_t key = (addr & 0xF0F) | ((uint32_t)(mag == GL_NEAREST) << 16)
-                     | ((uint32_t)(min == GL_NEAREST) << 17) | 0x80000000u;
+        GLint min = min_filter((filter >> 16) & 0xFF, levels_gl);
+        /* The border colour matters only when an axis reads it; the LOD
+         * clamps (CONTROL0 MIN_LOD_CLAMP bits 18-29, MAX_LOD_CLAMP bits 6-17,
+         * 4.8 fixed point, as xemu reads them) only with levels to choose. */
+        int use_border = gl_border() && (wrap_s == GL_CLAMP_TO_BORDER || wrap_t == GL_CLAMP_TO_BORDER);
+        uint32_t border = use_border ? regs[base + 9] : 0;   /* SET_TEXTURE_BORDER_COLOR */
+        uint32_t lod = levels_gl > 1 ? (control0 >> 6) & 0xFFFFFFu : 0;
+        uint32_t key = (addr & 0xF0F) | ((uint32_t)border_source << 4)
+                     | ((uint32_t)use_border << 5) | ((uint32_t)(mag == GL_NEAREST) << 16)
+                     | (min_filter_code(min) << 17) | ((uint32_t)(levels_gl > 1) << 20)
+                     | 0x80000000u;
         TexParam *tp = &s_tex_param[tex % TEX_PARAM_SLOTS];
-        if (tp->id != tex || tp->key != key) {
+        if (tp->id != tex || tp->key != key || tp->border != border || tp->lod != lod) {
             tp->id = tex;
             tp->key = key;
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(addr & 0xF));
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode((addr >> 8) & 0xF));
+            tp->border = border;
+            tp->lod = lod;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_s);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_t);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, mag);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min);
+            if (use_border) {
+                const GLfloat bc[4] = {
+                    (float)((border >> 16) & 0xFF) / 255.0f, (float)((border >> 8) & 0xFF) / 255.0f,
+                    (float)(border & 0xFF) / 255.0f, (float)(border >> 24) / 255.0f };
+                glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, bc);
+            }
+            if (levels_gl > 1) {
+                /* min > max would make GL's LOD range empty: no clamp then. */
+                GLfloat lo = (float)((control0 >> 18) & 0xFFF) / 256.0f;
+                GLfloat hi = (float)((control0 >> 6) & 0xFFF) / 256.0f;
+                if (lo > hi) { lo = -1000.0f; hi = 1000.0f; }
+                glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MIN_LOD, &lo);
+                glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, &hi);
+            }
         }
     }
 }
@@ -1283,6 +2096,7 @@ static struct {
     uint32_t const_gen;
     int const_valid, light_valid;
     float light[46][4];
+    float consts[192][4];       /* what binding 0 holds while const_valid */
 } s_ubo;
 static int gl_ubo(void)
 {
@@ -1301,6 +2115,7 @@ static GLintptr ubo_align(GLintptr at)
 static void ubo_put(GLuint binding, const void *data, GLsizeiptr size)
 {
     GLintptr at = ubo_align(s_ubo.off);
+    s_gl_change++;
     glBufferSubData(GL_UNIFORM_BUFFER, at, size, data);
     glBindBufferRange(GL_UNIFORM_BUFFER, binding, s_ubo.buf, at, size);
     s_ubo.off = at + size;
@@ -1333,7 +2148,15 @@ static void uniform_blocks(const Nv2aRawBatch *b, unsigned blocks)
         s_ubo.const_valid = s_ubo.light_valid = 0;
     }
     if ((blocks & 1) && (!s_ubo.const_valid || s_ubo.const_gen != b->vp_const_gen)) {
-        ubo_put(0, b->vp_consts, GL_UBO_CONSTANT_BYTES);
+        /* Manhunt port addition: the generation moves on every constant
+         * write, rewrites of the same values included. Binding 0 still holds
+         * them then: no 3 KB upload. */
+        if (!s_ubo.const_valid || memcmp(s_ubo.consts, b->vp_consts, GL_UBO_CONSTANT_BYTES)) {
+            ubo_put(0, b->vp_consts, GL_UBO_CONSTANT_BYTES);
+            memcpy(s_ubo.consts, b->vp_consts, GL_UBO_CONSTANT_BYTES);
+        } else if (perf_detail()) {
+            PF_ADD(const_reuses, 1);
+        }
         s_ubo.const_gen = b->vp_const_gen;
         s_ubo.const_valid = 1;
     }
@@ -1368,11 +2191,20 @@ typedef struct {
     int        uni_valid;       /* uni holds the rest of its uniforms */
     int        light_valid;
     float      light[46][4];
+    GLint      u_fogm;          /* fixed-function fog generation (gl_vsh.c) */
+    int        fogm_valid;
+    float      fogm[5][4];
+    GLint      u_ffx;           /* fixed-function spot + texgen (gl_vsh.c) */
+    int        ffx_valid;
+    float      ffx[NV2A_FFX_ROWS][4];
     struct GlUni {
         float surf[4], aa[2], m[16], vpoff[4], tscale[4][2];
         float c0[8][4], c1[8][4], fog[4], fc[2][4], aref, fogp[4], wide[2];
         int   xform, afunc;
     } uni;
+    GLint      u_bump, u_eye;   /* texture-shader registers (texshader_uniforms) */
+    int        ts_valid;
+    float      ts[9][4];
 } GlProg;
 
 #define GL_MAX_PROG 1024
@@ -1759,6 +2591,8 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->u_xform = glGetUniformLocation(p->prog, "u_xform");
     p->u_wide = glGetUniformLocation(p->prog, "u_wide");
     p->u_light = glGetUniformLocation(p->prog, "u_light");
+    p->u_fogm = glGetUniformLocation(p->prog, "u_fogm");
+    p->u_ffx = glGetUniformLocation(p->prog, "u_ffx");
     p->u_tscale = glGetUniformLocation(p->prog, "u_tscale");
     p->u_c0 = glGetUniformLocation(p->prog, "u_c0");
     p->u_c1 = glGetUniformLocation(p->prog, "u_c1");
@@ -1768,6 +2602,8 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->u_fc1 = glGetUniformLocation(p->prog, "u_fc1");
     p->u_afunc = glGetUniformLocation(p->prog, "u_alpha_func");
     p->u_aref = glGetUniformLocation(p->prog, "u_alpha_ref");
+    p->u_bump = glGetUniformLocation(p->prog, "u_bump");
+    p->u_eye = glGetUniformLocation(p->prog, "u_eye");
     glUseProgram(p->prog);
     s_cur_prog = p->prog;
     for (i = 0; i < 4; i++) {
@@ -1868,6 +2704,8 @@ static int ready(void)
                 storage ? "available" : "unavailable", s_persistent ? "on" : "off", s_streaming ? "on" : "off");
         ring_init(&s_vring, s_persistent);
         ring_init(&s_iring, 0);
+        if (s_q_on)
+            xr_init();
     }
     s_state = 1;
     prog_cache_prewarm();
@@ -1927,6 +2765,8 @@ typedef struct {
     uint32_t stencil, smask, sfunc, sref, sread, sop[3];
     uint32_t cull, cullface, front, cm;
     GLint    sc[4];                     /* scissor, stored pixels; sc[2] 0 = off */
+    uint32_t poff;                      /* polygon offset: 1 point, 2 line, 4 fill */
+    float    pfactor, punits;           /* glPolygonOffset arguments while poff */
 } GlState;
 static GlState s_st;
 static int s_st_valid;
@@ -1952,6 +2792,44 @@ static void surface_scissor(const uint32_t *r, const GlSurf *s, GLint sc[4])
     sc[1] = to_stored(y0, s->ph, s->h);
     sc[2] = to_stored(x1, s->pw, s->w) - sc[0];
     sc[3] = to_stored(y1, s->ph, s->h) - sc[1];
+}
+
+/* Depth bias. SET_POLY_OFFSET_{POINT,LINE,FILL}_ENABLE (0x318, 0x31C, 0x320)
+ * and SET_POLYGON_OFFSET_SCALE_FACTOR / _BIAS (0x384, 0x388, floats) go to
+ * glPolygonOffset as xemu passes them. The bias is in units of the guest's
+ * depth format; the GL depth buffer here is always 24-bit, so a Z16 bias
+ * (zmax 0xFFFF) is scaled by 256 to stay the same fraction of the depth
+ * range. Without it decals z-fought the surface beneath them.
+ * MANHUNT_GL_POLY_OFFSET=0 leaves polygon offset untouched, the old path. */
+static int gl_poly_offset(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_POLY_OFFSET");
+        on = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "  [GL] polygon offset: %s (MANHUNT_GL_POLY_OFFSET)\n", on ? "on" : "off");
+    }
+    return on;
+}
+
+static float reg_float(uint32_t v)
+{
+    float f;
+    memcpy(&f, &v, sizeof f);
+    return f;
+}
+
+static uint32_t zmax_of(const uint32_t *r);
+
+static void poly_offset_state(const uint32_t *r, int has_depth, GlState *want)
+{
+    if (!has_depth)
+        return;
+    want->poff = (r[0x318 / 4] ? 1u : 0u) | (r[0x31C / 4] ? 2u : 0u) | (r[0x320 / 4] ? 4u : 0u);
+    if (want->poff) {
+        want->pfactor = reg_float(r[0x384 / 4]);
+        want->punits = reg_float(r[0x388 / 4]) * (zmax_of(r) == 0xFFFFu ? 256.0f : 1.0f);
+    }
 }
 
 static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
@@ -1987,8 +2865,11 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
         }
     }
     want.cm = cm;
+    if (gl_poly_offset())
+        poly_offset_state(r, has_depth, &want);
     if (s_st_valid && !memcmp(&want, &s_st, sizeof want))
         return;
+    s_gl_change++;
     if (state_cache_enabled()) {
         const int valid = s_st_valid;
         const GlState old = s_st;
@@ -2026,6 +2907,16 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
         if (want.sc[2] > 0 && (!valid || memcmp(want.sc, old.sc, sizeof want.sc)))
             glScissor(want.sc[0], want.sc[1], want.sc[2], want.sc[3]);
         if (!valid) glEnable(0x864F); /* GL_DEPTH_CLAMP */
+        if (gl_poly_offset()) {
+            if (CHANGED(poff)) {
+                const uint32_t was = valid ? old.poff : ~want.poff;
+                if ((want.poff ^ was) & 1) { if (want.poff & 1) glEnable(GL_POLYGON_OFFSET_POINT); else glDisable(GL_POLYGON_OFFSET_POINT); }
+                if ((want.poff ^ was) & 2) { if (want.poff & 2) glEnable(GL_POLYGON_OFFSET_LINE); else glDisable(GL_POLYGON_OFFSET_LINE); }
+                if ((want.poff ^ was) & 4) { if (want.poff & 4) glEnable(GL_POLYGON_OFFSET_FILL); else glDisable(GL_POLYGON_OFFSET_FILL); }
+            }
+            if (want.poff && (!valid || !old.poff || CHANGED(pfactor) || CHANGED(punits)))
+                glPolygonOffset(want.pfactor, want.punits);
+        }
 #undef TOGGLE
 #undef CHANGED
         s_st = want;
@@ -2084,6 +2975,55 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
      * (NFSU2's loading screen, z = 1.0 through its vertex program) vanished
      * whenever rounding put it a hair beyond. */
     glEnable(0x864F);                               /* GL_DEPTH_CLAMP */
+    if (gl_poly_offset()) {
+        if (want.poff & 1) glEnable(GL_POLYGON_OFFSET_POINT); else glDisable(GL_POLYGON_OFFSET_POINT);
+        if (want.poff & 2) glEnable(GL_POLYGON_OFFSET_LINE); else glDisable(GL_POLYGON_OFFSET_LINE);
+        if (want.poff & 4) glEnable(GL_POLYGON_OFFSET_FILL); else glDisable(GL_POLYGON_OFFSET_FILL);
+        if (want.poff)
+            glPolygonOffset(want.pfactor, want.punits);
+    }
+}
+
+/* Bump-environment registers (SET_TEXTURE_SET_BUMP_ENV_MAT / _SCALE /
+ * _OFFSET, stages 1-3) and SET_EYE_VECTOR for programs that read them
+ * (gl_psh.c's u_bump and u_eye). */
+static void texshader_uniforms(GlProg *p, const uint32_t *r)
+{
+    float v[9][4];
+    int i;
+
+    if (p->u_bump < 0 && p->u_eye < 0)
+        return;
+    memset(v, 0, sizeof v);
+    for (i = 1; i < 4; i++) {
+        uint32_t b = (0x1B28u + (uint32_t)i * 0x40u) / 4;
+        memcpy(v[2 * i], &r[b], 16);                 /* matrix 00 01 10 11 */
+        memcpy(&v[2 * i + 1][0], &r[b + 4], 4);      /* 0x1B38 scale */
+        memcpy(&v[2 * i + 1][1], &r[b + 5], 4);      /* 0x1B3C offset */
+    }
+    memcpy(v[8], &r[0x181C / 4], 12);                /* SET_EYE_VECTOR */
+    if (p->ts_valid && !memcmp(v, p->ts, sizeof v))
+        return;
+    if (p->u_bump >= 0) glUniform4fv(p->u_bump, 8, v[0]);
+    if (p->u_eye >= 0) glUniform4fv(p->u_eye, 1, v[8]);
+    memcpy(p->ts, v, sizeof v);
+    p->ts_valid = 1;
+}
+
+/* SET_DOT_RGBMAPPING into the key's other_input [11:0] (xemu's SHADERCTL)
+ * when a dot-product mode reads it; other programs keep their key. */
+static void texshader_key(const uint32_t *r, Nv2aPshKey *k)
+{
+    int t;
+    if (!nv2a_gl_texshader())
+        return;
+    for (t = 0; t < 4; t++) {
+        uint32_t m = (k->shader_program >> (5 * t)) & 0x1F;
+        if ((m >= 9 && m <= 14) || m == 17 || m == 18) {
+            k->other_input |= r[0x1E74 / 4] & 0xFFFu;
+            return;
+        }
+    }
 }
 
 static void psh_key(const uint32_t *r, Nv2aPshKey *k)
@@ -2102,17 +3042,20 @@ static void psh_key(const uint32_t *r, Nv2aPshKey *k)
     k->final1 = r[0x28C / 4];
     k->shader_program = r[0x1E70 / 4];
     k->other_input = r[0x1E78 / 4];
+    texshader_key(r, k);
 }
 
 /* NV097 primitive -> GL, rewriting the ones core GL lacks. */
 static uint32_t *s_prim_idx;
 static size_t    s_prim_cap;
 
-static GLenum gl_prim(const Nv2aRawBatch *b, const uint32_t **idx, uint32_t *n)
+/* *idx is uint16_t when b->indices16 is set (narrowed by the executor,
+ * MANHUNT_NARROW_INDICES), uint32_t otherwise; QUADS keep the width. */
+static GLenum gl_prim(const Nv2aRawBatch *b, const void **idx, uint32_t *n)
 {
     uint32_t i, m = 0;
 
-    *idx = b->indices;
+    *idx = b->indices16 ? (const void *)b->indices16 : (const void *)b->indices;
     *n = b->index_count;
     switch (b->prim) {
     case 1: return 0x0000;             /* POINTS */
@@ -2131,6 +3074,17 @@ static GLenum gl_prim(const Nv2aRawBatch *b, const uint32_t **idx, uint32_t *n)
             s_prim_idx = (uint32_t *)malloc(s_prim_cap * 4);
         }
         if (!s_prim_idx) gl_fail("primitive index allocation failed");
+        if (b->indices16) {
+            uint16_t *o = (uint16_t *)s_prim_idx;
+            for (i = 0; i + 3 < b->index_count; i += 4) {
+                const uint16_t *q = b->indices16 + i;
+                o[m++] = q[0]; o[m++] = q[1]; o[m++] = q[2];
+                o[m++] = q[0]; o[m++] = q[2]; o[m++] = q[3];
+            }
+            *idx = o;
+            *n = m;
+            return GL_TRIANGLES;
+        }
         for (i = 0; i + 3 < b->index_count; i += 4) {
             const uint32_t *q = b->indices + i;
             s_prim_idx[m++] = q[0]; s_prim_idx[m++] = q[1]; s_prim_idx[m++] = q[2];
@@ -2281,6 +3235,108 @@ static void ring_done(GlRing *g, GLintptr at, GLsizeiptr size, void *ptr,
     gl_check("vertex/index buffer upload");
 }
 
+/* The direct vertex ring (see s_xr). GL thread: create and map it once. */
+static void xr_init(void)
+{
+    const GLbitfield flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+    const char *e = getenv("MANHUNT_GL_DIRECT_RING");
+    void *map = NULL;
+
+    if (e && !strcmp(e, "0")) {
+        fprintf(stderr, "  [GL] direct vertex ring: off (MANHUNT_GL_DIRECT_RING=0)\n");
+        return;
+    }
+    if (!s_persistent || !s_vring.mapped || !s_xr.cap) {
+        fprintf(stderr, "  [GL] direct vertex ring: off, needs persistent streaming (MANHUNT_GL_DIRECT_RING)\n");
+        return;
+    }
+    s_xr.cap &= ~(size_t)63;
+    glGenBuffers(1, &s_xr.buf);
+    glBindBuffer(GL_ARRAY_BUFFER, s_xr.buf);
+    glBufferStorage(GL_ARRAY_BUFFER, (GLsizeiptr)s_xr.cap, NULL, flags);
+    if (perf_detail()) PF_ADD(maps, 1);
+    map = glMapBufferRange(GL_ARRAY_BUFFER, 0, (GLsizeiptr)s_xr.cap, flags);
+    if (!map) {
+        GLenum error = glGetError();
+        (void)error;
+        glDeleteBuffers(1, &s_xr.buf);
+        s_xr.buf = 0;
+    } else {
+        s_xr.map = (uint8_t *)map;
+        __atomic_store_n(&s_xr.ready, 1, __ATOMIC_RELEASE);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, s_vring.buf);
+    fprintf(stderr, "  [GL] direct vertex ring: %s, %zu KB (MANHUNT_GL_DIRECT_RING)\n",
+            map ? "on" : "off, persistent map failed", s_xr.cap >> 10);
+}
+
+/* GL thread: hand back to the executor every region the GPU has finished
+ * with. Polls without waiting. */
+static void xr_retire(void)
+{
+    while (s_xr.fence_count) {
+        unsigned i = s_xr.fence_first;
+        GLenum st = glClientWaitSync(s_xr.fence[i].sync, 0, 0);
+        if (st == GL_TIMEOUT_EXPIRED)
+            break;
+        if (st == GL_WAIT_FAILED)
+            glFinish();                 /* cannot tell: make it certainly done */
+        glDeleteSync(s_xr.fence[i].sync);
+        __atomic_store_n(&s_xr.tail, s_xr.fence[i].end, __ATOMIC_RELEASE);
+        s_xr.fence_first = (i + 1) % XR_FENCES;
+        s_xr.fence_count--;
+    }
+}
+
+/* GL thread: fence the draws submitted so far that read the ring. flush
+ * submits the fence now (mid-frame); a flip's swap submits it anyway. */
+static void xr_fence(int flush)
+{
+    GLsync sync;
+    if (!s_xr.map || s_xr.consumed == s_xr.fenced)
+        return;
+    if (s_xr.fence_count == XR_FENCES) {
+        /* Never more than XR_FENCES in flight: wait for the oldest. */
+        unsigned i = s_xr.fence_first;
+        GLenum st;
+        do st = glClientWaitSync(s_xr.fence[i].sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        while (st == GL_TIMEOUT_EXPIRED);
+        if (st == GL_WAIT_FAILED)
+            glFinish();
+        xr_retire();
+    }
+    sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) {
+        /* No fence: wait for everything, then the whole consumed range is free. */
+        glFinish();
+        s_xr.fenced = s_xr.consumed;
+        while (s_xr.fence_count) xr_retire();
+        __atomic_store_n(&s_xr.tail, s_xr.consumed, __ATOMIC_RELEASE);
+        return;
+    }
+    if (flush)
+        (void)glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+    s_xr.fence[(s_xr.fence_first + s_xr.fence_count) % XR_FENCES].sync = sync;
+    s_xr.fence[(s_xr.fence_first + s_xr.fence_count) % XR_FENCES].end = s_xr.consumed;
+    s_xr.fence_count++;
+    s_xr.fenced = s_xr.consumed;
+}
+
+/* GL thread, after replaying a record whose vertices are in the ring
+ * (drawn or not): that region now belongs to the draws submitted. */
+static void xr_consumed(const QRingRef *ref)
+{
+    if (ref->end > s_xr.consumed)
+        s_xr.consumed = ref->end;
+    if (s_xr.consumed - s_xr.fenced >= s_xr.cap / 8) {
+        xr_fence(1);
+        xr_retire();
+    } else if (__atomic_load_n(&s_xr.starved, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&s_xr.starved, 0, __ATOMIC_RELAXED);
+        xr_retire();
+    }
+}
+
 /* Which vertex attribute arrays are enabled in s_vao (only this file
  * touches it): enable and disable only on change. */
 static uint32_t s_attr_on;
@@ -2372,25 +3428,80 @@ static void count_converted(const Nv2aRawBatch *b, uint16_t conv)
     }
 }
 
-static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
-                           uint32_t index_count, GLenum index_type, GLintptr *index_at)
+/* Manhunt port addition: the attribute pointers in force, when they were set
+ * for one interleaved run (one source buffer, one stride, nothing converted)
+ * -- the usual vertex. A later draw with the same layout, placed a whole
+ * number of vertices further on in the same buffer, keeps them and draws with
+ * a base vertex: Mesa then has no vertex arrays to validate again. */
+static struct {
+    int valid;
+    GLuint buf;
+    GLintptr at;                 /* buffer offset of the run's first byte */
+    uint32_t stride, present;
+    uint32_t key[NV2A_RAW_ATTRS];
+} s_kept;
+/* MANHUNT_GL_BASE_VERTEX=0 re-points the attributes for every draw, as before. */
+static int base_vertex_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_BASE_VERTEX");
+        on = !(e && *e == '0');
+        fprintf(stderr, "  [GL] kept attribute pointers with a base vertex: %s (MANHUNT_GL_BASE_VERTEX)\n",
+                on ? "on" : "off");
+    }
+    return on;
+}
+
+static int upload_vertices(const Nv2aRawBatch *b, const void *indices,
+                           uint32_t index_count, GLenum index_type, GLintptr *index_at,
+                           GLint *base_vertex)
 {
     VRun run[NV2A_RAW_ATTRS];
     int of_run[NV2A_RAW_ATTRS];
     uint32_t slot[NV2A_RAW_ATTRS], np = 0, nrun = 0, a, i, v;
     uint32_t nv = b->vertex_count;
     uint16_t conv = b->attr_present & (uint16_t)~b->attr_direct;
-    GLsizeiptr bytes = 0, pack_at, index_offset = 0;
-    GLintptr at;
+    GLsizeiptr bytes = 0, pack_at, index_offset = 0, alloc;
+    GLintptr at, alloc_at;
     uint8_t *dst;
     void *map;
     static uint8_t *staging;
     static size_t staging_cap;
+    uint32_t stride = 0, key[NV2A_RAW_ATTRS];
+    int keep = 0;
+    /* Direct ring (s_xr): the executor already placed the vertices, every
+     * attribute direct, direct[a].ptr an offset into the region at xr->at.
+     * Only the indices go through s_vring here. */
+    const QRingRef *xr = s_draw_ring;
 
+    *base_vertex = 0;
     if (!nv)
         return 0;
     count_converted(b, conv);
-    nrun = vertex_runs(b, run, of_run);
+    nrun = xr ? 0 : vertex_runs(b, run, of_run);
+    if (xr ? b->attr_direct && base_vertex_enabled()
+           : s_streaming && s_vring.mapped && nrun == 1 && !conv && b->attr_direct && base_vertex_enabled()) {
+        /* A candidate: every attribute in the one run, all with one stride.
+         * In the ring the key is each attribute's offset in the region, so
+         * one stride is enough: equal keys mean equal placement. */
+        stride = 0;
+        for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+            key[a] = 0;
+            if (!(b->attr_direct & (1u << a)))
+                continue;
+            /* Ring offsets from 0x10000 up would collide with the type bits. */
+            if (!b->direct[a].stride || (stride && b->direct[a].stride != stride)
+                || (xr && (uintptr_t)b->direct[a].ptr >= 0x10000)) {
+                stride = 0;
+                break;
+            }
+            stride = b->direct[a].stride;
+            key[a] = (uint32_t)(xr ? (uintptr_t)b->direct[a].ptr
+                                   : (uintptr_t)(b->direct[a].ptr - run[0].lo))
+                   | b->direct[a].type << 16 | b->direct[a].size << 24;
+        }
+    }
     for (i = 0; i < nrun; i++) {
         run[i].at = bytes;
         bytes += ((GLsizeiptr)(run[i].hi - run[i].lo) + 15) & ~(GLsizeiptr)15;
@@ -2400,15 +3511,49 @@ static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
             slot[np++] = a;
     pack_at = bytes;
     bytes += (GLsizeiptr)nv * np * 4 * sizeof(float);
-    if (!bytes)
+    if (!bytes && !xr)
         return 0;
 
     if (s_streaming) {
         index_offset = (bytes + 3) & ~(GLsizeiptr)3;
         bytes = index_offset + (GLsizeiptr)index_count * (index_type == GL_UNSIGNED_SHORT ? 2 : 4);
     }
-    at = ring_alloc(&s_vring, bytes, &map);
+    /* A candidate takes up to stride - 1 bytes more, to land a whole number
+     * of vertices after the kept pointers. */
+    alloc = bytes + (stride && !xr ? (GLsizeiptr)stride - 1 : 0);
+    alloc_at = at = ring_alloc(&s_vring, alloc, &map);
     dst = (uint8_t *)map;
+    if (xr) {
+        /* The executor placed the region a whole number of vertices after
+         * its own last region of this layout when it could (xr_alloc). */
+        GLintptr xat = (GLintptr)xr->at;
+        keep = stride && s_kept.valid && s_kept.buf == s_xr.buf && s_kept.stride == stride
+            && s_kept.present == b->attr_present && xat >= s_kept.at
+            && (xat - s_kept.at) % (GLintptr)stride == 0
+            && (xat - s_kept.at) / (GLintptr)stride <= 0x7FFFFFFF
+            && !memcmp(s_kept.key, key, sizeof key);
+        if (keep) {
+            *base_vertex = (GLint)((xat - s_kept.at) / (GLintptr)stride);
+            if (perf_detail()) PF_ADD(kept_attr_draws, 1);
+        }
+    } else if (stride && dst) {
+        GLintptr shift = 0;
+        keep = s_kept.valid && s_kept.buf == s_vring.buf && s_kept.stride == stride
+            && s_kept.present == b->attr_present && at >= s_kept.at
+            && !memcmp(s_kept.key, key, sizeof key);
+        if (keep) {
+            GLintptr d = (at - s_kept.at) % (GLintptr)stride;
+            shift = d ? (GLintptr)stride - d : 0;
+            if ((at + shift - s_kept.at) / (GLintptr)stride > 0x7FFFFFFF)
+                keep = 0;
+        }
+        if (keep) {
+            at += shift;
+            dst += shift;
+            *base_vertex = (GLint)((at - s_kept.at) / (GLintptr)stride);
+            if (perf_detail()) PF_ADD(kept_attr_draws, 1);
+        }
+    }
     if (!dst) {
         if ((size_t)bytes > staging_cap) {
             free(staging);
@@ -2430,16 +3575,36 @@ static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
     }
     if (s_streaming) {
         *index_at = at + index_offset;
-        if (index_type == GL_UNSIGNED_SHORT) {
+        if (b->indices16) {             /* narrowed by the executor (gl_prim) */
+            if (index_type == GL_UNSIGNED_SHORT) {
+                memcpy(dst + index_offset, indices, (size_t)index_count * 2);
+            } else {
+                uint32_t *out = (uint32_t *)(dst + index_offset);
+                for (i = 0; i < index_count; ++i) out[i] = ((const uint16_t *)indices)[i];
+            }
+        } else if (index_type == GL_UNSIGNED_SHORT) {
             uint16_t *out = (uint16_t *)(dst + index_offset);
-            for (i = 0; i < index_count; ++i) out[i] = (uint16_t)indices[i];
+            for (i = 0; i < index_count; ++i) out[i] = (uint16_t)((const uint32_t *)indices)[i];
         } else {
             memcpy(dst + index_offset, indices, (size_t)index_count * 4);
         }
     }
-    ring_done(&s_vring, at, bytes, map, staging);
+    ring_done(&s_vring, alloc_at, alloc, map, staging);
     if (s_streaming) glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_vring.buf);
 
+    if (keep)
+        return 1;
+    /* New pointers: remembered when this draw is a candidate. */
+    s_kept.valid = stride && (xr || map);
+    if (s_kept.valid) {
+        s_kept.buf = xr ? s_xr.buf : s_vring.buf;
+        s_kept.at = xr ? (GLintptr)xr->at : at;
+        s_kept.stride = stride;
+        s_kept.present = b->attr_present;
+        memcpy(s_kept.key, key, sizeof key);
+    }
+    if (xr)
+        glBindBuffer(GL_ARRAY_BUFFER, s_xr.buf);   /* what the pointers below capture */
     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
         GLintptr off;
         GLint size;
@@ -2452,7 +3617,10 @@ static int upload_vertices(const Nv2aRawBatch *b, const uint32_t *indices,
         attr_enable(a, 1);
         if (!(b->attr_direct & (1u << a)))
             continue;
-        off = at + run[of_run[a]].at + (b->direct[a].ptr - run[of_run[a]].lo);
+        if (xr)
+            off = (GLintptr)xr->at + (GLintptr)(uintptr_t)b->direct[a].ptr;
+        else
+            off = at + run[of_run[a]].at + (b->direct[a].ptr - run[of_run[a]].lo);
         size = (GLint)b->direct[a].size;
         switch (b->direct[a].type) {
         case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
@@ -2550,7 +3718,9 @@ static int wide_xrange(const Nv2aRawBatch *b, float *mn, float *mx)
     float minx = 1e30f, maxx = -1e30f;
     uint32_t v;
 
-    if (!b->vertex_count)
+    /* Vertices in the direct ring are not readable here (write-only map);
+     * the executor keeps the draws placed by this on the queue path. */
+    if (!b->vertex_count || s_draw_ring)
         return 0;
     for (v = 0; v < b->vertex_count; v++) {
         float x, q[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -2592,8 +3762,9 @@ static int wide_target(const Nv2aRawBatch *b, const GlSurf *s)
  * (the previous frame had enough draws on the 640x480 target, see wide_level_next) a 2D draw
  * is squeezed about the screen edge nearest to its own centre instead: the
  * left edge, the right edge, or the middle for what is centred (crosshair,
- * subtitles, prompts). Menus and movies are not level frames and stay
- * centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
+ * subtitles, prompts); per element, not per draw (s_wide_run below). Menus,
+ * a menu over a level (wide_level_now) and movies are not level frames and
+ * stay centred. MANHUNT_WIDE_HUD=0 restores the centred block for comparison. */
 /* Level detection with hysteresis. Menus and loading screens draw 0 to 41
  * (console run, frames 391 to 841: they sat on 37 to 41 and a single
  * threshold flipped every frame or two); a level averages about 90 and a
@@ -2615,6 +3786,96 @@ static int wide_hud_edges(void)
     return on;
 }
 
+/* An on-by-default switch, "0" turns it off; said once, when first read. */
+static int env_switch(const char *name, int *cache, const char *on_text, const char *off_text)
+{
+    if (*cache < 0) {
+        const char *e = getenv(name);
+        *cache = !(e && e[0] == '0' && !e[1]);
+        fprintf(stderr, "  [GL] %s (%s=%s)\n", *cache ? on_text : off_text, name, e ? e : "unset");
+    }
+    return *cache;
+}
+
+/* A menu over a live level. The pause menu draws over the running world
+ * (runs 40, 41, 44, 45, 47, 48 caught it: 458 fixed-function world draws,
+ * 495 on the target), so the draw count calls it a level and its list
+ * (x 96..252) was pushed to the left edge while its title stayed centred.
+ * The 3D draws are no help: the world is drawn under the menu as in play.
+ * What the pause frame has and no captured level frame has is a 2D draw
+ * spanning exactly the target, x 0..640 (the menu's full-width bar, program
+ * AA8C1020..., 4 vertices); the level's own full-width overlays overscan
+ * (x -128..768, -289..938, -320..959) and the movie quad is excluded by
+ * its program. Only a textured one counts: a fade or a flash is likely a
+ * plain colour quad (the first full-width 2D draw of the 2026-11-18 run has
+ * no texture) and must not move the HUD. The main menu's pages draw such a
+ * quad too (run 37), and are not levels either. A frame with one makes the next frame a menu frame: its
+ * 2D stays a centred 4:3 block. MANHUNT_WIDE_MENU=0: the draw count alone,
+ * as before. */
+static uint32_t s_wide_frame_draws, s_wide_frame_fit;
+static int s_wide_menu, s_wide_menu_on = -1;
+static int wide_menu_check(void)
+{
+    return env_switch("MANHUNT_WIDE_MENU", &s_wide_menu_on,
+                       "widescreen: a 2D draw spanning exactly 0..640 marks a menu frame (HUD centred)",
+                       "widescreen: level frames from the draw count alone");
+}
+/* Whether 2D draws are edge-anchored this frame. */
+static int wide_level_now(void)
+{
+    return s_wide_level && !(s_wide_menu && wide_menu_check());
+}
+
+/* At the flip: what the frame just drawn says about the next one. The Scrap
+ * level averages about 90 draws on the 640x480 target, busier scenes 900; a
+ * menu has up to about 41 and a movie 1 or 2. The first transitions are
+ * logged so a run shows whether the HUD anchoring was on. */
+static void wide_frame_end(void)
+{
+    static unsigned s_logged;
+    int was = wide_level_now(), now;
+    s_wide_level = wide_level_next(s_wide_level, s_wide_frame_draws);
+    s_wide_menu = s_wide_frame_fit != 0;
+    now = wide_level_now();
+    if (now != was && xbox_video_widescreen() && s_logged++ < 24)
+        fprintf(stderr, "[MH-WIDE] frame %u: %s (%u draws on the target, %u exactly full-width)\n",
+                s_frame, now ? "level, HUD anchored to the edges"
+                : s_wide_level ? "menu over a level, HUD centred" : "not a level, HUD centred",
+                s_wide_frame_draws, s_wide_frame_fit);
+    s_wide_frame_draws = 0;
+    s_wide_frame_fit = 0;
+}
+
+/* HUD elements, not draws. Anchoring each draw by its own centre split
+ * elements made of several draws: the tutorial box (x 50.7..323, centre
+ * 187) and its long lines (58.9..311) went to the middle while its short
+ * last line (58.9..147.6, centre 103) went to the left edge, run 44 and the
+ * 2026-11-18 frames 1800 and 2700. A run is a sequence of 2D draws, back
+ * to back on the target (no other draw between them, same frame), each
+ * overlapping the previous one in x (4 pixels of slack). The run's first
+ * draw decides the anchor and the rest follow it, so a box and its text, or
+ * a bar and its frame, move together. Anything else between (a world draw,
+ * a full-width overlay) ends the run. The HUD's clusters do not overlap one
+ * another (left 48..165, right 498..738), so they stay apart. Elements
+ * share textures (radar and hand panel both sample 0x80583D80), so a
+ * texture is no sign of an element. MANHUNT_WIDE_HUD_GROUP=0: each draw by
+ * its own centre, as before. */
+#define WIDE_RUN_SLACK 4.0f
+static struct {
+    int valid;
+    uint32_t frame, next;           /* the frame, and the target draw index that continues it */
+    const GlSurf *surf;
+    float minx, maxx;               /* the previous draw's extent */
+    float anchor;                   /* out[1] for the run */
+} s_wide_run;
+static int s_wide_group_on = -1;
+static int wide_hud_group(void)
+{
+    return env_switch("MANHUNT_WIDE_HUD_GROUP", &s_wide_group_on,
+                       "widescreen: HUD anchored per element (runs of overlapping 2D draws)",
+                       "widescreen: HUD anchored per draw");
+}
+
 /* 0 crop (default), 1 stretch, 2 bars. */
 static int wide_movie_mode(void)
 {
@@ -2628,13 +3889,22 @@ static int wide_movie_mode(void)
 
 static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float out[2])
 {
-    float minx, maxx, w = (float)s->w;
+    float minx, maxx, w = (float)s->w, lw;
 
     out[0] = out[1] = 0.0f;
     if (!xbox_video_widescreen() || !wide_target(b, s) || !wide_xrange(b, &minx, &maxx))
         return;
-    if (minx <= 2.0f && maxx >= w - 2.0f && vkey != 0xBA9E387C24FCECE1ull)
+    /* wide_xrange gives xform 1 in scaled pixels (aa_sx applied) and xform 0
+     * and 2 as the draw's own 640-wide coordinates, so the full-width test
+     * and the edge thresholds below take the width in the same units. With
+     * anti-aliasing on, comparing a 0..640 draw against the 1280-wide surface
+     * squeezed full-screen fades and grain to 4:3. */
+    lw = (b->xform != 1 && b->aa_sx > 0.0f) ? w / b->aa_sx : w;
+    if (minx <= 2.0f && maxx >= lw - 2.0f && vkey != 0xBA9E387C24FCECE1ull) {
+        if (minx >= -2.0f && maxx <= lw + 2.0f && b->tex_va[0])
+            s_wide_frame_fit++;     /* exactly the target, textured: a menu (wide_level_now) */
         return;
+    }
     if (vkey == 0xBA9E387C24FCECE1ull) {
         /* A movie is 4:3. MANHUNT_WIDE_MOVIE: crop (default) scales it to the
          * full width and lets the top and bottom run off the target, so it
@@ -2650,16 +3920,26 @@ static void wide_2d(const Nv2aRawBatch *b, const GlSurf *s, uint64_t vkey, float
     }
     out[0] = 0.75f;
     out[1] = w * 0.5f;
-    if (s_wide_level && wide_hud_edges()) {
-        /* wide_xrange gives xform 1 in scaled pixels (aa_sx applied) and
-         * xform 0 and 2 as the draw's own 640-wide coordinates, so the
-         * thresholds are taken against the width in the same units. */
-        float lw = (b->xform != 1 && b->aa_sx > 0.0f) ? w / b->aa_sx : w;
+    if (wide_level_now() && wide_hud_edges()) {
         float cx = (minx + maxx) * 0.5f;
         if (cx < lw * 0.28f)
             out[1] = 0.0f;
         else if (cx > lw * 0.72f)
             out[1] = w;
+        if (wide_hud_group()) {
+            if (s_wide_run.valid && s_wide_run.frame == s_frame &&
+                s_wide_run.next == s_wide_frame_draws && s_wide_run.surf == s &&
+                minx <= s_wide_run.maxx + WIDE_RUN_SLACK && maxx >= s_wide_run.minx - WIDE_RUN_SLACK)
+                out[1] = s_wide_run.anchor;
+            else
+                s_wide_run.anchor = out[1];
+            s_wide_run.valid = 1;
+            s_wide_run.frame = s_frame;
+            s_wide_run.next = s_wide_frame_draws + 1;
+            s_wide_run.surf = s;
+            s_wide_run.minx = minx;
+            s_wide_run.maxx = maxx;
+        }
     }
 }
 
@@ -2681,7 +3961,7 @@ static const uint64_t s_wide_prog[WIDE_PROGS] = {
     0xBA9E387C24FCECE1ull, 0xD7829B66D519BE47ull,
 };
 static const unsigned s_wide_nprog = 4;
-static uint32_t s_wide_frame_draws, s_wide_dumps, s_wide_dump_at, s_wide_dump_ff;
+static uint32_t s_wide_dumps, s_wide_dump_at, s_wide_dump_ff;
 static int s_wide_dumping;
 static int wide_prog_2d(uint64_t vkey)
 {
@@ -2834,9 +4114,10 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     GlProg *p;
     Nv2aPshKey pk;
     const uint32_t *r = b->regs;
-    const uint32_t *idx;
+    const void *idx;
     uint32_t n, a, i;
     GLintptr idx_at;
+    GLint base_vertex = 0;
     GLenum mode, idx_type = GL_UNSIGNED_INT;
     float tscale[4][2], c0[8][4], c1[8][4], fog[4], surf[4], aa[2], m[16];
     uint64_t pt = perf_detail() ? hz_now() : 0;
@@ -2972,6 +4253,24 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
             p->light_valid = 1;
         }
     }
+    if (p->u_fogm >= 0) {
+        float fogm[5][4];
+        nv2a_gl_vsh_fog_uniforms(r, fogm);
+        if (!p->fogm_valid || memcmp(fogm, p->fogm, sizeof fogm)) {
+            glUniform4fv(p->u_fogm, 5, &fogm[0][0]);
+            memcpy(p->fogm, fogm, sizeof fogm);
+            p->fogm_valid = 1;
+        }
+    }
+    if (p->u_ffx >= 0) {
+        float ffx[NV2A_FFX_ROWS][4];
+        nv2a_gl_vsh_ffx_uniforms(r, b->lighting, ffx);
+        if (!p->ffx_valid || memcmp(ffx, p->ffx, sizeof ffx)) {
+            glUniform4fv(p->u_ffx, NV2A_FFX_ROWS, &ffx[0][0]);
+            memcpy(p->ffx, ffx, sizeof ffx);
+            p->ffx_valid = 1;
+        }
+    }
     {
         /* The rest, likewise: set only when something differs from what this
          * program already holds. */
@@ -3050,6 +4349,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
             p->uni = u;
             p->uni_valid = 1;
         }
+        texshader_uniforms(p, r);
     }
 
     PF_STAGE(uniform_ns);
@@ -3154,8 +4454,8 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
     if (!state_cache_enabled()) glBindVertexArray(s_vao);
     mode = gl_prim(b, &idx, &n);
     if (!n) return;
-    idx_type = b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
-    if (!upload_vertices(b, idx, n, idx_type, &idx_at)) {
+    idx_type = b->indices16 || b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+    if (!upload_vertices(b, idx, n, idx_type, &idx_at, &base_vertex)) {
         if (gl_gpu()) return;
         gl_fail("vertex upload failed");
     }
@@ -3181,8 +4481,13 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
         static uint16_t *idx16;
         static size_t idx16_cap;
         void *dst;
-        idx_type = b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
-        if (idx_type == GL_UNSIGNED_INT) {
+        idx_type = b->indices16 || b->vertex_count <= 65536 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+        if (b->indices16) {             /* narrowed by the executor (gl_prim) */
+            idx_at = ring_alloc(&s_iring, (GLsizeiptr)n * 2, &dst);
+            if (dst)
+                memcpy(dst, idx, (size_t)n * 2);
+            ring_done(&s_iring, idx_at, (GLsizeiptr)n * 2, dst, idx);
+        } else if (idx_type == GL_UNSIGNED_INT) {
             idx_at = ring_alloc(&s_iring, (GLsizeiptr)n * 4, &dst);
             if (dst)
                 memcpy(dst, idx, (size_t)n * 4);
@@ -3201,7 +4506,7 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                 o = idx16;
             }
             for (i = 0; i < n; i++)
-                o[i] = (uint16_t)idx[i];
+                o[i] = (uint16_t)((const uint32_t *)idx)[i];
             ring_done(&s_iring, idx_at, (GLsizeiptr)n * 2, dst, idx16);
         }
     }
@@ -3231,8 +4536,29 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
                     (float)((double)s->w * s->h / ((double)s->pw * s->ph));
                 glBeginQuery(GL_SAMPLES_PASSED, s_vis_q[s_vis_head % GL_VIS_QUERIES]);
             }
+            if (perf_detail()) {
+                /* Vertex layout: which attributes, and each direct one's
+                 * storage; the offsets may differ (one buffer could hold both). */
+                static uint32_t last_change, last_frame, last_layout;
+                static const GlSurf *last_s;
+                static GLenum last_mode, last_type;
+                uint32_t layout = b->attr_present * 2654435761u ^ b->attr_direct;
+                for (a = 0; a < NV2A_RAW_ATTRS; a++)
+                    if (b->attr_direct & (1u << a))
+                        layout = (layout ^ (b->direct[a].type | b->direct[a].size << 8
+                                            | b->direct[a].stride << 16)) * 16777619u;
+                if (s_gl_change == last_change && s == last_s && s_frame == last_frame
+                    && mode == last_mode && idx_type == last_type && layout == last_layout)
+                    PF_ADD(same_state_draws, 1);
+                last_change = s_gl_change; last_s = s; last_frame = s_frame;
+                last_mode = mode; last_type = idx_type; last_layout = layout;
+            }
             PF_STAGE(other_ns);
-            glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
+            if (base_vertex)
+                glDrawElementsBaseVertex(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at,
+                                         base_vertex);
+            else
+                glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
             PF_STAGE(submit_ns);
             if (vq) {
                 glEndQuery(GL_SAMPLES_PASSED);
@@ -3383,6 +4709,48 @@ static void dump_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_t
  * elsewhere: the call is skipped. */
 extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
 
+/* The surface the title flipped. Presenting s_last showed whatever was drawn
+ * or cleared last, so a target rendered or cleared after the frame's last
+ * back-buffer draw would be shown for a frame. The executor works out the
+ * finished buffer at FLIP_STALL (its drawn_offset: by then the title's
+ * colour offset has already moved on to the next buffer) and hands it to
+ * xbox_FramebufferWindowPresent just before the backend's flip;
+ * horizon_compat.c passes it on here, on the executor thread. The queued
+ * backend carries it in the flip record, so the GL thread presents the
+ * address of the flip it is presenting, not a later one. s_last stays the
+ * fallback when no address came or no surface has it.
+ * MANHUNT_PRESENT_FLIPPED=0: s_last, as before. */
+static uint32_t s_flip_req_va;          /* executor thread: the flip about to be issued */
+static uint32_t s_flip_va;              /* GL thread: the flip being presented */
+static int s_present_flipped = -1;
+void nv2a_gl_note_flip(uint32_t va)
+{
+    s_flip_req_va = va;
+}
+static GlSurf *flip_surface(void)
+{
+    static unsigned misses, others;
+    uint32_t va = s_flip_va;            /* this flip's only */
+    GlSurf *f;
+
+    s_flip_va = 0;
+    if (!va || !env_switch("MANHUNT_PRESENT_FLIPPED", &s_present_flipped,
+                           "present: the surface the title flipped",
+                           "present: the last surface drawn or cleared"))
+        return s_last;
+    f = surf_find(va);
+    if (!f) {
+        if (misses++ < 4)
+            fprintf(stderr, "[MH-GL] frame %u: flipped 0x%08X has no surface, showing the last one drawn\n",
+                    s_frame, va);
+        return s_last;
+    }
+    if (f != s_last && others++ < 8)
+        fprintf(stderr, "[MH-GL] frame %u: presenting flipped 0x%08X, not the last target 0x%08X\n",
+                s_frame, va, s_last ? s_last->va : 0u);
+    return f;
+}
+
 static void gl_flip_work(void)
 {
     state_dirty();
@@ -3391,7 +4759,7 @@ static void gl_flip_work(void)
     static uint8_t *pix;
     static size_t pix_cap;
     int ww, wh;
-    GlSurf *s = s_last;
+    GlSurf *s = flip_surface();
 
     if (!ready()) {
         if (gl_gpu()) return;
@@ -3412,19 +4780,7 @@ static void gl_flip_work(void)
         fprintf(stderr, "[MH-WIDE-DRAW] capture %u, frame %u (previous frame had %u draws)\n",
                 s_wide_dumps, s_frame + 1, s_wide_frame_draws);
     }
-    {
-        /* The Scrap level averages about 90 draws on the 640x480 target, busier
-         * scenes 900; a menu has up to about 41 and a movie 1 or 2. The first transitions are
-         * logged so a run shows whether the HUD anchoring was on. */
-        static unsigned s_logged;
-        int lvl = wide_level_next(s_wide_level, s_wide_frame_draws);
-        if (lvl != s_wide_level && xbox_video_widescreen() && s_logged++ < 24)
-            fprintf(stderr, "[MH-WIDE] frame %u: %s (%u draws on the target)\n",
-                    s_frame, lvl ? "level, HUD anchored to the edges" : "not a level, HUD centred",
-                    s_wide_frame_draws);
-        s_wide_level = lvl;
-    }
-    s_wide_frame_draws = 0;
+    wide_frame_end();
     s_frame++;
     {
         /* A frame over 50 ms (a hitch): say what it did -- compiling programs
@@ -3647,7 +5003,9 @@ static void gl_flip(void)
     static int64_t cap_ns = -1;
     static uint64_t next_ns;
     uint64_t t0 = hz_now();
+    xr_fence(0);                 /* the swap in gl_flip_work submits it */
     gl_flip_work();
+    xr_retire();
     ring_flip(&s_vring);
     ring_flip(&s_iring);
     validate_frame();
@@ -3670,6 +5028,14 @@ static void gl_flip(void)
             nanosleep(&ts, NULL);
         }
     }
+}
+
+/* The unqueued backend: the executor's flip, on the executor thread. */
+static void gl_flip_direct(void)
+{
+    s_flip_va = s_flip_req_va;
+    s_flip_req_va = 0;
+    gl_flip();
 }
 
 void nv2a_gl_perf_read(Nv2aGlPerf *out)
@@ -3907,15 +5273,187 @@ static int queue_pack(void)
 }
 static void q_read_batch(const uint8_t *rec, size_t at, Nv2aRawBatch *bb)
 {
+    /* A record whose vertices are in the direct ring (QHdr.pad[0]) keeps
+     * direct[a].ptr as offsets into its region; upload_vertices adds them. */
+    int ring = ((const QHdr *)rec)->pad[0] != 0;
     *bb = *(const Nv2aRawBatch *)(rec + at);
     bb->regs = g_regs;
     bb->vp_program = (const uint32_t (*)[4])g_prog;
     bb->vp_consts = (const float (*)[4])g_consts;
     for (unsigned a = 0; a < NV2A_RAW_ATTRS; a++)
-        if (bb->attr_direct & (1u << a))
+        if ((bb->attr_direct & (1u << a)) && !ring)
             bb->direct[a].ptr = rec + (uintptr_t)bb->direct[a].ptr;
     bb->attrs = bb->attrs ? (const float *)(rec + (uintptr_t)bb->attrs) : NULL;
-    bb->indices = (const uint32_t *)(rec + (uintptr_t)bb->indices);
+    if (bb->indices16)
+        bb->indices16 = (const uint16_t *)(rec + (uintptr_t)bb->indices16);
+    else
+        bb->indices = (const uint32_t *)(rec + (uintptr_t)bb->indices);
+}
+
+/* Executor: the direct ring is usable. Off under the debug captures that
+ * read vertex data on the GL thread (RECOMP_GL_WATCH, MANHUNT_PAGE_CAPTURE). */
+static int xr_usable(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *page = getenv("MANHUNT_PAGE_CAPTURE");
+        on = !getenv("RECOMP_GL_WATCH") && !(page && *page == '1');
+    }
+    return on && __atomic_load_n(&s_xr.ready, __ATOMIC_ACQUIRE);
+}
+
+/* Executor: whether the GL thread may read this draw's vertices -- the
+ * widescreen 2D placement (wide_2d, through wide_xrange). The same tests as
+ * gl_draw_raw_work: pre-transformed, an orthographic fixed-function
+ * composite, or a vertex program from s_wide_prog (hashed as prog_get does,
+ * once per program generation). Those draws keep the queue path. The
+ * [MH-WIDE-DRAW] capture log shows x -1..-1 for ring draws. */
+static int xr_reads_vertices(const Nv2aRawBatch *b)
+{
+    static uint32_t gen;
+    static int is_2d;
+    if (b->xform == 1)
+        return b->composite[12] == 0.0f && b->composite[13] == 0.0f &&
+               b->composite[14] == 0.0f && b->composite[15] != 0.0f;
+    if (b->xform != 2 || !b->vp_program)
+        return 1;
+    if (b->vp_prog_gen != gen || !gen) {
+        uint64_t h = prog_hash(b);
+        is_2d = 0;
+        for (unsigned i = 0; i < s_wide_nprog; i++)
+            if (s_wide_prog[i] == h)
+                is_2d = 1;
+        gen = b->vp_prog_gen;
+    }
+    return is_2d;
+}
+
+/* Executor: `bytes` contiguous bytes of the ring, 64-aligned; for a layout
+ * with one stride, placed a whole number of vertices after the previous
+ * region of the same layout (the anchor), so the GL thread can keep its
+ * attribute pointers and draw with a base vertex. 0 when that space may
+ * still be read by the GPU: the caller takes the queue path. */
+static int xr_alloc(size_t bytes, uint32_t stride, uint32_t present, const uint32_t *key,
+                    size_t *at_out, uint64_t *end_out)
+{
+    size_t cap = s_xr.cap, off = (size_t)(s_xr.head % cap);
+    size_t at = (off + 63) & ~(size_t)63;
+    int same = stride && s_xr.anchor.valid && s_xr.anchor.stride == stride
+        && s_xr.anchor.present == present
+        && !memcmp(s_xr.anchor.key, key, sizeof s_xr.anchor.key);
+    int aligned = 0, wrap = 0;
+    uint64_t end;
+
+    if (same && at >= s_xr.anchor.at) {
+        size_t d = (at - s_xr.anchor.at) % stride;
+        if (d) at += stride - d;
+        aligned = 1;
+    }
+    if (at + bytes > cap) {
+        /* Wrap: the rest of the ring is filler. */
+        end = s_xr.head + (cap - off) + bytes;
+        at = 0;
+        wrap = 1;
+        aligned = same && s_xr.anchor.at == 0;
+    } else {
+        end = s_xr.head + (at - off) + bytes;
+    }
+    if (end - __atomic_load_n(&s_xr.tail, __ATOMIC_ACQUIRE) > cap) {
+        __atomic_store_n(&s_xr.starved, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+    s_xr.head = end;
+    if (stride && !aligned) {
+        s_xr.anchor.valid = 1;
+        s_xr.anchor.at = at;
+        s_xr.anchor.stride = stride;
+        s_xr.anchor.present = present;
+        memcpy(s_xr.anchor.key, key, sizeof s_xr.anchor.key);
+    }
+    if (wrap && perf_detail()) PF_ADD(ring_wraps, 1);
+    *at_out = at;
+    *end_out = end;
+    return 1;
+}
+
+/* Executor: copy this draw's vertex data from guest memory straight into
+ * the direct ring, in the layout upload_vertices would give it in s_vring
+ * (the runs, 16-aligned, then converted attributes packed float4, as
+ * MANHUNT_GL_QUEUE_PACK describes them). Fills the descriptors the record
+ * carries: every present attribute direct, ptr an offset into the region.
+ * 0: use the queue path. */
+static int xr_place(const Nv2aRawBatch *b, const VRun *run, const int *of_run, uint32_t nrun,
+                    uint16_t conv, const uint32_t *slots, uint32_t nconv,
+                    Nv2aRawBatch *desc, QRingRef *ref)
+{
+    size_t run_at[NV2A_RAW_ATTRS], bytes = 0, pack_at, at;
+    uint32_t stride = 0, key[NV2A_RAW_ATTRS], a, i, v;
+    uint64_t end;
+    uint8_t *dst;
+
+    if (!b->vertex_count || !xr_usable() || xr_reads_vertices(b))
+        return 0;
+    for (i = 0; i < nrun; i++) {
+        run_at[i] = bytes;
+        bytes += ((size_t)(run[i].hi - run[i].lo) + 15) & ~(size_t)15;
+    }
+    pack_at = bytes;
+    bytes += (size_t)b->vertex_count * nconv * 16;
+    if (!bytes || bytes > s_xr.cap / 4)
+        return 0;
+    for (a = 0; a < NV2A_RAW_ATTRS; a++)
+        if (b->attr_direct & (1u << a))
+            desc->direct[a].ptr = (const uint8_t *)(uintptr_t)
+                (run_at[of_run[a]] + (size_t)(b->direct[a].ptr - run[of_run[a]].lo));
+    for (i = 0; i < nconv; i++) {
+        a = slots[i];
+        desc->direct[a].ptr = (const uint8_t *)(uintptr_t)(pack_at + i * 16);
+        desc->direct[a].type = 2;
+        desc->direct[a].size = 4;
+        desc->direct[a].stride = nconv * 16;
+    }
+    desc->attr_direct |= conv;
+    desc->attrs = NULL;
+    /* Candidate for kept pointers, as upload_vertices decides it. Offsets
+     * from 0x10000 up would collide with the type bits of the key. */
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        key[a] = 0;
+        if (!(desc->attr_direct & (1u << a)))
+            continue;
+        if (!desc->direct[a].stride || (stride && desc->direct[a].stride != stride)
+            || (uintptr_t)desc->direct[a].ptr >= 0x10000) {
+            stride = 0;
+            break;
+        }
+        stride = desc->direct[a].stride;
+        key[a] = (uint32_t)(uintptr_t)desc->direct[a].ptr | desc->direct[a].type << 16
+               | desc->direct[a].size << 24;
+    }
+    if (!stride)
+        memset(key, 0, sizeof key);
+    if (!xr_alloc(bytes, stride, b->attr_present, key, &at, &end)) {
+        if (perf_detail()) PF_ADD(ring_full, 1);
+        return 0;
+    }
+    dst = s_xr.map + at;
+    for (i = 0; i < nrun; i++)
+        memcpy(dst + run_at[i], run[i].lo, (size_t)(run[i].hi - run[i].lo));
+    if (nconv) {
+        uint8_t *out = dst + pack_at;
+        for (v = 0; v < b->vertex_count; v++)
+            for (i = 0; i < nconv; i++)
+                memcpy(out + ((size_t)v * nconv + i) * 16,
+                       b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slots[i]) * 4, 16);
+    }
+    ref->end = end;
+    ref->at = (uint32_t)at;
+    ref->bytes = (uint32_t)bytes;
+    if (conv) count_converted(b, conv);
+    if (perf_detail()) {
+        PF_ADD(ring_draws, 1);
+        PF_ADD(ring_bytes, bytes);
+    }
+    return 1;
 }
 
 static void q_draw(const Nv2aRawBatch *b)
@@ -3925,13 +5463,21 @@ static void q_draw(const Nv2aRawBatch *b)
     uint32_t nrun = vertex_runs(b, run, of_run), i, a, nreg, nprog = 0, nconst = 0;
     uint16_t conv = b->attr_present & (uint16_t)~b->attr_direct;
     uint32_t slots[NV2A_RAW_ATTRS], nconv = 0;
-    int packed = queue_pack();
+    int packed = queue_pack(), in_ring;
     for (a = 0; a < NV2A_RAW_ATTRS; a++) if (conv & (1u << a)) slots[nconv++] = a;
     size_t attr_bytes = (size_t)b->vertex_count * (packed ? nconv : NV2A_RAW_ATTRS) * 16;
-    size_t size, at, runs_at[NV2A_RAW_ATTRS], attrs_at = 0, idx_at, batch_at;
-    Nv2aRawBatch *qb;
+    /* 16-bit when the executor narrowed them (MANHUNT_NARROW_INDICES). */
+    size_t idx_bytes = (size_t)b->index_count * (b->indices16 ? 2 : 4);
+    size_t size, at, runs_at[NV2A_RAW_ATTRS], attrs_at = 0, idx_at, batch_at, ring_at = 0;
+    Nv2aRawBatch *qb, desc = *b;
+    QRingRef ref = {0};
     uint8_t *rec;
+    uint64_t t0 = perf_detail() ? hz_now() : 0;
 
+    /* Vertex data straight into the direct ring when it can; the record
+     * then carries only the region's place. */
+    in_ring = xr_place(b, run, of_run, nrun, conv, slots, nconv, &desc, &ref);
+    uint64_t copy_ns = t0 ? hz_now() - t0 : 0;
     s_q_live_regs = b->regs;
     nreg = q_reg_collect();
     if (b->vp_program && b->vp_prog_gen != s_q_prog_gen && b->vp_slots <= PROG_ROWS)
@@ -3943,16 +5489,21 @@ static void q_draw(const Nv2aRawBatch *b)
          + (size_t)(nprog + nconst) * sizeof(QRow);
     batch_at = size;
     size += Q_ALIGN(sizeof(Nv2aRawBatch));
-    for (i = 0; i < nrun; i++) {
-        runs_at[i] = size;
-        size += Q_ALIGN((size_t)(run[i].hi - run[i].lo));
-    }
-    if (conv) {
-        attrs_at = size;
-        size += Q_ALIGN(attr_bytes);
+    if (in_ring) {
+        ring_at = size;
+        size += Q_ALIGN(sizeof(QRingRef));
+    } else {
+        for (i = 0; i < nrun; i++) {
+            runs_at[i] = size;
+            size += Q_ALIGN((size_t)(run[i].hi - run[i].lo));
+        }
+        if (conv) {
+            attrs_at = size;
+            size += Q_ALIGN(attr_bytes);
+        }
     }
     idx_at = size;
-    size += Q_ALIGN((size_t)b->index_count * 4);
+    size += Q_ALIGN(idx_bytes);
     if (size > Q_BYTES / 4)
         gl_fail("queued draw exceeds bounded record capacity");
 
@@ -3965,42 +5516,55 @@ static void q_draw(const Nv2aRawBatch *b)
         abort();
     }
     qb = (Nv2aRawBatch *)(rec + batch_at);
-    *qb = *b;
-    /* Pointers become offsets into the record; the GL thread fixes them. */
-    for (i = 0; i < nrun; i++)
-        memcpy(rec + runs_at[i], run[i].lo, (size_t)(run[i].hi - run[i].lo));
-    for (a = 0; a < NV2A_RAW_ATTRS; a++)
-        if (b->attr_direct & (1u << a))
-            qb->direct[a].ptr = (const uint8_t *)(uintptr_t)
-                (runs_at[of_run[a]] + (size_t)(b->direct[a].ptr - run[of_run[a]].lo));
-    if (conv) {
-        if (packed) {
-            if (nconv == NV2A_RAW_ATTRS) memcpy(rec + attrs_at, b->attrs, attr_bytes);
-            else for (uint32_t v = 0; v < b->vertex_count; v++)
-                for (i = 0; i < nconv; i++)
-                    memcpy(rec + attrs_at + ((size_t)v * nconv + i) * 16,
-                           b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slots[i]) * 4, 16);
-            /* Converted float4s use the existing native float attribute path.
-             * Direct guest attributes keep their original descriptors/bytes. */
-            for (i = 0; i < nconv; i++) {
-                a = slots[i];
-                qb->direct[a].ptr = (const uint8_t *)(uintptr_t)(attrs_at + i * 16);
-                qb->direct[a].type = 2; qb->direct[a].size = 4; qb->direct[a].stride = nconv * 16;
+    if (t0) t0 = hz_now();
+    if (in_ring) {
+        *qb = desc;
+        memcpy(rec + ring_at, &ref, sizeof ref);
+        ((QHdr *)rec)->pad[0] = 1;
+    } else {
+        *qb = *b;
+        /* Pointers become offsets into the record; the GL thread fixes them. */
+        for (i = 0; i < nrun; i++)
+            memcpy(rec + runs_at[i], run[i].lo, (size_t)(run[i].hi - run[i].lo));
+        for (a = 0; a < NV2A_RAW_ATTRS; a++)
+            if (b->attr_direct & (1u << a))
+                qb->direct[a].ptr = (const uint8_t *)(uintptr_t)
+                    (runs_at[of_run[a]] + (size_t)(b->direct[a].ptr - run[of_run[a]].lo));
+        if (conv) {
+            if (packed) {
+                if (nconv == NV2A_RAW_ATTRS) memcpy(rec + attrs_at, b->attrs, attr_bytes);
+                else for (uint32_t v = 0; v < b->vertex_count; v++)
+                    for (i = 0; i < nconv; i++)
+                        memcpy(rec + attrs_at + ((size_t)v * nconv + i) * 16,
+                               b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slots[i]) * 4, 16);
+                /* Converted float4s use the existing native float attribute path.
+                 * Direct guest attributes keep their original descriptors/bytes. */
+                for (i = 0; i < nconv; i++) {
+                    a = slots[i];
+                    qb->direct[a].ptr = (const uint8_t *)(uintptr_t)(attrs_at + i * 16);
+                    qb->direct[a].type = 2; qb->direct[a].size = 4; qb->direct[a].stride = nconv * 16;
+                }
+                qb->attr_direct |= conv;
+                qb->attrs = NULL;
+                count_converted(b, conv);
+            } else {
+                memcpy(rec + attrs_at, b->attrs, attr_bytes);
+                qb->attrs = (const float *)(uintptr_t)attrs_at;
             }
-            qb->attr_direct |= conv;
-            qb->attrs = NULL;
-            count_converted(b, conv);
-        } else {
-            memcpy(rec + attrs_at, b->attrs, attr_bytes);
-            qb->attrs = (const float *)(uintptr_t)attrs_at;
-        }
-        if (perf_detail()) {
-            PF_ADD(queue_attr_bytes, attr_bytes);
-            PF_ADD(queue_attr_saved_bytes, (size_t)b->vertex_count * NV2A_RAW_ATTRS * 16 - attr_bytes);
-        }
-    } else qb->attrs = NULL;
-    memcpy(rec + idx_at, b->indices, (size_t)b->index_count * 4);
-    qb->indices = (const uint32_t *)(uintptr_t)idx_at;
+            if (perf_detail()) {
+                PF_ADD(queue_attr_bytes, attr_bytes);
+                PF_ADD(queue_attr_saved_bytes, (size_t)b->vertex_count * NV2A_RAW_ATTRS * 16 - attr_bytes);
+            }
+        } else qb->attrs = NULL;
+    }
+    if (t0) PF_ADD(queue_vertex_ns, copy_ns + hz_now() - t0);
+    if (b->indices16) {
+        memcpy(rec + idx_at, b->indices16, idx_bytes);
+        qb->indices16 = (const uint16_t *)(uintptr_t)idx_at;
+    } else {
+        memcpy(rec + idx_at, b->indices, idx_bytes);
+        qb->indices = (const uint32_t *)(uintptr_t)idx_at;
+    }
     ((QHdr *)rec)->size = (uint32_t)size;
     q_publish(size);
     /* gpu mode owes the guest nothing per draw: waiting here made the two
@@ -4030,7 +5594,7 @@ static void q_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
 static void q_flip(void)
 {
     uint32_t nreg;
-    size_t size;
+    size_t size, at;
     uint8_t *rec;
 
     /* No more than two frames behind the executor. */
@@ -4045,9 +5609,11 @@ static void q_flip(void)
         __atomic_add_fetch(&s_q_exec_wait_ns, q_now_ns() - t0, __ATOMIC_RELAXED);
     }
     nreg = q_reg_collect();
-    size = sizeof(QHdr) + (size_t)nreg * sizeof(QRegChunk);
+    size = sizeof(QHdr) + (size_t)nreg * sizeof(QRegChunk) + 16;
     rec = q_reserve(size);
-    q_write_state(rec, Q_FLIP, nreg, 0, 0, NULL);
+    at = q_write_state(rec, Q_FLIP, nreg, 0, 0, NULL);
+    ((uint32_t *)(rec + at))[0] = s_flip_req_va;  /* the flipped surface (flip_surface) */
+    s_flip_req_va = 0;
     ((QHdr *)rec)->size = (uint32_t)size;
     __atomic_add_fetch(&s_q_flips, 1, __ATOMIC_ACQ_REL);
     q_publish(size);
@@ -4114,7 +5680,16 @@ static void *q_gl_thread(void *arg)
             if (h->type == Q_DRAW) {
                 Nv2aRawBatch bb;
                 q_read_batch(rec, at, &bb);
-                gl_draw_raw(&bb);
+                if (h->pad[0]) {
+                    /* Vertices in the direct ring: the region's place follows the batch. */
+                    QRingRef ref;
+                    memcpy(&ref, rec + at + Q_ALIGN(sizeof(Nv2aRawBatch)), sizeof ref);
+                    s_draw_ring = &ref;
+                    gl_draw_raw(&bb);
+                    s_draw_ring = NULL;
+                    xr_consumed(&ref);
+                } else
+                    gl_draw_raw(&bb);
             } else if (h->type == Q_CLEAR) {
                 const QClear *c = (const QClear *)(rec + at);
                 gl_clear(&c->s, &c->rs, c->flags, c->argb, c->zs);
@@ -4123,6 +5698,7 @@ static void *q_gl_thread(void *arg)
             } else if (h->type == Q_REPORT) {
                 gl_report(((const uint32_t *)(rec + at))[0], ((const uint32_t *)(rec + at))[1]);
             } else if (h->type == Q_FLIP) {
+                s_flip_va = ((const uint32_t *)(rec + at))[0];
                 gl_flip();
                 __atomic_sub_fetch(&s_q_flips, 1, __ATOMIC_ACQ_REL);
             }
@@ -4179,7 +5755,7 @@ static Nv2aBackend s_backend_q = {
 static Nv2aBackend s_backend_gl = {
     .clear = gl_clear,
     /* draw: everything arrives through draw_raw */
-    .flip = gl_flip,
+    .flip = gl_flip_direct,
     .draw_raw = gl_draw_raw,
     .flags = NV2A_BACKEND_RAW_DIRECT,
     .report = gl_report,
@@ -4197,6 +5773,13 @@ void nv2a_gl_install(void)
     fprintf(stderr, "[MH-GL] fixed-function lighting: %s (MANHUNT_SHADER_LIGHTING)\n",
             flags & NV2A_BACKEND_RAW_LIGHTING ? "shader" : "CPU");
     if (gl_fenced()) flags |= NV2A_BACKEND_DEFERRED_RAM;
+    {
+        /* The executor narrows indices to 16 bits once (Nv2aRawBatch.indices16). */
+        const char *e = getenv("MANHUNT_NARROW_INDICES");
+        if (!(e && *e == '0')) flags |= NV2A_BACKEND_RAW_INDEX16;
+        fprintf(stderr, "[MH-GL] 16-bit indices from the executor: %s (MANHUNT_NARROW_INDICES)\n",
+                flags & NV2A_BACKEND_RAW_INDEX16 ? "on" : "off");
+    }
     s_backend_gl.flags=s_backend_q.flags=flags;
     {
         const char *e = getenv("RECOMP_GL_THREAD");

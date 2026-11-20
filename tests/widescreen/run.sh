@@ -21,6 +21,16 @@ for backend in UNSET 0 1 2 invalid; do
 done
 ulimit -c 0
 "$out/tiled"
+# The renderer's 2D placement (nv2a_gl.c): HUD elements of several draws keep
+# one anchor, and a menu over a live level stays centred. Same driver as
+# tests/nv2a-gl-review (fake GL), widescreen cases only.
+runtime="${GL_REVIEW_RUNTIME:-$root/game/build/xboxrecomp/src/kernel}"
+gl="$root/game/src/nv2a_gl"
+cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -Wno-unused-function -Wno-unused-variable -ffunction-sections -fdata-sections \
+  -I"$root/tests/nv2a-gl-review/stubs" -I"$runtime" -I"$gl" \
+  "-DNV2A_GL_SOURCE=\"$gl/nv2a_gl.c\"" "$root/tests/nv2a-gl-review/test_gl.c" "$gl/gl_psh.c" "$gl/gl_vsh.c" \
+  -Wl,--gc-sections -lm -pthread -o "$out/hud"
+timeout 30s "$out/hud" wide
 if [ "${WIDE_NEGATIVE_CONTROLS:-1}" = 1 ]; then
  # Each deliberate production defect must be rejected by the same fixtures.
  sed 's/if (on \&\& (!backend/if (0 \&\& on \&\& (!backend/' "$root/game/src/widescreen.c" > "$out/camera-mutant.c"
@@ -37,4 +47,4 @@ if [ "${WIDE_NEGATIVE_CONTROLS:-1}" = 1 ]; then
  fi
  echo 'PASS two negative controls: removed backend guard and aperture bounds rejected'
 fi
-echo 'PASS widescreen suite: 30 config combinations and tiled-lock cases'
+echo 'PASS widescreen suite: 30 config combinations, tiled-lock cases and renderer HUD placement'

@@ -32,6 +32,9 @@ static int enabled(void)
 int xbox_gamma_ramp(uint8_t r[256], uint8_t g[256], uint8_t b[256])
 {
     static uint32_t logged_hash, logs;
+    /* An all-zero ramp is only "never set" until the title has set one: after that it is a real ramp (the end of a
+     * fade to black) and must be applied, not shown at full brightness. */
+    static int ever_set;
     if (!enabled()) return 0;
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
     uint32_t dev;
@@ -49,6 +52,8 @@ int xbox_gamma_ramp(uint8_t r[256], uint8_t g[256], uint8_t b[256])
         set |= r[i] | g[i] | b[i];
         hash = (hash ^ r[i] ^ (uint32_t)g[i] << 8 ^ (uint32_t)b[i] << 16) * 16777619u;
     }
+    ever_set |= set != 0;
+    set = ever_set;
     if (hash != logged_hash && logs < 20) {
         logged_hash = hash;
         logs++;
