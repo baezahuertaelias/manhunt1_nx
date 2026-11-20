@@ -54,7 +54,7 @@ Xbox version); the game files go in switch/manhunt1_nx/game/ :
 
 The easiest way to get them is the installer, which builds a complete SD
 package from your own disc image or extracted folder in the browser:
-    https://baezahuertaelias.github.io/manhunt1_nx_installer/
+    https://marmota94.github.io/manhunt1_nx_installer/
 asset-manifest.sha256 lists the SHA-256, size and path of every file the port
 expects (one "sha256  size  path" line per file after a comment line).
 
@@ -106,7 +106,7 @@ def lgpl_source_zip(path, version, fixed):
               "src/apu/ is xboxrecomp's audio emulator (extracted from xemu) as compiled\n"
               "into manhunt.nro: https://github.com/sp00nznet/xboxrecomp at commit %s\n"
               "with the patches in game/patches/xboxrecomp/ of\n"
-              "https://github.com/baezahuertaelias/manhunt1_nx (tag v%s) applied.\n"
+              "https://github.com/marmota94/manhunt1_nx (tag v%s) applied.\n"
               "Licence: LGPL-2.1-or-later, text in LGPL-2.1.txt. Copyright lines are in\n"
               "each file's header.\n" % (version, commit.group(1) if commit else "(see infra/recompiler/Dockerfile)", version))
 

@@ -6,7 +6,7 @@ This repository contains **no game data**. You need your own lawfully obtained c
 
 ## Status
 
-Experimental. It runs on a physical Switch, tested on one console. Current release: **v0.3.0** (see [Releases](https://github.com/baezahuertaelias/manhunt1_nx/releases)).
+Experimental. It runs on a physical Switch, tested on one console. Current release: **v0.3.0** (see [Releases](https://github.com/marmota94/manhunt1_nx/releases)).
 
 | Area | State |
 |---|---|
@@ -88,9 +88,9 @@ The toolchain image is pinned: `devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6
 
 You need a homebrew-capable Switch and your own copy of Manhunt for the original Xbox (a disc image or the extracted files).
 
-**The easy way: the installer.** Open the [Manhunt Switch SD installer](https://baezahuertaelias.github.io/manhunt1_nx_installer/) in a current Chromium browser (Chrome or Edge). Choose your disc image or extracted folder and let it build `manhunt1-nx-v<version>-sd.zip`. It checks every game file against the port's manifest, and the game files never leave your computer. Delete any old `switch/manhunt1_nx/game` on the SD card, then extract the zip at the card root.
+**The easy way: the installer.** Open the [Manhunt Switch SD installer](https://marmota94.github.io/manhunt1_nx_installer/) in a current Chromium browser (Chrome or Edge). Choose your disc image or extracted folder and let it build `manhunt1-nx-v<version>-sd.zip`. It checks every game file against the port's manifest, and the game files never leave your computer. Delete any old `switch/manhunt1_nx/game` on the SD card, then extract the zip at the card root.
 
-**By hand.** Download `manhunt1-nx-v<version>.zip` from [Releases](https://github.com/baezahuertaelias/manhunt1_nx/releases) and extract it at the SD card root. Copy your game files into `switch/manhunt1_nx/game/` (`DEFAULT.xbe`, `audio/`, `levels/`). `asset-manifest.sha256` in the zip lists the SHA-256, size and path of every file the port expects.
+**By hand.** Download `manhunt1-nx-v<version>.zip` from [Releases](https://github.com/marmota94/manhunt1_nx/releases) and extract it at the SD card root. Copy your game files into `switch/manhunt1_nx/game/` (`DEFAULT.xbe`, `audio/`, `levels/`). `asset-manifest.sha256` in the zip lists the SHA-256, size and path of every file the port expects.
 
 **Starting it.** The game needs **title-takeover mode** to get enough memory: hold **R** while opening any installed game. The homebrew menu (or Sphaira) opens instead; pick `manhunt.nro`. Started from the album applet it does not get enough memory. Hold **ZL + ZR + Plus + Minus** for 1.5 seconds to quit.
 

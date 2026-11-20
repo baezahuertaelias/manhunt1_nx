@@ -9,13 +9,13 @@ The complete corresponding source of that library, exactly as compiled into
 this NRO (the pinned xboxrecomp commit with this project's patches applied), is
 published next to every release, from the same place as the NRO:
 
-    https://github.com/baezahuertaelias/manhunt1_nx/releases
+    https://github.com/marmota94/manhunt1_nx/releases
     file: manhunt1-nx-v<version>-lgpl-source.zip
 
 The rest of the program is the public source of this project, at the commit
 tagged v<version>:
 
-    https://github.com/baezahuertaelias/manhunt1_nx
+    https://github.com/marmota94/manhunt1_nx
 
 To modify the library and relink: edit or replace src/apu/ in the patched
 xboxrecomp tree and rebuild with scripts/game-build.sh switch, as the README
