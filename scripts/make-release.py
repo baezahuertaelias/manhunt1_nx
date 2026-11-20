@@ -10,17 +10,25 @@ extracted at the root of the SD card:
     switch/manhunt1_nx/manhunt.env              the playing settings (widescreen on)
     switch/manhunt1_nx/manifest.json            version, NRO SHA-256, what game files it needs
     switch/manhunt1_nx/asset-manifest.sha256    SHA-256 of each game file the port expects
-    switch/manhunt1_nx/LICENSES/                licence texts
+    switch/manhunt1_nx/LICENSES/                licence texts and the LGPL source notice
     switch/manhunt1_nx/INSTALL.txt
 
-The game files themselves (DEFAULT.xbe, audio/, levels/) are never included: a
-separate installer builds them from the user's own disc image and checks them
-against asset-manifest.sha256. Prints the zip's SHA-256 and size.
+It also writes <out>/manhunt1-nx-v<version>-lgpl-source.zip: the LGPL-2.1
+audio emulator (src/apu/) exactly as compiled, from the patched tree in
+game/build/xboxrecomp. Publish both files together (LICENSES/SOURCE-OFFER.txt).
+
+It refuses an NRO whose icon is game/build/icon256.jpg: that icon is made from
+the game's cover art and must never be published.
+
+The game files themselves (DEFAULT.xbe, audio/, levels/) are never included:
+the installer (https://github.com/marmota94/manhunt1_nx_installer) builds them
+from the user's own disc image and checks them against asset-manifest.sha256. Prints the zip's SHA-256 and size.
 """
 import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import zipfile
 
@@ -44,13 +52,15 @@ Xbox version); the game files go in switch/manhunt1_nx/game/ :
     switch/manhunt1_nx/game/audio/...
     switch/manhunt1_nx/game/levels/...
 
-asset-manifest.sha256 lists the SHA-256 and size of every file the port expects,
-so a copy can be checked with:   cd game && sha256sum -c ../asset-manifest.sha256
-(the first line of the manifest is a comment).
+The easiest way to get them is the installer, which builds a complete SD
+package from your own disc image or extracted folder in the browser:
+    https://baezahuertaelias.github.io/manhunt1_nx_installer/
+asset-manifest.sha256 lists the SHA-256, size and path of every file the port
+expects (one "sha256  size  path" line per file after a comment line).
 
-Install: extract the zip at the root of the SD card. Start manhunt.nro from
-Sphaira in title-takeover mode (hold R while opening a game) so it gets enough
-memory.
+Install: extract the zip at the root of the SD card. Start manhunt.nro in
+title-takeover mode so it gets enough memory: hold R while opening any game to
+reach the homebrew menu (or Sphaira), then pick manhunt.nro.
 
 Controls: the Switch buttons map to the Xbox pad by label (A, B, X, Y).
 Hold ZL + ZR + Plus + Minus for 1.5 seconds to quit the game.
@@ -58,6 +68,9 @@ Hold ZL + ZR + Plus + Minus for 1.5 seconds to quit the game.
 Settings are in manhunt.env, one KEY=VALUE per line. MANHUNT_WIDESCREEN=1 gives
 16:9 (HUD at the screen edges, movies filling the screen); remove it for 4:3.
 See the project README for the full list.
+
+manhunt.nro includes an LGPL-2.1 library; LICENSES/SOURCE-OFFER.txt says where
+its source is.
 
 Experimental: tested on one console. Not affiliated with or endorsed by the
 owners of Manhunt.
@@ -70,6 +83,46 @@ def sha256(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def nro_icon(data):
+    """The NRO's icon bytes, or b"" without an asset section."""
+    total = struct.unpack_from("<I", data, 0x18)[0]
+    if data[total:total + 4] != b"ASET":
+        return b""
+    off, size = struct.unpack_from("<QQ", data, total + 8)
+    return data[total + off:total + off + size]
+
+
+def lgpl_source_zip(path, version, fixed):
+    """src/apu/ as compiled (the patched xboxrecomp tree) with the licence."""
+    tree = os.path.join(ROOT, "game", "build", "xboxrecomp")
+    apu = os.path.join(tree, "src", "apu")
+    if not os.path.isdir(apu):
+        raise SystemExit("patched tree not found: " + apu + " (run scripts/game-build.sh switch first)")
+    pin = open(os.path.join(ROOT, "infra", "recompiler", "Dockerfile")).read()
+    commit = re.search(r"XBOXRECOMP_COMMIT=([0-9a-f]{40})", pin)
+    readme = ("LGPL-2.1 source in manhunt1-nx v%s\n\n"
+              "src/apu/ is xboxrecomp's audio emulator (extracted from xemu) as compiled\n"
+              "into manhunt.nro: https://github.com/sp00nznet/xboxrecomp at commit %s\n"
+              "with the patches in game/patches/xboxrecomp/ of\n"
+              "https://github.com/baezahuertaelias/manhunt1_nx (tag v%s) applied.\n"
+              "Licence: LGPL-2.1-or-later, text in LGPL-2.1.txt. Copyright lines are in\n"
+              "each file's header.\n" % (version, commit.group(1) if commit else "(see infra/recompiler/Dockerfile)", version))
+
+    def add(z, name, data):
+        zi = zipfile.ZipInfo(name, fixed)
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        zi.external_attr = 0o644 << 16
+        z.writestr(zi, data)
+
+    with zipfile.ZipFile(path, "w") as z:
+        add(z, "README.txt", readme)
+        add(z, "LGPL-2.1.txt", open(os.path.join(ROOT, "LICENSES", "LGPL-2.1.txt"), "rb").read())
+        for n in sorted(os.listdir(apu)):
+            f = os.path.join(apu, n)
+            if os.path.isfile(f):
+                add(z, "src/apu/" + n, open(f, "rb").read())
 
 
 def main(argv):
@@ -91,6 +144,11 @@ def main(argv):
     if not xbe_hash:
         raise SystemExit("DEFAULT.xbe not found in " + am)
     nro_hash = sha256(nro)
+    cover = os.path.join(ROOT, "game", "build", "icon256.jpg")
+    icon = nro_icon(open(nro, "rb").read())
+    if icon and os.path.isfile(cover) and icon == open(cover, "rb").read():
+        raise SystemExit("the NRO's icon is game/build/icon256.jpg (cover art): "
+                         "move that file aside and rebuild before releasing")
     manifest = {
         "name": "manhunt1_nx",
         "version": version,
@@ -122,9 +180,13 @@ def main(argv):
         lic = os.path.join(ROOT, "LICENSES")
         for n in sorted(os.listdir(lic)):
             add(z, "LICENSES/" + n, open(os.path.join(lic, n), "rb").read())
+    spath = os.path.join(out, "manhunt1-nx-v%s-lgpl-source.zip" % version)
+    lgpl_source_zip(spath, version, fixed)
     print("wrote %s" % zpath)
     print("  zip sha256 %s  %d bytes" % (sha256(zpath), os.path.getsize(zpath)))
     print("  nro sha256 %s" % nro_hash)
+    print("wrote %s" % spath)
+    print("  zip sha256 %s  %d bytes" % (sha256(spath), os.path.getsize(spath)))
     return 0
 
 

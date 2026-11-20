@@ -118,7 +118,7 @@ if(NINTENDO_SWITCH)
     add_custom_target(manhunt_shaders DEPENDS ${MANHUNT_SHADERS})
     add_dependencies(manhunt_romfs manhunt_shaders)
     set_property(TARGET manhunt_romfs APPEND PROPERTY DKP_ASSET_FILES ${MANHUNT_SHADERS})
-    nx_generate_nacp(manhunt.nacp NAME "Manhunt (recomp)" AUTHOR "baezahuertaelias" VERSION "0.2.0")
+    nx_generate_nacp(manhunt.nacp NAME "Manhunt (recomp)" AUTHOR "baezahuertaelias" VERSION "0.3.0")
     # Optional icon: scripts/game-build-native.sh resizes game/icon.jpg to the
     # 256x256 JPEG the NRO format needs. Without it libnx's default icon is used.
     set(MANHUNT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/build/icon256.jpg")

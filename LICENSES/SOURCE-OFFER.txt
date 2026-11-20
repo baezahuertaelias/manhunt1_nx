@@ -1,0 +1,23 @@
+Source for the LGPL-2.1 library in manhunt.nro
+
+manhunt.nro statically links the Xbox audio emulator from xboxrecomp's src/apu/
+(extracted from xemu), licensed under the GNU Lesser General Public License,
+version 2.1 or (at your option) any later version. The licence text is
+LGPL-2.1.txt in this folder.
+
+The complete corresponding source of that library, exactly as compiled into
+this NRO (the pinned xboxrecomp commit with this project's patches applied), is
+published next to every release, from the same place as the NRO:
+
+    https://github.com/baezahuertaelias/manhunt1_nx/releases
+    file: manhunt1-nx-v<version>-lgpl-source.zip
+
+The rest of the program is the public source of this project, at the commit
+tagged v<version>:
+
+    https://github.com/baezahuertaelias/manhunt1_nx
+
+To modify the library and relink: edit or replace src/apu/ in the patched
+xboxrecomp tree and rebuild with scripts/game-build.sh switch, as the README
+describes. The build regenerates the game's own code from your copy of the
+game's DEFAULT.xbe, which is not distributed.

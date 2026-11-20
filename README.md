@@ -6,16 +6,19 @@ This repository contains **no game data**. You need your own lawfully obtained c
 
 ## Status
 
-Experimental. It runs on a physical Switch, tested on one console.
+Experimental. It runs on a physical Switch, tested on one console. Current release: **v0.3.0** (see [Releases](https://github.com/baezahuertaelias/manhunt1_nx/releases)).
 
 | Area | State |
 |---|---|
 | Boot to the original menu, controller on the menu | Works on the console |
-| First mission loads, player control in its opening | Works on the console, by user report |
-| OpenGL renderer | First mission, scripted console run on 2026-11-18 (CPU 1020, GPU 307, EMC 1331 MHz): median 64.5 FPS over samples above 20,000 vertices per frame, no audio underruns. Details: `reports/VISUAL_AND_PERF_FINDINGS_2026-11-17.md` |
-| Lighting | The world's baked (prelit) lighting is drawn since 2026-11-19, so the player and the world are lit consistently with the game's own ambient. Console screenshots only; no comparison with the original Xbox |
+| Intro movies with subtitles | Works on the console. The subtitles that sometimes turned into pink boxes are fixed (patch 0041): the font failed in 2 of 4 intro runs before the fix and in 0 of 6 after |
+| First mission loads, player control in its opening | Works on the console, by user report and scripted runs |
+| Frame rate | Intro and menu: 60 FPS on the console (2026-11-20). First mission, scripted console run on 2026-11-18 (CPU 1020, GPU 307, EMC 1331 MHz): median 64.5 FPS over samples above 20,000 vertices per frame, no audio underruns. Details: `reports/VISUAL_AND_PERF_FINDINGS_2026-11-17.md` |
+| Lighting | The world's baked (prelit) lighting is drawn, on the OpenGL renderer since 2026-11-19 and on the CPU path since 2026-11-20, so the player and the world are lit consistently with the game's own ambient. Console screenshots only; no comparison with the original Xbox |
 | Audio | Intro movie and in-game voices heard on the console; steady 48 kHz. Reverb and other DSP effects are not emulated |
 | 16:9 widescreen | Wider 3D view, HUD and movies at 4:3 in the centre, confirmed by console screenshots |
+| Returning from a level to the main menu | **Known crash** (reported 2026-11-10, after refused contiguous-memory requests). Not reproduced or fixed yet; `MANHUNT_CONTIG_TRACE=1` logs what is needed to find it |
+| Seeing through walls with the camera close to them | Fix in place (unclamped clip depth), not yet proven on the console. `MANHUNT_GL_CLIP_CLAMP=alt` compares both forms in one run |
 | Stealth, executions, AI, combat, later levels, saves | UNVERIFIED |
 | 30-minute stability, full level completion | UNVERIFIED |
 
@@ -26,7 +29,7 @@ This code merged without the independent reviews the project had planned, by the
 ### Recompilation and runtime
 
 - Lifted the Xbox executable to portable C with [xboxrecomp](https://github.com/sp00nznet/xboxrecomp), pinned to one commit by `infra/recompiler/Dockerfile`.
-- Maintained 23 patches to that runtime in `game/patches/xboxrecomp/`: the Horizon (Switch) port, memory layout, a raw-batch renderer interface, audio register routing, and GPU completion handling.
+- Maintained 40 patches to that runtime in `game/patches/xboxrecomp/`: the Horizon (Switch) port, memory layout, a raw-batch renderer interface, audio register routing, and GPU completion handling.
 - Implemented the Horizon layer in `game/src/`: memory, threads, time, files, the SD layout, a crash handler with a backtrace, a watchdog, and log output to the card, TCP or nxlink.
 - Replaced the fence wait the title needs (`game/src/d3d_fence.c`).
 
@@ -36,6 +39,7 @@ This code merged without the independent reviews the project had planned, by the
 - Added an OpenGL NV2A renderer (`game/src/nv2a_gl/`), taken from the Burnout 3 Switch port and extended with fixed-function lighting, fog matching and a shader program cache. This took the first mission from about 1 flip per second to the mid 30s and above.
 - Applied the title's own gamma ramp at present (`MANHUNT_GAMMA`, on by default).
 - Found the cause of the dark scene and the dark player: the fixed-function shader dropped the vertex colour the title routes in as emission, which carries the world's baked lighting. The base colour now follows `SET_COLOR_MATERIAL` (`MANHUNT_GL_FF_COLMAT=0` restores the old form). The earlier `MANHUNT_AMBIENT_LIGHT` lift is off by default.
+- Fixed the intro's subtitles turning into pink boxes. The texture decoder borrowed the executor's first texture slot while the pushbuffer executor rewrote it on another thread, so the font sometimes decoded with the movie's settings and was replaced by the magenta "undecodable" stand-in (patch 0041). The first 32 textures that still fall back to magenta are logged.
 - Three renderer synchronisation modes (`MANHUNT_GL_SYNC`): `gpu`, the default and the fast one; `strict` (about 3 FPS) and `fenced` (about 7.4 FPS), which keep guest memory up to date and exist for diagnosis.
 
 ### Audio
@@ -82,7 +86,15 @@ The toolchain image is pinned: `devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6
 
 ## Install and run
 
-The game needs a homebrew-capable Switch, started in **title-takeover mode** so it gets enough memory. Lay out the SD card like this:
+You need a homebrew-capable Switch and your own copy of Manhunt for the original Xbox (a disc image or the extracted files).
+
+**The easy way: the installer.** Open the [Manhunt Switch SD installer](https://baezahuertaelias.github.io/manhunt1_nx_installer/) in a current Chromium browser (Chrome or Edge). Choose your disc image or extracted folder and let it build `manhunt1-nx-v<version>-sd.zip`. It checks every game file against the port's manifest, and the game files never leave your computer. Delete any old `switch/manhunt1_nx/game` on the SD card, then extract the zip at the card root.
+
+**By hand.** Download `manhunt1-nx-v<version>.zip` from [Releases](https://github.com/baezahuertaelias/manhunt1_nx/releases) and extract it at the SD card root. Copy your game files into `switch/manhunt1_nx/game/` (`DEFAULT.xbe`, `audio/`, `levels/`). `asset-manifest.sha256` in the zip lists the SHA-256, size and path of every file the port expects.
+
+**Starting it.** The game needs **title-takeover mode** to get enough memory: hold **R** while opening any installed game. The homebrew menu (or Sphaira) opens instead; pick `manhunt.nro`. Started from the album applet it does not get enough memory. Hold **ZL + ZR + Plus + Minus** for 1.5 seconds to quit.
+
+The SD card layout:
 
 ```text
 /switch/manhunt1_nx/manhunt.nro
@@ -94,7 +106,7 @@ The game needs a homebrew-capable Switch, started in **title-takeover mode** so 
 
 `save/` and `frames/` are kept in `/switch/manhunt1_nx/` as well.
 
-A good `manhunt.env` for playing:
+The release's `manhunt.env`, good for playing:
 
 ```text
 RECOMP_SPAN_4G=1
@@ -102,9 +114,10 @@ MANHUNT_GPU_BACKEND=2
 MANHUNT_AUDIO_APU=1
 MANHUNT_WIDESCREEN=1
 MANHUNT_LANGUAGE=spanish
+MANHUNT_AMBIENT_LIGHT=-1
 ```
 
-Leave out `RECOMP_GL_DUMP` when playing: it saves a frame to the card and freezes the game each time.
+Leave out `RECOMP_GL_DUMP` when playing: it saves a frame to the card and holds the game each time (two dumps per 60 frames hold it at about 15 FPS).
 
 To test without copying the NRO, send it with nxlink from the toolchain image. nxlink runs the copy it sends and does **not** replace the NRO on the card:
 
@@ -137,6 +150,17 @@ Set these in `manhunt.env`, one per line.
 | `MANHUNT_QUIT_MODE` | `restart` | How the quit combo ends the game: `restart`, `return` or `process` |
 | `MANHUNT_LOG_FILE` | off | Path of a log file on the card |
 | `MANHUNT_SD_BASE` | `/switch/manhunt1_nx` | Application folder; `game/` is appended for game data |
+
+Diagnostic settings, for test runs only:
+
+| Key | Default | Effect |
+|---|---|---|
+| `RECOMP_GL_DUMP` | off | `<path prefix>,<N>` saves every Nth frame as a BMP |
+| `MANHUNT_GL_CLIP_CLAMP` | `0` | `1` clamps clip depth per vertex (the old form); `alt` alternates linear and clamped every frame, and with `RECOMP_GL_DUMP` saves each pair |
+| `MANHUNT_GL_FF_COLMAT` | on | `0` restores the old fixed-function base colour (scene ambient alone) |
+| `MANHUNT_CONTIG_TRACE` | off | `1` logs contiguous-memory blocks of 64 KB or more with the guest caller, and an arena summary every 10 s and at each refused request |
+| `MANHUNT_PAD_SCRIPT` | off | Scripted pad input, `<ms>:<button>[+<button>][:<hold_ms>],...` (`game/src/pad_script.c`) |
+| `MANHUNT_AUTO_EXIT_SECS` | off | Ends the run after N seconds |
 
 **Quitting.** Hold ZL + ZR + Plus + Minus for 1.5 seconds. The aim is to leave the game and land back in Sphaira instead of ending the whole takeover session, as HOME then Close Software does, which also takes Sphaira's FTP and netloader away. `MANHUNT_QUIT_MODE` picks the method: `restart` (default) restarts the program, which under the homebrew loader's title takeover reloads the menu; `return` exits the way a normal homebrew app does; `process` ends the process and returns to the Home menu. Which of them lands in Sphaira is UNVERIFIED on the console. Each step is logged as `[MH-EXIT]`.
 
@@ -208,7 +232,9 @@ The audio emulator compiled into the Switch build comes from xboxrecomp's `src/a
 >
 > This library is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more details.
 
-**If you distribute a Switch NRO:** the build links these objects statically, so the LGPL applies to that binary. You must keep these notices, make the LGPL source available, and let recipients relink against a modified version of the library, for example by supplying the object files or the complete source and build scripts. This project publishes no binaries.
+**If you distribute a Switch NRO:** the build links these objects statically, so the LGPL applies to that binary. You must keep these notices, make the LGPL source available, and let recipients relink against a modified version of the library, for example by supplying the object files or the complete source and build scripts.
+
+**The project's releases** do this. Every release publishes `manhunt1-nx-v<version>-lgpl-source.zip` next to `manhunt1-nx-v<version>.zip`, with `src/apu/` exactly as compiled into that NRO. The release zip carries `LICENSES/SOURCE-OFFER.txt`, which says where it is. The rest of the program is this repository at the release tag, and `scripts/game-build.sh switch` rebuilds and relinks it from your own copy of the game. `scripts/make-release.py` writes both zips and refuses an NRO that carries the cover-art icon (`game/build/icon256.jpg`).
 
 The host build also links LGPL-2.1 NV2A files from the same runtime: `src/nv2a/nv2a_regs.h`, `nv2a_core.c` and `nv2a_state.h`.
 
