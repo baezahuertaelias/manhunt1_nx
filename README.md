@@ -20,7 +20,7 @@ Playable on a physical Switch, tested on one console. Current release: **v1.0.0*
 | Returning from a level to the main menu | Works on the console with v0.3.0: two returns in one session (Jury Turf, then Zoo) on 2026-11-20, no refused contiguous-memory requests, peak use 31.4 of 64 MB. The crash reported on 2026-11-10 was not reproduced; `MANHUNT_CONTIG_TRACE=1` logs what is needed if it comes back |
 | Seeing through walls with the camera close to them | Fix in place (unclamped clip depth), not yet proven on the console. `MANHUNT_GL_CLIP_CLAMP=alt` compares both forms in one run |
 | Stealth, executions, AI, combat | Played in those scenes, by the owner's report; no fault reported |
-| Saving and loading | UNVERIFIED |
+| Saving and loading | Works on the console: used across those scenes, by the owner's report (2026-11-20) |
 | Stability | More than an hour of play with no crash, by the owner's report. Scenes after the first five and the end of the game: UNVERIFIED |
 
 This code merged without the independent reviews the project had planned, by the owner's decision. Emulator results are diagnostic only and say nothing about console speed.
