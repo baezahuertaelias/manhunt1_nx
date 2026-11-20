@@ -1,0 +1,59 @@
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -1896,6 +1896,18 @@
+     return on;
+ }
+ 
++/* MANHUNT_GL_FF_COLMAT=0: the old base colour, the scene ambient alone. */
++static int ffp_colmat_on(void)
++{
++    static int on = -1;
++
++    if (on < 0) {
++        const char *e = getenv("MANHUNT_GL_FF_COLMAT");
++        on = !(e && *e == '0');
++    }
++    return on;
++}
++
+ static int lit_color(uint32_t index, float out[4])
+ {
+     const float *mv = (const float *)&s_reg[0x0480 / 4];
+@@ -1937,6 +1949,28 @@
+     }
+ 
+     out[0] = reg_f(0x0A10); out[1] = reg_f(0x0A14); out[2] = reg_f(0x0A18);
++    /* Base colour from the colour-material sources (xemu vsh-ff.c), as the
++     * GL shader computes it: ambient source * SET_MATERIAL_EMISSION + the
++     * emission source, each the scene ambient, the vertex colour (1) or the
++     * specular colour (2). Manhunt's prelit world sends its baked lighting as
++     * the emissive vertex colour (colmat 0x01, scene ambient 0).
++     * MANHUNT_GL_FF_COLMAT=0 keeps the scene ambient alone. */
++    if (ffp_colmat_on()) {
++        float spec[4] = {0, 0, 0, 1}, scene[3], base[3];
++        uint32_t as = (colmat >> 2) & 3, es = colmat & 3;
++        const float *src[3];
++        int k;
++
++        if (s_gpu.attr[4].size && !fetch_attr(&s_gpu.attr[4], index, spec))
++            spec[0] = spec[1] = spec[2] = 0;
++        memcpy(scene, out, sizeof scene);
++        if (as == 3 || (as == 1 && !have_vc)) as = 0;
++        if (es == 3 || (es == 1 && !have_vc)) es = 0;
++        src[0] = scene; src[1] = vc; src[2] = spec;
++        for (k = 0; k < 3; k++)
++            base[k] = src[as][k] * reg_f(0x03A8 + 4 * (uint32_t)k) + src[es][k];
++        memcpy(out, base, sizeof base);
++    }
+     for (i = 0; i < NV_LIGHTS; i++) {
+         uint32_t kind = (mask >> (2 * i)) & 3, b = 0x1000 + (uint32_t)i * 0x80;
+         float l[3], att = 1.0f, ndl, amb[3], dif[3];
+@@ -3401,7 +3435,7 @@
+         float sample[4];
+         const VertexAttr *ca = color_attr();
+         const uint32_t cm = s_reg[0x0298 / 4];
+-        const int uses_vc = ((cm >> 2) & 3) == 1 || ((cm >> 4) & 3) == 1;
++        const int uses_vc = (cm & 3) == 1 || ((cm >> 2) & 3) == 1 || ((cm >> 4) & 3) == 1;
+         /* Endpoint fetches validate the same contiguous arrays as lit_color.
+          * Unusual colour slots keep the original CPU path. */
+         shader_lit = (present & 5) == 5 && (!uses_vc || ca == &s_gpu.attr[3])
