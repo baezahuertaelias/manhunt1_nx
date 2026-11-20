@@ -1,0 +1,156 @@
+--- a/src/kernel/xbox_memory_layout.c
++++ b/src/kernel/xbox_memory_layout.c
+@@ -4233,6 +4233,98 @@
+     fflush(stderr);
+ }
+ 
++/* MANHUNT_CONTIG_TRACE=1: one [MH-CONTIG] line per block of 64 KB or more
++ * allocated or freed, with the guest caller of the kernel call, and a
++ * summary of the arena (in use, the five largest free runs, live blocks by
++ * size) every 10 s and at an allocation failure. For the crash on the way
++ * back to the main menu, which followed a run of refused requests
++ * (reports/PERF_AUDIO_STATUS_2026-11-10.md). Off: one cached test per call. */
++extern RECOMP_TLS uint32_t g_xbox_kernel_caller;
++#define CONTIG_TRACE_MIN_PAGES ((64u << 10) / CONTIG_PAGE)
++
++static int contig_trace(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char *e = getenv("MANHUNT_CONTIG_TRACE");
++        on = e && *e == '1';
++        if (on) {
++            fprintf(stderr, "[MH-CONTIG] trace on: blocks >= 64 KB, summary every 10 s "
++                    "and at a refusal (MANHUNT_CONTIG_TRACE)\n");
++            fflush(stderr);
++        }
++    }
++    return on;
++}
++
++/* Lock held. */
++static void contig_summary(const char *why)
++{
++    static const uint32_t bucket_kb[] = { 64, 256, 1024, 4096 };
++    uint32_t top[5] = { 0 }, top_at[5] = { 0 }, live[5] = { 0 }, live_kb[5] = { 0 };
++    uint32_t q = 0, i, j, free_pages = 0;
++
++    while (q < CONTIG_USABLE) {
++        if (!g_contig_used[q]) {
++            uint32_t at = q, run = 0;
++            while (q < CONTIG_USABLE && !g_contig_used[q]) { q++; run++; }
++            free_pages += run;
++            for (i = 0; i < 5 && run <= top[i]; i++)
++                ;
++            if (i < 5) {
++                for (j = 4; j > i; j--) { top[j] = top[j - 1]; top_at[j] = top_at[j - 1]; }
++                top[i] = run;
++                top_at[i] = at;
++            }
++            continue;
++        }
++        if (g_contig_used[q] == 1 && g_contig_len[q]) {
++            uint32_t kb = g_contig_len[q] * (CONTIG_PAGE / 1024);
++            for (i = 0; i < 4 && kb >= bucket_kb[i]; i++)
++                ;
++            live[i]++;
++            live_kb[i] += kb;
++            q += g_contig_len[q];
++            continue;
++        }
++        q++;
++    }
++    fprintf(stderr, "[MH-CONTIG] summary (%s): in use %u KB, free %u KB of %u KB; "
++            "largest free runs KB@phys %u@%X %u@%X %u@%X %u@%X %u@%X; live blocks "
++            "<64K %u (%u KB) <256K %u (%u KB) <1M %u (%u KB) <4M %u (%u KB) >=4M %u (%u KB); "
++            "allocs %u frees %u kept %u\n", why,
++            g_contig_pages_in_use * (CONTIG_PAGE / 1024), free_pages * (CONTIG_PAGE / 1024),
++            (unsigned)(CONTIG_USABLE * (CONTIG_PAGE / 1024)),
++            top[0] * (CONTIG_PAGE / 1024), top_at[0] * CONTIG_PAGE,
++            top[1] * (CONTIG_PAGE / 1024), top_at[1] * CONTIG_PAGE,
++            top[2] * (CONTIG_PAGE / 1024), top_at[2] * CONTIG_PAGE,
++            top[3] * (CONTIG_PAGE / 1024), top_at[3] * CONTIG_PAGE,
++            top[4] * (CONTIG_PAGE / 1024), top_at[4] * CONTIG_PAGE,
++            live[0], live_kb[0], live[1], live_kb[1], live[2], live_kb[2],
++            live[3], live_kb[3], live[4], live_kb[4],
++            g_contig_allocs, g_contig_frees, g_contig_kept);
++    fflush(stderr);
++}
++
++/* One line per traced block, a summary every 10 s. Lock held. */
++static void contig_trace_op(const char *what, uint32_t va, uint32_t pages)
++{
++    static DWORD last_summary;
++    DWORD now;
++
++    if (pages >= CONTIG_TRACE_MIN_PAGES) {
++        fprintf(stderr, "[MH-CONTIG] %s 0x%08X %u KB caller 0x%08X in use %u KB\n",
++                what, va, pages * (CONTIG_PAGE / 1024), g_xbox_kernel_caller,
++                g_contig_pages_in_use * (CONTIG_PAGE / 1024));
++        fflush(stderr);
++    }
++    now = GetTickCount();
++    if (!last_summary || now - last_summary >= 10000) {
++        last_summary = now;
++        contig_summary("periodic");
++    }
++}
++
+ static void contig_take(uint32_t first, uint32_t n)
+ {
+     uint32_t end = (first + n) * CONTIG_PAGE;
+@@ -4330,6 +4422,8 @@
+     if (result) {
+         g_contig_allocs++;
+         contig_report("alloc", result, n);
++        if (contig_trace())
++            contig_trace_op("alloc", result, n);
+     } else {
+         uint32_t best = 0, run = 0;
+         for (q = 0; q < CONTIG_USABLE; q++) {
+@@ -4343,6 +4437,17 @@
+                 (unsigned)(CONTIG_USABLE * (CONTIG_PAGE / 1024)),
+                 best * (CONTIG_PAGE / 1024), g_contig_kept);
+         fflush(stderr);
++        if (contig_trace()) {
++            /* The request every time; the summary only when the arena has
++             * changed since the last refusal, so a burst stays readable. */
++            static uint32_t summarised_pages = UINT32_MAX;
++            fprintf(stderr, "[MH-CONTIG] refused %u bytes align %u phys 0x%08X..0x%08X "
++                    "caller 0x%08X\n", size, alignment, phys_lo, phys_hi, g_xbox_kernel_caller);
++            if (summarised_pages != g_contig_pages_in_use) {
++                summarised_pages = g_contig_pages_in_use;
++                contig_summary("refusal");
++            }
++        }
+     }
+     contig_unlock();
+ 
+@@ -4382,6 +4487,8 @@
+         contig_take(q, run);
+         g_contig_allocs++;
+         contig_report("claim", XBOX_CONTIG_BASE + q * CONTIG_PAGE, run);
++        if (contig_trace())
++            contig_trace_op("claim", XBOX_CONTIG_BASE + q * CONTIG_PAGE, run);
+     }
+     contig_unlock();
+ }
+@@ -4419,6 +4526,9 @@
+     if (!contig_reclaim_enabled()) {
+         contig_lock();
+         g_contig_kept++;
++        if (contig_trace())
++            contig_trace_op("kept", va, (va & (CONTIG_PAGE - 1)) ? 0
++                            : g_contig_len[(va - XBOX_CONTIG_BASE) / CONTIG_PAGE]);
+         contig_unlock();
+         return 1;
+     }
+@@ -4442,6 +4552,8 @@
+         g_contig_first_free = first;
+     g_contig_frees++;
+     contig_report("free", va, n);
++    if (contig_trace())
++        contig_trace_op("free", va, n);
+     contig_unlock();
+     return 1;
+ }
