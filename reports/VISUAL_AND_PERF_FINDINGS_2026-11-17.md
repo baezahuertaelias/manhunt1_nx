@@ -220,3 +220,31 @@ The two runs are compared on whole-run averages, not single frames, because the 
 - **Not judged:** wall see-through (item 1), HUD grouping in a pause menu (item 11b) and the dark player. They need a hand-played check.
 
 The card now holds this NRO at `/switch/manhunt1_nx/manhunt.nro`. The previous NRO is kept as `manhunt.nro.prev`.
+
+## Unattended console runs of the pending checks — 2026-11-19
+
+Same NRO `a0aeffbd…` (commit ba2a70b). No one played. Each run was sent with nxlink, driven by `MANHUNT_PAD_SCRIPT` and ended by `MANHUNT_AUTO_EXIT_SECS=240`. A GL frame was dumped every 60 frames. Clocks in both runs: CPU 1785, GPU 768, EMC 1600 MHz (docked, charging). Logs, frames and the env sent: `game/build/hw-test/2026-11-19-pending-{a,b}/`.
+
+- **Run A:** defaults. `MANHUNT_AMBIENT_LIGHT=0.33`, and the item 1 fix is on (z unclamped).
+- **Run B:** `MANHUNT_AMBIENT_LIGHT=-1` (the game's ambient, as on the card) and `MANHUNT_GL_CLIP_CLAMP=1` (the old per-vertex clamp).
+- **Script:** the same in both runs. Intros are skipped with A, then the player walks. From 172 s the player strafes into obstacles while the camera orbits for 8 s each way. From 199 s to 218 s the pause menu is held open.
+
+How the runs were automated:
+
+- The loader truncates long nxlink arguments. A 863-byte pad script arrived as 12 steps, and the arguments after it were dropped. Long values must go in the card's `manhunt.env`, which was backed up as `manhunt.env.pre-pending` and restored after each run.
+- After an auto exit, the title restarts into the menu with the netloader listening again. Runs can therefore be chained with no button press.
+- Dumping every 60 frames holds the game at 30 fps. Run B fell about 300 frames behind run A, and the two runs reached different places, so frames are compared at matched script times, not at the same frame numbers.
+
+Results:
+
+- **Item 3 (dark player): confirmed.**
+  - Frames 112–199 s: mean frame luminance is 35.2 in A and 8.4 in B. The centre-bottom box where the player stands is 34.8 in A and 5.9 in B.
+  - In A the world is lifted, while the player keeps the game's lighting and reads as a near-black figure (`2026-11-19-pending-b/ab_player.png`, A in the top row, B in the bottom row).
+  - In B the player is lit like the world around them, but the whole scene is very dark.
+  - Neither setting is right. The fix stays as written in item 3: apply the same lift to the characters' light constants, or find what else darkens the world.
+- **Item 11b (pause menu): no fault.** In A, the pause menu over the live level stays grouped and centred (`a_p1.png`). "Select" on the left and "Back / Confirm" on the right keep equal margins of about 90 px. No element is split or pushed to the screen edge.
+- **Item 1 (wall see-through): symptom seen with the old clamp, fix not yet proven.**
+  - In B, frames `penb04980` and `penb05340` (`b_zoom.png`, brightened 4×) show the camera against a near surface with no player in view.
+  - In those frames a dark shape with straight edges covers the lower and left parts of the frame. The lit street behind shows through a rectangular gap. This matches the item 1 description.
+  - Run A never reached that spot: its camera ended up behind a chain-link fence, which is see-through by design. The fix is therefore not yet shown to remove the effect.
+  - Settling it needs both settings at one camera position. Two options: a run that switches the clamp at runtime, or a run with the fix that reaches the car park seen in B.
