@@ -262,7 +262,7 @@ static uint64_t hz_now(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
-/* Owner-requested scene ambient RGB. -1 retains the title's ambient;
+/* Optional scene ambient RGB override. -1 (default) retains the title's ambient;
  * only lit fixed-function geometry is affected, never UI/unlit batches. */
 static float ambient_level(void)
 {
@@ -271,7 +271,7 @@ static float ambient_level(void)
     if (!initialized) {
         const char *e = getenv("MANHUNT_AMBIENT_LIGHT");
         char *end = NULL;
-        value = e ? strtof(e, &end) : 0.33f;
+        value = e ? strtof(e, &end) : -1.0f;
         if (e && (end == e || *end || !(value == -1.0f || (value >= 0.0f && value <= 1.0f)))) {
             fprintf(stderr, "[MH-GL] invalid MANHUNT_AMBIENT_LIGHT; retaining game ambient\n");
             value = -1.0f;

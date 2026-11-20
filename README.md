@@ -12,8 +12,8 @@ Experimental. It runs on a physical Switch, tested on one console.
 |---|---|
 | Boot to the original menu, controller on the menu | Works on the console |
 | First mission loads, player control in its opening | Works on the console, by user report |
-| OpenGL renderer | About 35 to 44 flips per second in the first mission (console runs 18 to 38) |
-| Latest build (`MANHUNT_GL_SYNC=gpu` default) | Run 39: no crashes, frame-rate samples of 48.0 and 29.8 early in the game, user reports it works as intended. Sustained rate inside the level: UNVERIFIED for this build |
+| OpenGL renderer | First mission, scripted console run on 2026-11-18 (CPU 1020, GPU 307, EMC 1331 MHz): median 64.5 FPS over samples above 20,000 vertices per frame, no audio underruns. Details: `reports/VISUAL_AND_PERF_FINDINGS_2026-11-17.md` |
+| Lighting | The world's baked (prelit) lighting is drawn since 2026-11-19, so the player and the world are lit consistently with the game's own ambient. Console screenshots only; no comparison with the original Xbox |
 | Audio | Intro movie and in-game voices heard on the console; steady 48 kHz. Reverb and other DSP effects are not emulated |
 | 16:9 widescreen | Wider 3D view, HUD and movies at 4:3 in the centre, confirmed by console screenshots |
 | Stealth, executions, AI, combat, later levels, saves | UNVERIFIED |
@@ -35,7 +35,7 @@ This code merged without the independent reviews the project had planned, by the
 - Built a deko3d back end for the menu, with stages for depth, swizzled surfaces, DXT1, X8 and wrap addressing behind `MANHUNT_DEKO_*` switches. It reached about 1 flip per second in the level, because most draws still fell back to the CPU rasteriser.
 - Added an OpenGL NV2A renderer (`game/src/nv2a_gl/`), taken from the Burnout 3 Switch port and extended with fixed-function lighting, fog matching and a shader program cache. This took the first mission from about 1 flip per second to the mid 30s and above.
 - Applied the title's own gamma ramp at present (`MANHUNT_GAMMA`, on by default).
-- Found through runs that the dark scene comes from the title's ambient light value. The developer menu's "Ambient light" item fixes it.
+- Found the cause of the dark scene and the dark player: the fixed-function shader dropped the vertex colour the title routes in as emission, which carries the world's baked lighting. The base colour now follows `SET_COLOR_MATERIAL` (`MANHUNT_GL_FF_COLMAT=0` restores the old form). The earlier `MANHUNT_AMBIENT_LIGHT` lift is off by default.
 - Three renderer synchronisation modes (`MANHUNT_GL_SYNC`): `gpu`, the default and the fast one; `strict` (about 3 FPS) and `fenced` (about 7.4 FPS), which keep guest memory up to date and exist for diagnosis.
 
 ### Audio
@@ -129,6 +129,7 @@ Set these in `manhunt.env`, one per line.
 | `MANHUNT_WIDESCREEN` | off | `1` for 16:9; needs `MANHUNT_GPU_BACKEND=2` |
 | `MANHUNT_LANGUAGE` | `english` | Console language the title reads: `english`, `japanese`, `german`, `french`, `spanish`, `italian`, or 1 to 6. Whether Manhunt switches its text and voices by this setting is UNVERIFIED |
 | `MANHUNT_GAMMA` | on | Applies the title's gamma ramp at present |
+| `MANHUNT_AMBIENT_LIGHT` | `-1` | Scene ambient for lit fixed-function geometry: `-1` keeps the title's, `0` to `1` replaces it with that grey (characters are not affected) |
 | `MANHUNT_DEVMENU` | off | `1` opens Rockstar's developer menu with L3+R3 |
 | `MANHUNT_FPS_OVERLAY` | off | `1` draws the frame rate on screen |
 | `MANHUNT_QUIT_COMBO` | on | Hold ZL + ZR + Plus + Minus for 1.5 s to leave the game; `0` turns it off. See below |
