@@ -17,7 +17,7 @@ Experimental. It runs on a physical Switch, tested on one console. Current relea
 | Lighting | The world's baked (prelit) lighting is drawn, on the OpenGL renderer since 2026-11-19 and on the CPU path since 2026-11-20, so the player and the world are lit consistently with the game's own ambient. Console screenshots only; no comparison with the original Xbox |
 | Audio | Intro movie and in-game voices heard on the console; steady 48 kHz. Reverb and other DSP effects are not emulated |
 | 16:9 widescreen | Wider 3D view, HUD and movies at 4:3 in the centre, confirmed by console screenshots |
-| Returning from a level to the main menu | **Known crash** (reported 2026-11-10, after refused contiguous-memory requests). Not reproduced or fixed yet; `MANHUNT_CONTIG_TRACE=1` logs what is needed to find it |
+| Returning from a level to the main menu | Works on the console with v0.3.0: two returns in one session (Jury Turf, then Zoo) on 2026-11-20, no refused contiguous-memory requests, peak use 31.4 of 64 MB. The crash reported on 2026-11-10 was not reproduced; `MANHUNT_CONTIG_TRACE=1` logs what is needed if it comes back |
 | Seeing through walls with the camera close to them | Fix in place (unclamped clip depth), not yet proven on the console. `MANHUNT_GL_CLIP_CLAMP=alt` compares both forms in one run |
 | Stealth, executions, AI, combat, later levels, saves | UNVERIFIED |
 | 30-minute stability, full level completion | UNVERIFIED |
