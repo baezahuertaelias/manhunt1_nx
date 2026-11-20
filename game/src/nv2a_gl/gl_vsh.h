@@ -38,6 +38,12 @@ void nv2a_gl_vsh_ffx_uniforms(const uint32_t *r, uint32_t lighting,
 /* Nonzero unless MANHUNT_GL_SHADER_MINOR=0: LIT pow(0, 0) = 1 and the alpha
  * test on alpha rounded to 8 bits (the interpreter's and CPU path's forms). */
 int nv2a_gl_shader_minor(void);
+/* MANHUNT_GL_CLIP_CLAMP: 0 linear clip z (default), 1 clamped per vertex,
+ * 2 (=alt) either, per the uniform u_clipalt. nv2a_gl_clip_alt_clamp(frame)
+ * is u_clipalt for the frame that presents as number "frame": even frames
+ * linear, odd frames clamped. */
+int nv2a_gl_clip_mode(void);
+int nv2a_gl_clip_alt_clamp(uint32_t frame);
 
 const char *nv2a_gl_vsh_attributes(void);
 

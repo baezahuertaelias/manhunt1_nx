@@ -2194,6 +2194,8 @@ typedef struct {
     GLint      u_fogm;          /* fixed-function fog generation (gl_vsh.c) */
     int        fogm_valid;
     float      fogm[5][4];
+    GLint      u_clipalt;       /* MANHUNT_GL_CLIP_CLAMP=alt (gl_vsh.c) */
+    int        clipalt;         /* value given + 1; 0 none yet */
     GLint      u_ffx;           /* fixed-function spot + texgen (gl_vsh.c) */
     int        ffx_valid;
     float      ffx[NV2A_FFX_ROWS][4];
@@ -2593,6 +2595,8 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->u_light = glGetUniformLocation(p->prog, "u_light");
     p->u_fogm = glGetUniformLocation(p->prog, "u_fogm");
     p->u_ffx = glGetUniformLocation(p->prog, "u_ffx");
+    p->u_clipalt = glGetUniformLocation(p->prog, "u_clipalt");
+    p->clipalt = 0;
     p->u_tscale = glGetUniformLocation(p->prog, "u_tscale");
     p->u_c0 = glGetUniformLocation(p->prog, "u_c0");
     p->u_c1 = glGetUniformLocation(p->prog, "u_c1");
@@ -4350,6 +4354,15 @@ static void gl_draw_raw_work(const Nv2aRawBatch *b)
             p->uni_valid = 1;
         }
         texshader_uniforms(p, r);
+        if (p->u_clipalt >= 0) {
+            /* MANHUNT_GL_CLIP_CLAMP=alt: this draw belongs to the frame
+             * gl_flip_work will present as s_frame + 1. */
+            const int clamp = nv2a_gl_clip_alt_clamp(s_frame + 1);
+            if (p->clipalt != clamp + 1) {
+                glUniform1f(p->u_clipalt, (float)clamp);
+                p->clipalt = clamp + 1;
+            }
+        }
     }
 
     PF_STAGE(uniform_ns);
@@ -4892,7 +4905,12 @@ static void gl_flip_work(void)
     if (gl_fenced()) rows_snapshot(s->guest.color_va,s->guest.pitch,s->color_baseline,s->w,s->h);
     }
 
-    if (dump_every && (s_frame % (uint32_t)dump_every) == 0) {
+    /* MANHUNT_GL_CLIP_CLAMP=alt dumps pairs: frame N (linear) and N + 1
+     * (clamped), nearly the same view. */
+    if (dump_every && ((s_frame % (uint32_t)dump_every) == 0
+                       || (nv2a_gl_clip_mode() == 2 && dump_every > 1 && s_frame % (uint32_t)dump_every == 1))) {
+        if (nv2a_gl_clip_mode() == 2)
+            fprintf(stderr, "[MH-GL] clip alt frame %u clamp %d\n", s_frame, nv2a_gl_clip_alt_clamp(s_frame));
         size_t need = (size_t)s->pw * s->ph * 4;
         if (need > pix_cap) {
             free(pix);

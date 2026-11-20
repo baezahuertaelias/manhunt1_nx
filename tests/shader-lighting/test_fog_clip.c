@@ -113,6 +113,27 @@ int main(void)
         assert(out[4] == 0.0f);                /* fog off: no coordinate */
         printf("PASS clip z beyond far %s (MANHUNT_GL_CLIP_CLAMP=%d)\n",
                clip_clamp ? "clamped per vertex" : "linear", clip_clamp);
+        /* MANHUNT_GL_CLIP_CLAMP=alt: u_clipalt per frame number, even frames
+         * linear (9), odd frames clamped (1); inside the volume unchanged. */
+        if (nv2a_gl_clip_mode() == 2) {
+            GLint u_alt = glGetUniformLocation(ff, "u_clipalt");
+            assert(u_alt >= 0);
+            for (uint32_t frame = 0; frame < 6; frame++) {
+                const float want = nv2a_gl_clip_alt_clamp(frame) ? 1.0f : 9.0f;
+                assert(nv2a_gl_clip_alt_clamp(frame) == (int)(frame & 1));
+                glUniform1f(u_alt, (float)nv2a_gl_clip_alt_clamp(frame));
+                glVertexAttrib4fv(0, far_pos); run_point(out);
+                if (!near(out[2], want)) {
+                    fprintf(stderr, "alt frame %u clip z %g, expected %g\n", frame, out[2], want); return 1;
+                }
+                glVertexAttrib4fv(0, in_pos); run_point(out);
+                assert(near(out[2], -0.5f) && near(out[3], 1.0f));
+            }
+            glUniform1f(u_alt, 0.0f);
+            printf("PASS clip z alternates per frame: even linear, odd clamped (MANHUNT_GL_CLIP_CLAMP=alt)\n");
+        } else {
+            assert(glGetUniformLocation(ff, "u_clipalt") < 0);
+        }
     }
 
     /* Fog generation per SET_FOG_GEN_MODE against a CPU reference. */
