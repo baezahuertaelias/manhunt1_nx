@@ -87,9 +87,13 @@ int main(int argc, char **argv)
             vc[k] = random_float();
         }
         regs[0x0314 / 4] = 1;
-        regs[0x0298 / 4] = (test % 4) << 2 | ((test / 4) % 4) << 4;
+        /* Ambient (bits 2-3), diffuse (4-5) and emission (0-1) sources all vary,
+         * with a random SET_MATERIAL_EMISSION, so the colour-material base
+         * colour is compared as well as the lights. */
+        regs[0x0298 / 4] = (test % 4) << 2 | ((test / 4) % 4) << 4 | (test / 16) % 4;
         for (int k = 0; k < 12; ++k) reg_float(regs, 0x0480 + 4 * k, random_float() * 2 - 1);
         for (int k = 0; k < 3; ++k) reg_float(regs, 0x0A10 + k * 4, random_float() * 0.3f - 0.1f);
+        for (int k = 0; k < 3; ++k) reg_float(regs, 0x03A8 + k * 4, random_float());
         reg_float(regs, 0x03B4, random_float() * 2 - 0.5f);
         for (int i = 0; i < 8; ++i) {
             unsigned b = 0x1000 + i * 0x80;

@@ -34,3 +34,6 @@ __pycache__/
 # Local NRO icon (game cover art: never commit, repo is public)
 /game/icon.jpg
 /game/icon*.jpg
+
+# Claude Code local state (agent worktrees)
+.claude/

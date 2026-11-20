@@ -1,0 +1,67 @@
+--- a/src/kernel/nv2a_pb_exec.c
++++ b/src/kernel/nv2a_pb_exec.c
+@@ -921,6 +921,8 @@
+ }
+ 
+ static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
++static int sample_tex(const Texture *t, uint32_t face_offset,
++                      uint32_t u, uint32_t v, uint32_t *argb);
+ 
+ /* shortcut: only primary/contiguous RAM views; expand after verified mirror use. */
+ static int backend_ram_span(uint32_t va, uint64_t bytes)
+@@ -932,7 +934,12 @@
+ 
+ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out)
+ {
+-    Texture saved = s_gpu.texs[0];
++    /* A Texture of its own, not stage 0 borrowed and restored: with
++     * RECOMP_GL_THREAD=1 this runs on the GL thread while the executor
++     * rewrites s_gpu.texs[0]. During a movie that is the YUV frame, so a
++     * subtitle font decoded at the same moment sampled the movie's format,
++     * failed, and was shown as magenta boxes. */
++    Texture local;
+     uint32_t x, y;
+     int ok = 1;
+ 
+@@ -948,26 +955,26 @@
+             || !backend_ram_span(tex->palette_va, (uint64_t)tex->palette_entries * sizeof(uint32_t)))
+             return 0;
+     }
+-    s_gpu.texs[0].offset = tex->offset;
+-    s_gpu.texs[0].width  = tex->width;
+-    s_gpu.texs[0].height = tex->height;
+-    s_gpu.texs[0].pitch  = tex->pitch;
+-    s_gpu.texs[0].color  = tex->color;
+-    s_gpu.texs[0].addr_u = 3;
+-    s_gpu.texs[0].addr_v = 3;
+-    s_gpu.texs[0].palette = tex->palette_va;
+-    s_gpu.texs[0].palette_limit = tex->palette_entries;
+-    s_gpu.texs[0].levels = 1;
+-    s_gpu.texs[0].filter = 0;
+-    s_gpu.texs[0].cube   = 0;
+-    s_gpu.texs[0].valid  = 1;
++    memset(&local, 0, sizeof local);
++    local.offset = tex->offset;
++    local.width  = tex->width;
++    local.height = tex->height;
++    local.pitch  = tex->pitch;
++    local.color  = tex->color;
++    local.addr_u = 3;
++    local.addr_v = 3;
++    local.palette = tex->palette_va;
++    local.palette_limit = tex->palette_entries;
++    local.levels = 1;
++    local.filter = 0;
++    local.cube   = 0;
++    local.valid  = 1;
+     for (y = 0; y < tex->height && ok; y++)
+         for (x = 0; x < tex->width; x++)
+-            if (!sample_texture(x, y, &argb_out[(size_t)y * tex->width + x])) {
++            if (!sample_tex(&local, 0, x, y, &argb_out[(size_t)y * tex->width + x])) {
+                 ok = 0;
+                 break;
+             }
+-    s_gpu.texs[0] = saved;
+     return ok;
+ }
+ 

@@ -1,6 +1,6 @@
 --- a/templates/runtime/recomp_types.h
 +++ b/templates/runtime/recomp_types.h
-@@ -294,6 +294,27 @@
+@@ -294,6 +294,28 @@
   * flags (bits 0-5) are not modelled and read as clear, as the x87 status
   * word's exception byte is not. */
  extern RECOMP_TLS uint32_t g_mxcsr;
@@ -21,6 +21,7 @@
 +    if (want != fpcr) __asm__ volatile("msr fpcr, %0" : : "r"(want));
 +#elif defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
 +    _mm_setcsr((_mm_getcsr() & ~0x8040u) | (value & 0x8040u));
++    (void)flush;
 +#else
 +    (void)flush;
 +#endif

@@ -376,18 +376,37 @@ static const char s_gl_clip_free[] =
     "                sw.z * u_surf.z * 2.0 - w, w);\n"
     "}\n";
 
+/* GL clip depth, MANHUNT_GL_CLIP_CLAMP=alt: either form per draw, chosen by
+ * u_clipalt (0 linear, else clamped per vertex), so one run can show both at
+ * the same camera position. nv2a_gl.c alternates it per presented frame. */
+static const char s_gl_clip_alt[] =
+    "uniform float u_clipalt;\n"
+    "vec4 nv2a_clip(vec3 sw, float w) {\n"
+    "    float z = sw.z * u_surf.z * 2.0 - w;\n"
+    "    sw.xy = nv2a_snap(sw.xy, w);\n"
+    "    return vec4(sw.x * u_surf.x - w, sw.y * u_surf.y - w,\n"
+    "                u_clipalt != 0.0 ? clamp(z, -abs(w), abs(w)) : z, w);\n"
+    "}\n";
+
 /* MANHUNT_GL_CLIP_CLAMP=1 restores the per-vertex clamp, for a driver that
- * ignores GL_DEPTH_CLAMP (Eden did; it cannot be detected from the guest). */
-static int nv2a_gl_clip_clamp(void)
+ * ignores GL_DEPTH_CLAMP (Eden did; it cannot be detected from the guest).
+ * =alt alternates the two forms per frame (mode 2). */
+int nv2a_gl_clip_mode(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("MANHUNT_GL_CLIP_CLAMP");
-        on = e && *e == '1';
+        on = e && !strcmp(e, "alt") ? 2 : e && *e == '1';
         fprintf(stderr, "[MH-GL] clip depth: %s (MANHUNT_GL_CLIP_CLAMP)\n",
-                on ? "clamped per vertex" : "linear, GL_DEPTH_CLAMP");
+                on == 2 ? "alternating per frame: even frames linear, odd frames clamped per vertex"
+                : on ? "clamped per vertex" : "linear, GL_DEPTH_CLAMP");
     }
     return on;
+}
+
+int nv2a_gl_clip_alt_clamp(uint32_t frame)
+{
+    return (int)(frame & 1u);
 }
 
 /* MANHUNT_GL_SHADER_MINOR=0 restores two old shader details: LIT's
@@ -472,7 +491,8 @@ const char *nv2a_gl_vsh_prelude(void)
     static char *pre;
     if (!pre) {
         const char *lit = nv2a_gl_shader_minor() ? NV2A_LIT_GLSL : NV2A_LIT_OLD_GLSL;
-        const char *clip = nv2a_gl_clip_clamp() ? s_gl_clip_clamp : s_gl_clip_free;
+        const int mode = nv2a_gl_clip_mode();
+        const char *clip = mode == 2 ? s_gl_clip_alt : mode ? s_gl_clip_clamp : s_gl_clip_free;
         size_t a = strlen(gl), l = strlen(lit), s = strlen(snap), c = strlen(clip);
         pre = (char *)malloc(a + l + s + c + 1);
         if (!pre)

@@ -23,6 +23,7 @@ cc -std=c11 -D_POSIX_C_SOURCE=200809L -O2 -ffp-contract=off -ffunction-sections 
 EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 "$out/test-fog-clip"
 MANHUNT_GL_FF_FOG=0 MANHUNT_GL_CLIP_CLAMP=1 MANHUNT_GL_SHADER_MINOR=0 \
   EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 "$out/test-fog-clip"
+MANHUNT_GL_CLIP_CLAMP=alt EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 "$out/test-fog-clip"
 
 # Fixed-function spot cones and texgen/texture matrices: defaults, then the
 # rollback switches.
