@@ -72,7 +72,7 @@ See the project README for the full list.
 manhunt.nro includes an LGPL-2.1 library; LICENSES/SOURCE-OFFER.txt says where
 its source is.
 
-Experimental: tested on one console. Not affiliated with or endorsed by the
+Tested on one console. Not affiliated with or endorsed by the
 owners of Manhunt.
 """
 
