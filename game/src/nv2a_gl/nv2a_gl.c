@@ -1608,9 +1608,16 @@ static GLuint tex_get_levels(uint32_t va, uint32_t color, uint32_t w, uint32_t h
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA,
                      GL_UNSIGNED_BYTE, &magenta);
         tex_account(t, 4);
-        if (s_trace)
-            fprintf(stderr, "  [GL] texture 0x%08X format 0x%02X not decodable\n",
-                    va, color);
+        {
+            /* Shown as magenta: the first few always, for the pink
+             * subtitle boxes in the intro (run 2026-11-19-pending-b). */
+            static unsigned logged;
+            if (s_trace || logged < 32) {
+                logged++;
+                fprintf(stderr, "  [GL] texture 0x%08X format 0x%02X %ux%u pitch %u levels %u "
+                        "not decodable, frame %u\n", va, color, w, h, pitch, t->levels, s_frame);
+            }
+        }
     } else {
         gl_fail("texture decode or allocation failed");
     }
@@ -4771,6 +4778,10 @@ static void gl_flip_work(void)
     static char dump_prefix[256];
     static uint8_t *pix;
     static size_t pix_cap;
+    static uint8_t *pair;           /* MANHUNT_GL_CLIP_CLAMP=alt: frame N + 1, written later */
+    static size_t pair_cap;
+    static uint32_t pair_frame, pair_w, pair_h;
+    static int pair_pending;
     int ww, wh;
     GlSurf *s = flip_surface();
 
@@ -4906,9 +4917,35 @@ static void gl_flip_work(void)
     }
 
     /* MANHUNT_GL_CLIP_CLAMP=alt dumps pairs: frame N (linear) and N + 1
-     * (clamped), nearly the same view. */
-    if (dump_every && ((s_frame % (uint32_t)dump_every) == 0
-                       || (nv2a_gl_clip_mode() == 2 && dump_every > 1 && s_frame % (uint32_t)dump_every == 1))) {
+     * (clamped), nearly the same view. Frame N + 1 is read at once but
+     * written half a period later: two card writes back to back held the
+     * flip for about 1.6 s (run 2026-11-20-alt-colmat-contig). */
+    if (pair_pending && s_frame % (uint32_t)dump_every == (uint32_t)dump_every / 2) {
+        char path[320];
+        snprintf(path, sizeof path, "%s%05u.bmp", dump_prefix, pair_frame);
+        dump_bmp(path, pair, pair_w, pair_h);
+        pair_pending = 0;
+    }
+    if (dump_every > 3 && nv2a_gl_clip_mode() == 2 && s_frame % (uint32_t)dump_every == 1) {
+        size_t need = (size_t)s->pw * s->ph * 4;
+        fprintf(stderr, "[MH-GL] clip alt frame %u clamp %d\n", s_frame, nv2a_gl_clip_alt_clamp(s_frame));
+        if (need > pair_cap) {
+            free(pair);
+            pair_cap = need;
+            pair = (uint8_t *)malloc(pair_cap);
+        }
+        if (pair) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
+            glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            glReadPixels(0, 0, (GLsizei)s->pw, (GLsizei)s->ph, GL_BGRA,
+                         GL_UNSIGNED_BYTE, pair);
+            pair_frame = s_frame;
+            pair_w = s->pw;
+            pair_h = s->ph;
+            pair_pending = 1;
+        }
+    }
+    if (dump_every && (s_frame % (uint32_t)dump_every) == 0) {
         if (nv2a_gl_clip_mode() == 2)
             fprintf(stderr, "[MH-GL] clip alt frame %u clamp %d\n", s_frame, nv2a_gl_clip_alt_clamp(s_frame));
         size_t need = (size_t)s->pw * s->ph * 4;
