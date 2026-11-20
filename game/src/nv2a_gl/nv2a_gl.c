@@ -282,9 +282,51 @@ static float ambient_level(void)
     }
     return value;
 }
+/* MANHUNT_GL_FF_COLMAT=0: the old base colour, scene ambient only. Default:
+ * xemu's (vsh-ff.c) ambient source * SET_MATERIAL_EMISSION + emission source,
+ * so a prelit vertex colour routed in as emission is no longer dropped. */
+static int ff_colmat_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("MANHUNT_GL_FF_COLMAT");
+        on = !(e && *e == '0');
+        fprintf(stderr, "[MH-GL] fixed-function colour material: %s (MANHUNT_GL_FF_COLMAT)\n",
+                on ? "ambient/emission sources" : "scene ambient only");
+    }
+    return on;
+}
+/* The first distinct material set-ups of lit fixed-function draws, so a
+ * console run shows what the title routes where. */
+static void light_trace(const uint32_t *r, uint32_t lighting)
+{
+    static uint32_t seen[32];
+    static unsigned count;
+    const uint32_t key[] = {r[0x0298 / 4], r[0x03A8 / 4], r[0x03AC / 4], r[0x03B0 / 4],
+                            r[0x0A10 / 4], r[0x0A14 / 4], r[0x0A18 / 4], r[0x03BC / 4], lighting};
+    uint32_t h = 2166136261u;
+    for (unsigned i = 0; i < sizeof key / sizeof key[0]; i++)
+        h = (h ^ key[i]) * 16777619u;
+    for (unsigned i = 0; i < count; i++)
+        if (seen[i] == h)
+            return;
+    if (count == sizeof seen / sizeof seen[0])
+        return;
+    seen[count++] = h;
+    float f[6];
+    memcpy(f, &key[1], 12);
+    memcpy(f + 3, &key[4], 12);
+    fprintf(stderr, "[MH-GL] ffp material %u: colmat 0x%02X emission %.3f %.3f %.3f scene %.3f %.3f %.3f"
+            " lights 0x%04X vc %u\n", count, key[0], f[0], f[1], f[2], f[3], f[4], f[5], key[7],
+            (lighting >> 2) & 1u);
+}
 static void light_uniforms(const uint32_t *r, uint32_t lighting, float light[46][4])
 {
     nv2a_gl_light_uniforms(r, lighting, light);
+    if (lighting & 1u)
+        light_trace(r, lighting);
+    if (!ff_colmat_on())
+        memset(light[5], 0, sizeof light[5]);
     float ambient = ambient_level();
     if ((lighting & 1u) && ambient >= 0.0f)
         light[1][0] = light[1][1] = light[1][2] = ambient;

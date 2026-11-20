@@ -248,3 +248,18 @@ Results:
   - In those frames a dark shape with straight edges covers the lower and left parts of the frame. The lit street behind shows through a rectangular gap. This matches the item 1 description.
   - Run A never reached that spot: its camera ended up behind a chain-link fence, which is see-through by design. The fix is therefore not yet shown to remove the effect.
   - Settling it needs both settings at one camera position. Two options: a run that switches the clamp at runtime, or a run with the fix that reaches the car park seen in B.
+
+## Dark world, not dark player: colour-material sources — 2026-11-19
+
+The real cause of item 3 is in the world, not the characters.
+
+- **Cause:** the GL fixed-function shader used the scene ambient as its base colour and ignored the emission and ambient sources of `SET_COLOR_MATERIAL`.
+  - A console trace (`MANHUNT_GL_FF_COLMAT`, `[MH-GL] ffp material`) shows Manhunt's lit world draws use `colmat 0x01` or `0x11`, with `SET_MATERIAL_EMISSION` 1.0 and scene ambient 0. In these draws the emission source is the vertex colour, which is the world's baked (prelit) lighting.
+  - That term was dropped, so the world got only its direct lights and came out near black.
+  - The 0.33 ambient override hid this for the world but not for the vertex-program characters.
+- **Fix:** the base colour now follows xemu (`vsh-ff.c`): the ambient source × `SET_MATERIAL_EMISSION`, plus the emission source. Each source is the scene ambient, the vertex colour or the specular colour. `MANHUNT_GL_FF_COLMAT=0` restores the old base colour. The CPU `lit_color` path in the runtime patches does not have this fix yet.
+- **Console run C:** NRO `0612576f…`, `MANHUNT_AMBIENT_LIGHT=-1`, same script as runs A and B. Logs and frames: `game/build/hw-test/2026-11-19-colmat-c/`.
+  - Mean frame luminance over 112–199 s is 19.9, against 8.4 for the old path with the same ambient (run B) and 35.2 for the 0.33 lift (run A).
+  - The street and walls show their baked lighting, and the player is lit like the world around them (`c_sheet.png`).
+- **Host test:** `tests/shader-lighting` checks five colour-material cases against the formula.
+- With this fix the release keeps `MANHUNT_AMBIENT_LIGHT=-1`. The 0.33 default in the code would now add to correct lighting, so it should be revisited.

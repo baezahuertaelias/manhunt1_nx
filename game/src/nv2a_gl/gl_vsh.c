@@ -542,7 +542,7 @@ const char *nv2a_gl_vsh_main_program(void)
     "uniform vec4 u_light[46];\n" \
     "#endif\n" \
     decl \
-    "vec4 nv2a_ffp_diffuse(vec4 pos, vec4 normal, vec4 vc) {\n" \
+    "vec4 nv2a_ffp_diffuse(vec4 pos, vec4 normal, vec4 vc, vec4 spec) {\n" \
     "    if (u_light[0].x == 0.0) return vc;\n" \
     "    vec3 e, n;\n" \
     "    for (int k = 0; k < 3; ++k) {\n" \
@@ -552,7 +552,9 @@ const char *nv2a_gl_vsh_main_program(void)
     "    float len = length(n);\n" \
     "    if (len > 1e-8) n /= len;\n" \
     "    if (u_light[0].w != 0.0 && dot(n,e) > 0.0) n = -n;\n" \
-    "    vec3 color = u_light[1].rgb;\n" \
+    "    int m = int(u_light[5].w), as = m & 3, es = m >> 2;\n" \
+    "    vec3 color = (as == 1 ? vc.rgb : as == 2 ? spec.rgb : u_light[1].rgb) * u_light[5].rgb\n" \
+    "               + (es == 1 ? vc.rgb : es == 2 ? spec.rgb : u_light[1].rgb);\n" \
     "    for (int i = 0; i < 8; ++i) {\n" \
     "        int b = 6 + i * 5;\n" \
     "        int kind = int(u_light[b].w);\n" \
@@ -578,7 +580,8 @@ const char *nv2a_gl_vsh_main_program(void)
     "    }\n" \
     "    return clamp(vec4(color, u_light[0].z != 0.0 ? vc.a : u_light[1].a), 0.0, 1.0);\n" \
     "}\n" \
-    "#define NV2A_DIFFUSE nv2a_ffp_diffuse(v0, v2, v3)\n"
+    "vec4 nv2a_ffp_diffuse(vec4 pos, vec4 normal, vec4 vc) { return nv2a_ffp_diffuse(pos, normal, vc, vec4(0.0)); }\n" \
+    "#define NV2A_DIFFUSE nv2a_ffp_diffuse(v0, v2, v3, v4)\n"
 
 #define NV2A_STR2(x) #x
 #define NV2A_STR(x) NV2A_STR2(x)

@@ -15,6 +15,16 @@ static inline void nv2a_gl_light_uniforms(const uint32_t *r, uint32_t lighting, 
             memcpy(light[1], r + 0x0A10 / 4, 12);
             memcpy(&light[1][3], r + 0x03B4 / 4, 4);
             memcpy(light[2], r + 0x0480 / 4, 3 * 16);
+            /* Row 5: SET_MATERIAL_EMISSION and the ambient (bits 0-1) and
+             * emission (bits 2-3) sources of SET_COLOR_MATERIAL; 1 is the
+             * vertex colour, 2 the specular colour, else the scene ambient. */
+            memcpy(light[5], r + 0x03A8 / 4, 12);
+            {
+                uint32_t as = (cm >> 2) & 3, es = cm & 3;
+                if (as == 3 || (as == 1 && !(lighting & 4u))) as = 0;
+                if (es == 3 || (es == 1 && !(lighting & 4u))) es = 0;
+                light[5][3] = (float)(as | es << 2);
+            }
             for (int i = 0; i < 8; ++i) {
                 const unsigned base = (0x1000 + i * 0x80) / 4, row = 6 + i * 5;
                 memcpy(light[row], r + base, 12);
